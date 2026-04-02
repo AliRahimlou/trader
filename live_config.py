@@ -26,11 +26,15 @@ def _env_bool(name: str, default: bool) -> bool:
 class PaperTradingConfig:
     symbol: str
     strategies: tuple[str, ...]
+    startup_timeout_seconds: float
     poll_seconds: float
     entry_timeout_seconds: int
     minute_lookback: str
     five_minute_lookback: str
     daily_lookback: str
+    minute_refresh_window: str
+    five_minute_refresh_window: str
+    daily_refresh_window: str
     max_bar_age_seconds: int
     max_position_qty: float
     max_position_notional: float
@@ -41,6 +45,7 @@ class PaperTradingConfig:
     flatten_at: str
     exit_mode: str
     allow_fractional_long: bool
+    database_path: Path
     log_dir: Path
     state_dir: Path
     strategy_config: BacktestConfig
@@ -53,6 +58,7 @@ class PaperTradingConfig:
     smoke_test_notional: float
     keep_state_days: int
     alpaca_feed: str | None
+    demo_mode: bool
 
     @property
     def state_path(self) -> Path:
@@ -72,6 +78,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the FVG strategy live on Alpaca paper.")
     parser.add_argument("--symbol", default=_env("LIVE_PAPER_SYMBOL", "SPY"))
     parser.add_argument(
+        "--startup-timeout-seconds",
+        type=float,
+        default=float(_env("LIVE_PAPER_STARTUP_TIMEOUT_SECONDS", "20")),
+    )
+    parser.add_argument(
         "--strategy",
         choices=SUPPORTED_STRATEGIES,
         default=_env("LIVE_PAPER_STRATEGY", "both"),
@@ -85,6 +96,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minute-lookback", default=_env("LIVE_PAPER_MINUTE_LOOKBACK", "3d"))
     parser.add_argument("--five-minute-lookback", default=_env("LIVE_PAPER_FIVE_MINUTE_LOOKBACK", "15d"))
     parser.add_argument("--daily-lookback", default=_env("LIVE_PAPER_DAILY_LOOKBACK", "60d"))
+    parser.add_argument(
+        "--minute-refresh-window",
+        default=_env("LIVE_PAPER_MINUTE_REFRESH_WINDOW", "2h"),
+    )
+    parser.add_argument(
+        "--five-minute-refresh-window",
+        default=_env("LIVE_PAPER_FIVE_MINUTE_REFRESH_WINDOW", "5d"),
+    )
+    parser.add_argument(
+        "--daily-refresh-window",
+        default=_env("LIVE_PAPER_DAILY_REFRESH_WINDOW", "20d"),
+    )
     parser.add_argument(
         "--max-bar-age-seconds",
         type=int,
@@ -146,6 +169,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=not _env_bool("LIVE_PAPER_ALLOW_FRACTIONAL_LONG", True),
     )
+    parser.add_argument(
+        "--database-path",
+        default=_env("LIVE_PAPER_DATABASE_PATH", "runtime/operator/paper_trading.db"),
+    )
     parser.add_argument("--log-dir", default=_env("LIVE_PAPER_LOG_DIR", "runtime/logs"))
     parser.add_argument("--state-dir", default=_env("LIVE_PAPER_STATE_DIR", "runtime/state"))
     parser.add_argument(
@@ -165,6 +192,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=float(_env("LIVE_PAPER_SMOKE_TEST_NOTIONAL", "10")),
     )
     parser.add_argument(
+        "--demo-mode",
+        action="store_true",
+        default=_env_bool("PAPER_PLATFORM_DEMO_MODE", False),
+    )
+    parser.add_argument(
         "--alpaca-feed",
         choices=("iex", "sip", "boats", "overnight"),
         default=_env("LIVE_PAPER_ALPACA_FEED", ""),
@@ -178,11 +210,15 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
     return PaperTradingConfig(
         symbol=args.symbol.upper(),
         strategies=strategies,
+        startup_timeout_seconds=args.startup_timeout_seconds,
         poll_seconds=args.poll_seconds,
         entry_timeout_seconds=args.entry_timeout_seconds,
         minute_lookback=args.minute_lookback,
         five_minute_lookback=args.five_minute_lookback,
         daily_lookback=args.daily_lookback,
+        minute_refresh_window=args.minute_refresh_window,
+        five_minute_refresh_window=args.five_minute_refresh_window,
+        daily_refresh_window=args.daily_refresh_window,
         max_bar_age_seconds=args.max_bar_age_seconds,
         max_position_qty=args.max_position_qty,
         max_position_notional=args.max_position_notional,
@@ -193,6 +229,7 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
         flatten_at=args.flatten_at,
         exit_mode=args.exit_mode,
         allow_fractional_long=not args.no_fractional_long,
+        database_path=Path(args.database_path),
         log_dir=Path(args.log_dir),
         state_dir=Path(args.state_dir),
         strategy_config=BacktestConfig(
@@ -213,7 +250,13 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
         smoke_test_notional=args.smoke_test_notional,
         keep_state_days=args.keep_state_days,
         alpaca_feed=args.alpaca_feed or None,
+        demo_mode=args.demo_mode,
     )
+
+
+def config_from_env() -> PaperTradingConfig:
+    parser = build_argument_parser()
+    return config_from_args(parser.parse_args([]))
 
 
 def build_alpaca_config(trading_config: PaperTradingConfig) -> AlpacaConfig:

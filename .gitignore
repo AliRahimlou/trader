@@ -4,3 +4,5 @@ __pycache__/
 .env
 runtime/
 .live_state_*.json
+dashboard/node_modules/
+dashboard/dist/

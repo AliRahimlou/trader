@@ -1,4 +1,6 @@
+fastapi
 pandas
 pandas_ta
 requests
+uvicorn
 yfinance
