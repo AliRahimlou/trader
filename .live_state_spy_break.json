@@ -1,0 +1,9 @@
+{
+  "active_trade": null,
+  "last_processed_bar": "2026-04-02T14:07:00-04:00",
+  "last_signal_key": null,
+  "strategy": "break",
+  "symbol": "SPY",
+  "trade_counts": {},
+  "trade_log": []
+}
