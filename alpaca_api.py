@@ -156,12 +156,13 @@ def list_orders(
     return list(response)
 
 
-def get_order(config: AlpacaConfig, order_id: str) -> dict[str, Any]:
+def get_order(config: AlpacaConfig, order_id: str, *, nested: bool = True) -> dict[str, Any]:
     encoded_order_id = quote(order_id, safe="")
     return _request_trading(
         config,
         "GET",
         f"/v2/orders/{encoded_order_id}",
+        params={"nested": str(nested).lower()},
         action=f"get order {order_id}",
     )
 
@@ -190,6 +191,9 @@ def submit_order(
     stop_price: float | None = None,
     extended_hours: bool = False,
     client_order_id: str | None = None,
+    order_class: str = "simple",
+    take_profit: dict[str, float] | None = None,
+    stop_loss: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     if (qty is None and notional is None) or (qty is not None and notional is not None):
         raise ValueError("Provide exactly one of qty or notional when submitting an order.")
@@ -199,6 +203,7 @@ def submit_order(
         "side": side,
         "type": order_type,
         "time_in_force": time_in_force,
+        "order_class": order_class,
     }
     if qty is not None:
         payload["qty"] = _format_number(qty)
@@ -212,6 +217,14 @@ def submit_order(
         payload["extended_hours"] = True
     if client_order_id:
         payload["client_order_id"] = client_order_id
+    if take_profit is not None:
+        payload["take_profit"] = {
+            "limit_price": _format_number(take_profit["limit_price"]),
+        }
+    if stop_loss is not None:
+        payload["stop_loss"] = {
+            key: _format_number(value) for key, value in stop_loss.items() if value is not None
+        }
 
     return _request_trading(
         config,
@@ -283,6 +296,42 @@ def fetch_market_data(
         "5m": fetch_stock_bars(symbol, "5m", five_min_start, end, config=config),
         "1d": fetch_stock_bars(symbol, "1d", daily_start, end, config=config),
     }
+
+
+def fetch_latest_bar(config: AlpacaConfig, symbol: str) -> dict[str, Any]:
+    response = requests.get(
+        f"{config.data_base_url}/v2/stocks/bars/latest",
+        headers=config.headers,
+        params={"symbols": symbol.upper(), "feed": config.feed},
+        timeout=30,
+    )
+    _raise_for_status(response, f"fetch latest bar for {symbol}")
+    payload = response.json()
+    return payload["bars"][symbol.upper()]
+
+
+def fetch_latest_trade(config: AlpacaConfig, symbol: str) -> dict[str, Any]:
+    response = requests.get(
+        f"{config.data_base_url}/v2/stocks/trades/latest",
+        headers=config.headers,
+        params={"symbols": symbol.upper(), "feed": config.feed},
+        timeout=30,
+    )
+    _raise_for_status(response, f"fetch latest trade for {symbol}")
+    payload = response.json()
+    return payload["trades"][symbol.upper()]
+
+
+def fetch_latest_quote(config: AlpacaConfig, symbol: str) -> dict[str, Any]:
+    response = requests.get(
+        f"{config.data_base_url}/v2/stocks/quotes/latest",
+        headers=config.headers,
+        params={"symbols": symbol.upper(), "feed": config.feed},
+        timeout=30,
+    )
+    _raise_for_status(response, f"fetch latest quote for {symbol}")
+    payload = response.json()
+    return payload["quotes"][symbol.upper()]
 
 
 def fetch_stock_bars(

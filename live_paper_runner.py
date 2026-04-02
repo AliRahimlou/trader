@@ -1,498 +1,724 @@
 from __future__ import annotations
 
-import argparse
-import json
-import logging
 import time
-import uuid
-from pathlib import Path
+from dataclasses import replace
 from typing import Any
 
 import pandas as pd
 
 from alpaca_api import (
-    AlpacaConfig,
     close_position,
+    fetch_account,
     fetch_clock,
+    fetch_latest_quote,
+    fetch_latest_trade,
     fetch_stock_bars,
+    format_account_summary,
     format_order_summary,
     get_asset,
-    get_order,
     get_position,
-    list_orders,
-    list_positions,
     period_to_start,
     submit_order,
     wait_for_order_terminal,
 )
-from backtest_utils import BacktestConfig, check_exit, configure_logging
-from live_signals import TradeSignal, generate_break_signal, generate_pullback_signal
-
-LOGGER = logging.getLogger(__name__)
-ET_TZ = "America/New_York"
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the FVG strategy live on Alpaca paper.")
-    parser.add_argument("--symbol", default="SPY", help="Ticker symbol to trade.")
-    parser.add_argument(
-        "--strategy",
-        choices=("break", "pullback"),
-        default="break",
-        help="Which strategy to run live.",
-    )
-    parser.add_argument("--poll-seconds", type=float, default=5.0, help="Polling interval while waiting for new bars.")
-    parser.add_argument("--entry-timeout-seconds", type=int, default=30, help="How long to wait for market orders to fill.")
-    parser.add_argument("--minute-lookback", default="3d", help="1-minute bar lookback for each polling cycle.")
-    parser.add_argument("--five-minute-lookback", default="15d", help="5-minute bar lookback for each polling cycle.")
-    parser.add_argument("--daily-lookback", default="30d", help="Daily bar lookback for each polling cycle.")
-    parser.add_argument("--risk-per-trade", type=float, default=100.0, help="Target dollar risk per trade.")
-    parser.add_argument("--rr-ratio", type=float, default=2.0, help="Reward:risk ratio for the break strategy.")
-    parser.add_argument("--value-per-point", type=float, default=1.0, help="P&L value of a one-point move per share or unit.")
-    parser.add_argument("--commission-per-unit", type=float, default=0.0, help="Per-unit commission for realized PnL logging.")
-    parser.add_argument("--min-gap-pct", type=float, default=0.0, help="Minimum FVG size as a decimal percentage of price.")
-    parser.add_argument("--min-gap-atr", type=float, default=0.0, help="Minimum FVG size as a fraction of ATR(14).")
-    parser.add_argument("--no-displacement", action="store_true", help="Disable the middle-candle displacement requirement.")
-    parser.add_argument("--max-trades-per-day", type=int, default=2, help="Maximum new entries per trading day.")
-    parser.add_argument("--flatten-at", default="15:55", help="ET cutoff for flattening any open position.")
-    parser.add_argument("--no-fractional-long", action="store_true", help="Disable fractional sizing on long entries.")
-    parser.add_argument("--once", action="store_true", help="Run one cycle and exit.")
-    parser.add_argument("--dry-run", action="store_true", help="Log actions without submitting orders.")
-    parser.add_argument("--reset-state", action="store_true", help="Delete any existing runner state before starting.")
-    parser.add_argument("--state-file", help="Optional path to the JSON state file.")
-    parser.add_argument("--alpaca-feed", choices=("iex", "sip", "boats", "overnight"), default=None, help="Override the Alpaca stock market data feed.")
-    parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
-    return parser.parse_args()
+from live_config import PaperTradingConfig, build_alpaca_config, build_argument_parser, config_from_args
+from live_execution import (
+    ensure_no_unmanaged_broker_state,
+    ensure_paper_account,
+    reconcile_active_trade,
+    request_flatten,
+    submit_entry,
+)
+from live_logging import StructuredLogger, setup_console_logging
+from live_risk import evaluate_entry_risk
+from live_scheduler import StaleDataError, parse_hhmm, session_key, to_et_timestamp, validate_latest_bar
+from live_state import RunnerState, StateStore
+from strategy_signals import (
+    StrategySignal,
+    detect_break_setup,
+    detect_pullback_setup,
+    get_opening_range_bar,
+    materialize_signal,
+)
 
 
 def main() -> None:
-    args = parse_args()
-    configure_logging(args.verbose)
-    config = build_alpaca_config(args)
-    require_paper_account(config)
-    strategy_config = BacktestConfig(
-        risk_per_trade=args.risk_per_trade,
-        rr_ratio=args.rr_ratio,
-        value_per_point=args.value_per_point,
-        commission_per_unit=args.commission_per_unit,
-        min_gap_pct=args.min_gap_pct,
-        min_gap_atr=args.min_gap_atr,
-        require_displacement=not args.no_displacement,
-    )
-    state_path = build_state_path(args)
-    if args.reset_state and state_path.exists():
-        state_path.unlink()
-    state = load_state(state_path, symbol=args.symbol, strategy=args.strategy)
-    ensure_managed_account_state(config, args.symbol, state)
+    parser = build_argument_parser()
+    args = parser.parse_args()
+    trading_config = config_from_args(args)
+    setup_console_logging(args.verbose)
+    event_logger = StructuredLogger(trading_config.log_path)
+    alpaca_config = build_alpaca_config(trading_config)
+    ensure_paper_account(alpaca_config)
 
-    LOGGER.info(
-        "Starting live paper runner for %s strategy=%s dry_run=%s state=%s",
-        args.symbol,
-        args.strategy,
-        args.dry_run,
-        state_path,
+    if not trading_config.dry_run and not trading_config.paper_confirm:
+        raise SystemExit("Refusing to run paper execution without --paper-confirm.")
+
+    state_store = StateStore(trading_config.state_path)
+    if trading_config.reset_state and trading_config.state_path.exists():
+        trading_config.state_path.unlink()
+    state = state_store.load(symbol=trading_config.symbol, strategies=list(trading_config.strategies))
+    state.prune(trading_config.keep_state_days)
+
+    account = fetch_account(alpaca_config)
+    event_logger.emit(
+        "runner_start",
+        message=f"Runner started for {trading_config.symbol}. {format_account_summary(account)}",
+        symbol=trading_config.symbol,
+        strategies=list(trading_config.strategies),
+        dry_run=trading_config.dry_run,
+        once=trading_config.once,
+        exit_mode=trading_config.exit_mode,
+        state_path=str(trading_config.state_path),
+        log_path=str(trading_config.log_path),
     )
 
     try:
+        startup_reconcile(alpaca_config, trading_config, state, event_logger)
+        state_store.save(state)
+
+        if trading_config.smoke_test:
+            run_smoke_test(alpaca_config, trading_config, event_logger)
+            return
+
         while True:
-            run_cycle(args, config, strategy_config, state, state_path)
-            if args.once:
+            run_cycle(alpaca_config, trading_config, state, state_store, event_logger)
+            if trading_config.once:
                 return
-            time.sleep(args.poll_seconds)
+            time.sleep(trading_config.poll_seconds)
     except KeyboardInterrupt:
-        LOGGER.info("Runner interrupted by user.")
+        attempt_fail_safe_flatten(
+            alpaca_config,
+            trading_config,
+            state,
+            event_logger,
+            reason="operator_interrupt",
+        )
+        event_logger.emit("runner_shutdown", message="Runner interrupted by user.", symbol=trading_config.symbol)
+    except StaleDataError as exc:
+        attempt_fail_safe_flatten(
+            alpaca_config,
+            trading_config,
+            state,
+            event_logger,
+            reason="stale_data_fail_safe",
+        )
+        event_logger.emit(
+            "stale_data_halt",
+            level="ERROR",
+            message=f"Runner halted because market data is stale: {exc}",
+            symbol=trading_config.symbol,
+            error=str(exc),
+        )
+        raise SystemExit(str(exc)) from exc
+    except Exception as exc:
+        attempt_fail_safe_flatten(
+            alpaca_config,
+            trading_config,
+            state,
+            event_logger,
+            reason="runner_exception_fail_safe",
+        )
+        event_logger.emit(
+            "runner_error",
+            level="ERROR",
+            message=f"Runner stopped with error: {exc}",
+            symbol=trading_config.symbol,
+            error=str(exc),
+        )
+        raise
+    finally:
+        state_store.save(state)
+
+
+def startup_reconcile(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    event_logger: StructuredLogger,
+) -> None:
+    ensure_no_unmanaged_broker_state(
+        alpaca_config,
+        symbol=trading_config.symbol,
+        active_trade=state.active_trade,
+    )
+    if state.active_trade is None:
+        event_logger.emit(
+            "startup_reconcile",
+            message=f"No active persisted trade for {trading_config.symbol}.",
+            symbol=trading_config.symbol,
+        )
+        return
+
+    updated_trade, closure = reconcile_active_trade(
+        alpaca_config,
+        state.active_trade,
+        logger=event_logger,
+        strategy_config=trading_config.strategy_config,
+    )
+    state.active_trade = updated_trade
+    if closure is not None:
+        record_closure(state, closure.to_dict())
+        event_logger.emit(
+            "startup_trade_closed",
+            message=(
+                f"Startup reconciliation closed {trading_config.symbol} via {closure.exit_reason} "
+                f"net_pnl={closure.net_pnl:.2f}"
+            ),
+            symbol=trading_config.symbol,
+            exit_reason=closure.exit_reason,
+            net_pnl=closure.net_pnl,
+            closed_at=closure.closed_at,
+        )
+        return
+
+    if state.active_trade is not None:
+        maybe_count_trade(state, state.active_trade)
+    event_logger.emit(
+        "startup_reconcile",
+        message=f"Startup reconciliation completed for {trading_config.symbol}.",
+        symbol=trading_config.symbol,
+        has_active_trade=state.active_trade is not None,
+        active_trade_status=(state.active_trade or {}).get("status"),
+    )
 
 
 def run_cycle(
-    args: argparse.Namespace,
-    alpaca_config: AlpacaConfig,
-    strategy_config: BacktestConfig,
-    state: dict[str, Any],
-    state_path: Path,
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    state_store: StateStore,
+    event_logger: StructuredLogger,
 ) -> None:
     clock = fetch_clock(alpaca_config)
-    timestamp = pd.Timestamp(clock["timestamp"]).tz_convert(ET_TZ)
-    session_key = str(timestamp.date())
-    trim_old_state(state, session_key)
+    now = to_et_timestamp(clock["timestamp"])
+    state.prune(trading_config.keep_state_days)
 
     if not clock.get("is_open"):
-        LOGGER.info("Market is closed at %s. Next open: %s", timestamp, clock.get("next_open"))
-        save_state(state_path, state)
+        event_logger.emit(
+            "market_closed",
+            message=f"Market closed at {now}. Next open: {clock.get('next_open')}",
+            symbol=trading_config.symbol,
+            now=str(now),
+            next_open=clock.get("next_open"),
+        )
+        state_store.save(state)
         return
 
-    market_data = load_recent_market_data(args.symbol, alpaca_config, args)
+    market_data = load_market_context(alpaca_config, trading_config, clock["timestamp"])
     latest_bar_time = market_data["1m"].index.max()
-    last_processed_bar = parse_ts(state.get("last_processed_bar"))
+    validate_latest_bar(now, latest_bar_time, max_bar_age_seconds=trading_config.max_bar_age_seconds)
+    log_market_snapshot(alpaca_config, trading_config.symbol, latest_bar_time, market_data, event_logger)
+
+    last_processed_bar = to_et_timestamp(state.last_processed_bar) if state.last_processed_bar else None
     if last_processed_bar is not None and latest_bar_time <= last_processed_bar:
-        LOGGER.debug("No new 1-minute bar. Latest processed=%s current=%s", last_processed_bar, latest_bar_time)
-        save_state(state_path, state)
+        event_logger.emit(
+            "bar_unchanged",
+            level="DEBUG",
+            message=f"No new 1-minute bar. Latest processed={last_processed_bar} current={latest_bar_time}",
+            symbol=trading_config.symbol,
+            latest_bar_time=str(latest_bar_time),
+        )
+        state_store.save(state)
         return
 
-    LOGGER.info("Processing bar %s", latest_bar_time)
-    synchronize_active_trade(alpaca_config, args.symbol, state)
+    if state.active_trade is not None:
+        reconcile_open_trade(alpaca_config, trading_config, state, event_logger)
 
-    if state.get("active_trade"):
-        maybe_exit_position(args, alpaca_config, strategy_config, state, latest_bar_time, market_data["1m"])
-    elif timestamp.time() >= parse_hhmm(args.flatten_at):
-        LOGGER.info("Past flatten cutoff %s ET. No new entries.", args.flatten_at)
-    elif state["trade_counts"].get(session_key, 0) >= args.max_trades_per_day:
-        LOGGER.info("Max trades reached for %s. Skipping new entries.", session_key)
-    else:
-        maybe_enter_position(args, alpaca_config, strategy_config, state, market_data)
+    if state.active_trade is None:
+        ensure_no_unmanaged_broker_state(
+            alpaca_config,
+            symbol=trading_config.symbol,
+            active_trade=None,
+        )
 
-    state["last_processed_bar"] = latest_bar_time.isoformat()
-    save_state(state_path, state)
-
-
-def maybe_enter_position(
-    args: argparse.Namespace,
-    alpaca_config: AlpacaConfig,
-    strategy_config: BacktestConfig,
-    state: dict[str, Any],
-    market_data: dict[str, pd.DataFrame],
-) -> None:
-    signal = build_signal(args.strategy, market_data, strategy_config)
-    if signal is None:
-        LOGGER.debug("No entry signal.")
-        return
-
-    if state.get("last_signal_key") == signal.signal_key:
-        LOGGER.debug("Signal %s already processed.", signal.signal_key)
-        return
-
-    asset = get_asset(alpaca_config, args.symbol)
-    if not asset.get("tradable"):
-        LOGGER.warning("Asset %s is not tradable.", args.symbol)
-        return
-
-    quantity = determine_order_quantity(signal, asset, strategy_config, allow_fractional_long=not args.no_fractional_long)
-    if quantity <= 0:
-        LOGGER.info("Signal %s skipped because calculated quantity is zero.", signal.signal_key)
-        state["last_signal_key"] = signal.signal_key
-        return
-
-    if signal.direction == "short" and not asset.get("shortable"):
-        LOGGER.warning("Short signal skipped because %s is not shortable.", args.symbol)
-        state["last_signal_key"] = signal.signal_key
-        return
-
-    LOGGER.info(
-        "Signal %s: %s qty=%s est_entry=%.4f stop=%.4f target=%.4f",
-        signal.strategy_name,
-        signal.reason,
-        quantity,
-        signal.estimated_entry_price,
-        signal.stop_price,
-        signal.target_price,
-    )
-    state["last_signal_key"] = signal.signal_key
-
-    if args.dry_run:
-        LOGGER.info("Dry run enabled. Entry order not submitted.")
-        return
-
-    order_side = "buy" if signal.direction == "long" else "sell"
-    order = submit_order(
-        alpaca_config,
-        symbol=args.symbol,
-        side=order_side,
-        order_type="market",
-        time_in_force="day",
-        qty=quantity,
-        client_order_id=build_client_order_id(signal.strategy_id),
-    )
-    LOGGER.info("Entry submitted: %s", format_order_summary(order))
-    final_order = wait_for_order_terminal(
-        alpaca_config,
-        order["id"],
-        timeout_seconds=args.entry_timeout_seconds,
-    )
-    LOGGER.info("Entry final: %s", format_order_summary(final_order))
-    if final_order.get("status") != "filled":
-        LOGGER.warning("Entry order did not fill. Final status=%s", final_order.get("status"))
-        return
-
-    entry_fill_price = float(final_order["filled_avg_price"])
-    filled_qty = float(final_order["filled_qty"])
-    active_trade = create_active_trade(signal, entry_fill_price, filled_qty, strategy_config, final_order["id"])
-    state["active_trade"] = active_trade
-    session_key = str(signal.signal_time.date())
-    state["trade_counts"][session_key] = state["trade_counts"].get(session_key, 0) + 1
-
-
-def maybe_exit_position(
-    args: argparse.Namespace,
-    alpaca_config: AlpacaConfig,
-    strategy_config: BacktestConfig,
-    state: dict[str, Any],
-    latest_bar_time: pd.Timestamp,
-    minute_df: pd.DataFrame,
-) -> None:
-    active_trade = state.get("active_trade")
-    if not active_trade:
-        return
-
-    latest_bar = minute_df.iloc[-1]
-    direction = active_trade["direction"]
-    stop_price = float(active_trade["stop_price"])
-    target_price = float(active_trade["target_price"])
-    exit_price, reason = check_exit(latest_bar, direction, stop_price, target_price)
-
-    if exit_price is None and latest_bar_time.time() >= parse_hhmm(args.flatten_at):
-        reason = "flatten"
-
-    if reason is None:
-        LOGGER.debug("Open %s position still active.", direction)
-        return
-
-    LOGGER.info(
-        "Exit triggered for %s because %s. stop=%.4f target=%.4f",
-        args.symbol,
-        reason,
-        stop_price,
-        target_price,
-    )
-
-    if args.dry_run:
-        LOGGER.info("Dry run enabled. Exit order not submitted.")
-        return
-
-    close_order = close_position(alpaca_config, args.symbol)
-    LOGGER.info("Close submitted: %s", format_order_summary(close_order))
-    final_order = wait_for_order_terminal(
-        alpaca_config,
-        close_order["id"],
-        timeout_seconds=args.entry_timeout_seconds,
-    )
-    LOGGER.info("Close final: %s", format_order_summary(final_order))
-    if final_order.get("status") != "filled":
-        LOGGER.warning("Close order did not fill. Final status=%s", final_order.get("status"))
-        return
-
-    exit_fill_price = float(final_order["filled_avg_price"])
-    exit_qty = float(final_order["filled_qty"])
-    trade_record = finalize_trade(active_trade, exit_fill_price, exit_qty, latest_bar_time, reason, strategy_config)
-    state.setdefault("trade_log", []).append(trade_record)
-    state["active_trade"] = None
-
-
-def build_signal(
-    strategy_name: str,
-    market_data: dict[str, pd.DataFrame],
-    strategy_config: BacktestConfig,
-) -> TradeSignal | None:
-    if strategy_name == "break":
-        return generate_break_signal(market_data["1m"], market_data["5m"], config=strategy_config)
-    return generate_pullback_signal(market_data["1m"], market_data["1d"], config=strategy_config)
-
-
-def determine_order_quantity(
-    signal: TradeSignal,
-    asset: dict[str, Any],
-    strategy_config: BacktestConfig,
-    *,
-    allow_fractional_long: bool,
-) -> float:
-    if signal.direction == "long" and allow_fractional_long and asset.get("fractionable"):
-        stop_distance = abs(signal.estimated_entry_price - signal.stop_price)
-        if stop_distance <= 0 or strategy_config.value_per_point <= 0:
-            return 0.0
-        raw_qty = strategy_config.risk_per_trade / (stop_distance * strategy_config.value_per_point)
-        return float(format(raw_qty, ".6f"))
-    return signal.quantity
-
-
-def create_active_trade(
-    signal: TradeSignal,
-    entry_fill_price: float,
-    filled_qty: float,
-    strategy_config: BacktestConfig,
-    order_id: str,
-) -> dict[str, Any]:
-    target_price = signal.target_price
-    if signal.strategy_id == "break":
-        if signal.direction == "long":
-            target_price = entry_fill_price + (entry_fill_price - signal.stop_price) * strategy_config.rr_ratio
+    if now.time() >= parse_hhmm(trading_config.flatten_at):
+        if state.active_trade is not None:
+            handle_flatten(alpaca_config, trading_config, state, event_logger, reason="end_of_day_flatten")
         else:
-            target_price = entry_fill_price - (signal.stop_price - entry_fill_price) * strategy_config.rr_ratio
-
-    return {
-        "strategy_id": signal.strategy_id,
-        "strategy_name": signal.strategy_name,
-        "direction": signal.direction,
-        "entry_time": signal.signal_time.isoformat(),
-        "entry_fill_price": entry_fill_price,
-        "quantity": filled_qty,
-        "stop_price": signal.stop_price,
-        "target_price": target_price,
-        "entry_order_id": order_id,
-        "signal_key": signal.signal_key,
-        "reason": signal.reason,
-    }
-
-
-def finalize_trade(
-    active_trade: dict[str, Any],
-    exit_fill_price: float,
-    exit_qty: float,
-    exit_time: pd.Timestamp,
-    reason: str,
-    strategy_config: BacktestConfig,
-) -> dict[str, Any]:
-    quantity = min(float(active_trade["quantity"]), exit_qty)
-    entry_fill_price = float(active_trade["entry_fill_price"])
-    if active_trade["direction"] == "long":
-        gross_points = exit_fill_price - entry_fill_price
-    else:
-        gross_points = entry_fill_price - exit_fill_price
-    gross_pnl = gross_points * quantity * strategy_config.value_per_point
-    commissions = quantity * strategy_config.commission_per_unit * 2
-    net_pnl = gross_pnl - commissions
-    return {
-        **active_trade,
-        "exit_time": exit_time.isoformat(),
-        "exit_fill_price": exit_fill_price,
-        "exit_quantity": exit_qty,
-        "gross_pnl": gross_pnl,
-        "commissions": commissions,
-        "net_pnl": net_pnl,
-        "reason": reason,
-    }
-
-
-def synchronize_active_trade(alpaca_config: AlpacaConfig, symbol: str, state: dict[str, Any]) -> None:
-    active_trade = state.get("active_trade")
-    if not active_trade:
+            event_logger.emit(
+                "flatten_window",
+                message=f"Past flatten cutoff {trading_config.flatten_at} ET; no new entries.",
+                symbol=trading_config.symbol,
+                now=str(now),
+            )
+        state.last_processed_bar = latest_bar_time.isoformat()
+        state_store.save(state)
         return
 
-    try:
-        position = get_position(alpaca_config, symbol)
-    except RuntimeError:
-        LOGGER.warning("No open broker position for %s. Clearing local active trade state.", symbol)
-        state["active_trade"] = None
-        return
+    if state.active_trade is not None and trading_config.exit_mode == "in_process":
+        maybe_request_in_process_exit(alpaca_config, trading_config, state, market_data["1m"], event_logger)
 
-    active_trade["quantity"] = float(position["qty"])
+    if state.active_trade is None:
+        maybe_submit_new_entry(alpaca_config, trading_config, state, market_data, now, event_logger)
 
-
-def ensure_managed_account_state(alpaca_config: AlpacaConfig, symbol: str, state: dict[str, Any]) -> None:
-    active_trade = state.get("active_trade")
-    open_positions = [position for position in list_positions(alpaca_config) if position["symbol"] == symbol.upper()]
-    open_orders = [order for order in list_orders(alpaca_config, status="open", limit=100) if order["symbol"] == symbol.upper()]
-
-    if active_trade is None and open_positions:
-        raise SystemExit(
-            f"Refusing to start because {symbol} already has an unmanaged open position. "
-            "Close it manually or reset the state file if this runner should adopt it."
-        )
-    if active_trade is None and open_orders:
-        raise SystemExit(
-            f"Refusing to start because {symbol} already has unmanaged open orders. "
-            "Cancel them manually before running this script."
-        )
+    state.last_processed_bar = latest_bar_time.isoformat()
+    state_store.save(state)
 
 
-def load_recent_market_data(symbol: str, alpaca_config: AlpacaConfig, args: argparse.Namespace) -> dict[str, pd.DataFrame]:
-    end = pd.Timestamp.now(tz="UTC")
+def load_market_context(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    clock_timestamp: str,
+) -> dict[str, pd.DataFrame]:
+    end = _to_utc_timestamp(clock_timestamp)
     return {
         "1m": fetch_stock_bars(
-            symbol,
+            trading_config.symbol,
             "1m",
-            period_to_start(end, args.minute_lookback),
+            period_to_start(end, trading_config.minute_lookback),
             end,
             config=alpaca_config,
         ),
         "5m": fetch_stock_bars(
-            symbol,
+            trading_config.symbol,
             "5m",
-            period_to_start(end, args.five_minute_lookback),
+            period_to_start(end, trading_config.five_minute_lookback),
             end,
             config=alpaca_config,
         ),
         "1d": fetch_stock_bars(
-            symbol,
+            trading_config.symbol,
             "1d",
-            period_to_start(end, args.daily_lookback),
+            period_to_start(end, trading_config.daily_lookback),
             end,
             config=alpaca_config,
         ),
     }
 
 
-def build_alpaca_config(args: argparse.Namespace) -> AlpacaConfig:
-    config = AlpacaConfig.from_env()
-    if args.alpaca_feed:
-        config = AlpacaConfig(
-            api_key_id=config.api_key_id,
-            api_secret_key=config.api_secret_key,
-            trading_base_url=config.trading_base_url,
-            data_base_url=config.data_base_url,
-            feed=args.alpaca_feed,
+def log_market_snapshot(
+    alpaca_config,
+    symbol: str,
+    latest_bar_time: pd.Timestamp,
+    market_data: dict[str, pd.DataFrame],
+    event_logger: StructuredLogger,
+) -> None:
+    trade = fetch_latest_trade(alpaca_config, symbol)
+    quote = fetch_latest_quote(alpaca_config, symbol)
+    event_logger.emit(
+        "market_snapshot",
+        level="DEBUG",
+        message=(
+            f"Fresh bars loaded for {symbol}. latest_bar={latest_bar_time} "
+            f"latest_trade={trade['t']} latest_quote={quote['t']}"
+        ),
+        symbol=symbol,
+        latest_bar_time=str(latest_bar_time),
+        latest_trade_timestamp=trade["t"],
+        latest_trade_price=trade["p"],
+        latest_quote_timestamp=quote["t"],
+        bid=quote["bp"],
+        ask=quote["ap"],
+        rows_1m=len(market_data["1m"]),
+        rows_5m=len(market_data["5m"]),
+        rows_1d=len(market_data["1d"]),
+    )
+
+
+def maybe_submit_new_entry(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    market_data: dict[str, pd.DataFrame],
+    now: pd.Timestamp,
+    event_logger: StructuredLogger,
+) -> None:
+    latest_trade = fetch_latest_trade(alpaca_config, trading_config.symbol)
+    reference_price = float(latest_trade["p"])
+    account = fetch_account(alpaca_config)
+    asset = get_asset(alpaca_config, trading_config.symbol)
+    signals = collect_latest_signals(market_data, trading_config, reference_price)
+
+    if not signals:
+        event_logger.emit(
+            "no_signal",
+            level="DEBUG",
+            message=f"No live signal for {trading_config.symbol} on bar {market_data['1m'].index.max()}",
+            symbol=trading_config.symbol,
         )
-    return config
+        return
+
+    for signal in signals:
+        signal_day_key = session_key(signal.signal_time)
+        if state.is_signal_processed(signal_day_key, signal.signal_key):
+            event_logger.emit(
+                "duplicate_signal_skipped",
+                level="DEBUG",
+                message=f"Duplicate signal skipped: {signal.signal_key}",
+                symbol=trading_config.symbol,
+                signal_key=signal.signal_key,
+            )
+            continue
+
+        risk_decision = evaluate_entry_risk(
+            signal,
+            state=state,
+            account=account,
+            asset=asset,
+            now=now,
+            max_position_qty=trading_config.max_position_qty,
+            max_position_notional=trading_config.max_position_notional,
+            max_daily_loss=trading_config.max_daily_loss,
+            max_trades_per_day=trading_config.max_trades_per_day,
+            cooldown_minutes=trading_config.cooldown_minutes,
+            one_position_per_symbol=trading_config.one_position_per_symbol,
+            exit_mode=trading_config.exit_mode,
+            allow_fractional_long=trading_config.allow_fractional_long,
+        )
+        state.mark_signal_processed(signal_day_key, signal.signal_key)
+
+        event_logger.emit(
+            "signal_evaluated",
+            message=(
+                f"Evaluated {signal.strategy_name} signal {signal.signal_key} "
+                f"allowed={risk_decision.allowed} qty={risk_decision.approved_qty}"
+            ),
+            symbol=trading_config.symbol,
+            strategy=signal.strategy_id,
+            signal_key=signal.signal_key,
+            direction=signal.direction,
+            stop_price=signal.stop_price,
+            target_price=signal.target_price,
+            requested_qty=signal.quantity,
+            approved_qty=risk_decision.approved_qty,
+            reasons=list(risk_decision.reasons),
+        )
+        if not risk_decision.allowed:
+            continue
+
+        approved_signal = replace(signal, quantity=risk_decision.approved_qty)
+        if trading_config.dry_run:
+            event_logger.emit(
+                "entry_dry_run",
+                message=(
+                    f"Dry run: would submit {approved_signal.direction} {trading_config.symbol} "
+                    f"qty={approved_signal.quantity} for {approved_signal.strategy_name}"
+                ),
+                symbol=trading_config.symbol,
+                strategy=approved_signal.strategy_id,
+                signal_key=approved_signal.signal_key,
+                qty=approved_signal.quantity,
+            )
+            return
+
+        active_trade = submit_entry(
+            alpaca_config,
+            approved_signal,
+            symbol=trading_config.symbol,
+            qty=approved_signal.quantity,
+            exit_mode=trading_config.exit_mode,
+            entry_timeout_seconds=trading_config.entry_timeout_seconds,
+            logger=event_logger,
+        )
+        if active_trade.status == "entry_failed":
+            raise RuntimeError(f"Entry order failed for {trading_config.symbol}; stopping the runner.")
+
+        active_trade_payload = active_trade.to_dict()
+        maybe_count_trade(state, active_trade_payload)
+        state.active_trade = active_trade_payload
+        return
 
 
-def require_paper_account(config: AlpacaConfig) -> None:
-    if "paper-api.alpaca.markets" not in config.trading_base_url:
-        raise SystemExit(
-            f"Refusing to submit trades because APCA_API_BASE_URL is {config.trading_base_url}, not paper."
+def maybe_count_trade(state: RunnerState, active_trade_payload: dict[str, Any]) -> None:
+    if active_trade_payload.get("status") != "open" or active_trade_payload.get("trade_counted"):
+        return
+    state.increment_trade_count(session_key(active_trade_payload.get("opened_at") or active_trade_payload["signal_time"]))
+    active_trade_payload["trade_counted"] = True
+
+
+def collect_latest_signals(
+    market_data: dict[str, pd.DataFrame],
+    trading_config: PaperTradingConfig,
+    reference_price: float,
+) -> list[StrategySignal]:
+    signals: list[StrategySignal] = []
+    minute_df = market_data["1m"]
+    session_date = minute_df.index[-1].date()
+    session_1m = minute_df[minute_df.index.date == session_date].copy()
+    strategy_order = {strategy_id: index for index, strategy_id in enumerate(trading_config.strategies)}
+
+    if "break" in trading_config.strategies:
+        break_session = session_1m[session_1m.index.time > parse_hhmm("09:35")]
+        if len(break_session) >= 3:
+            opening_range_bar = get_opening_range_bar(market_data["5m"], session_date)
+            setup = detect_break_setup(
+                break_session,
+                opening_range_bar,
+                len(break_session) - 1,
+                config=trading_config.strategy_config,
+            )
+            signal = materialize_signal(setup, reference_price, config=trading_config.strategy_config)
+            if signal is not None:
+                signals.append(signal)
+
+    if "pullback" in trading_config.strategies and len(session_1m) >= 4:
+        setup = detect_pullback_setup(
+            session_1m,
+            market_data["1d"],
+            len(session_1m) - 2,
+            config=trading_config.strategy_config,
+        )
+        signal = materialize_signal(setup, reference_price, config=trading_config.strategy_config)
+        if signal is not None:
+            signals.append(signal)
+
+    signals.sort(key=lambda signal: (strategy_order[signal.strategy_id], signal.signal_time))
+    return signals
+
+
+def reconcile_open_trade(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    event_logger: StructuredLogger,
+) -> None:
+    updated_trade, closure = reconcile_active_trade(
+        alpaca_config,
+        state.active_trade,
+        logger=event_logger,
+        strategy_config=trading_config.strategy_config,
+    )
+    state.active_trade = updated_trade
+
+    if closure is not None:
+        record_closure(state, closure.to_dict())
+        event_logger.emit(
+            "trade_closed",
+            message=(
+                f"Trade closed for {trading_config.symbol} via {closure.exit_reason} "
+                f"net_pnl={closure.net_pnl:.2f}"
+            ),
+            symbol=trading_config.symbol,
+            exit_reason=closure.exit_reason,
+            net_pnl=closure.net_pnl,
+            closed_at=closure.closed_at,
+        )
+        return
+
+    if state.active_trade is not None:
+        maybe_count_trade(state, state.active_trade)
+
+
+def maybe_request_in_process_exit(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    minute_df: pd.DataFrame,
+    event_logger: StructuredLogger,
+) -> None:
+    active_trade = state.active_trade
+    if active_trade is None or active_trade.get("status") != "open" or active_trade.get("exit_order_id"):
+        return
+
+    latest_bar = minute_df.iloc[-1]
+    exit_reason = None
+    if active_trade["direction"] == "long":
+        if latest_bar["low"] <= active_trade["stop_price"]:
+            exit_reason = "stop"
+        elif latest_bar["high"] >= active_trade["target_price"]:
+            exit_reason = "target"
+    else:
+        if latest_bar["high"] >= active_trade["stop_price"]:
+            exit_reason = "stop"
+        elif latest_bar["low"] <= active_trade["target_price"]:
+            exit_reason = "target"
+
+    if exit_reason is None:
+        return
+
+    if trading_config.dry_run:
+        event_logger.emit(
+            "exit_dry_run",
+            message=f"Dry run: would flatten {trading_config.symbol} because {exit_reason}",
+            symbol=trading_config.symbol,
+            reason=exit_reason,
+        )
+        return
+
+    state.active_trade = request_flatten(
+        alpaca_config,
+        active_trade,
+        logger=event_logger,
+        reason=exit_reason,
+        entry_timeout_seconds=trading_config.entry_timeout_seconds,
+    )
+
+
+def handle_flatten(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    event_logger: StructuredLogger,
+    *,
+    reason: str,
+) -> None:
+    if state.active_trade is None:
+        return
+    if state.active_trade.get("exit_order_id"):
+        event_logger.emit(
+            "flatten_already_pending",
+            message=f"Flatten already pending for {trading_config.symbol}; skipping duplicate request.",
+            symbol=trading_config.symbol,
+            reason=reason,
+            order_id=state.active_trade["exit_order_id"],
+        )
+        return
+    if trading_config.dry_run:
+        event_logger.emit(
+            "flatten_dry_run",
+            message=f"Dry run: would flatten {trading_config.symbol} because {reason}",
+            symbol=trading_config.symbol,
+            reason=reason,
+        )
+        return
+    state.active_trade = request_flatten(
+        alpaca_config,
+        state.active_trade,
+        logger=event_logger,
+        reason=reason,
+        entry_timeout_seconds=trading_config.entry_timeout_seconds,
+    )
+
+
+def attempt_fail_safe_flatten(
+    alpaca_config,
+    trading_config: PaperTradingConfig,
+    state: RunnerState,
+    event_logger: StructuredLogger,
+    *,
+    reason: str,
+) -> None:
+    if trading_config.dry_run or trading_config.exit_mode != "in_process" or state.active_trade is None:
+        return
+    if state.active_trade.get("exit_order_id"):
+        return
+
+    try:
+        state.active_trade = request_flatten(
+            alpaca_config,
+            state.active_trade,
+            logger=event_logger,
+            reason=reason,
+            entry_timeout_seconds=trading_config.entry_timeout_seconds,
+        )
+        event_logger.emit(
+            "fail_safe_flatten_requested",
+            level="WARNING",
+            message=f"Submitted fail-safe flatten for {trading_config.symbol} because {reason}.",
+            symbol=trading_config.symbol,
+            reason=reason,
+            order_id=state.active_trade["exit_order_id"],
+        )
+    except Exception as exc:
+        event_logger.emit(
+            "fail_safe_flatten_error",
+            level="ERROR",
+            message=f"Failed to submit fail-safe flatten for {trading_config.symbol}: {exc}",
+            symbol=trading_config.symbol,
+            reason=reason,
+            error=str(exc),
         )
 
 
-def build_state_path(args: argparse.Namespace) -> Path:
-    if args.state_file:
-        return Path(args.state_file).expanduser().resolve()
-    filename = f".live_state_{args.symbol.lower()}_{args.strategy}.json"
-    return Path.cwd() / filename
+def run_smoke_test(alpaca_config, trading_config: PaperTradingConfig, event_logger: StructuredLogger) -> None:
+    clock = fetch_clock(alpaca_config)
+    if not clock.get("is_open"):
+        raise RuntimeError("Smoke test requires the market to be open.")
 
+    symbol = (trading_config.smoke_test_symbol or trading_config.symbol).upper()
+    asset = get_asset(alpaca_config, symbol)
+    if not asset.get("tradable"):
+        raise RuntimeError(f"{symbol} is not tradable for the smoke test.")
+    if not asset.get("fractionable"):
+        raise RuntimeError(f"{symbol} is not fractionable; smoke test uses a notional order.")
 
-def load_state(path: Path, *, symbol: str, strategy: str) -> dict[str, Any]:
-    if not path.exists():
-        return {
-            "symbol": symbol.upper(),
-            "strategy": strategy,
-            "last_processed_bar": None,
-            "last_signal_key": None,
-            "trade_counts": {},
-            "trade_log": [],
-            "active_trade": None,
-        }
-
-    state = json.loads(path.read_text())
-    if state.get("symbol") != symbol.upper() or state.get("strategy") != strategy:
-        raise SystemExit(
-            f"State file {path} belongs to symbol={state.get('symbol')} strategy={state.get('strategy')}, "
-            f"not symbol={symbol.upper()} strategy={strategy}."
+    if trading_config.dry_run:
+        event_logger.emit(
+            "smoke_test_dry_run",
+            message=f"Dry run: would submit smoke test order for {symbol}.",
+            symbol=symbol,
+            notional=trading_config.smoke_test_notional,
         )
-    state.setdefault("last_processed_bar", None)
-    state.setdefault("last_signal_key", None)
-    state.setdefault("trade_counts", {})
-    state.setdefault("trade_log", [])
-    state.setdefault("active_trade", None)
-    return state
+        return
+
+    entry_order = submit_order(
+        alpaca_config,
+        symbol=symbol,
+        side="buy",
+        order_type="market",
+        time_in_force="day",
+        notional=trading_config.smoke_test_notional,
+        client_order_id=f"smoke-{pd.Timestamp.now(tz='UTC').strftime('%Y%m%d%H%M%S')}",
+    )
+    event_logger.emit(
+        "smoke_test_entry_submitted",
+        message=f"Smoke test entry submitted: {format_order_summary(entry_order)}",
+        symbol=symbol,
+        order_id=entry_order["id"],
+    )
+    filled_entry = wait_for_order_terminal(
+        alpaca_config,
+        entry_order["id"],
+        timeout_seconds=trading_config.entry_timeout_seconds,
+    )
+    event_logger.emit(
+        "smoke_test_entry_update",
+        message=f"Smoke test entry update: {format_order_summary(filled_entry)}",
+        symbol=symbol,
+        order_id=filled_entry["id"],
+        status=filled_entry.get("status"),
+    )
+    if filled_entry.get("status") != "filled":
+        raise RuntimeError(f"Smoke test entry did not fill. Status={filled_entry.get('status')}")
+
+    close_order = close_position(alpaca_config, symbol)
+    event_logger.emit(
+        "smoke_test_exit_submitted",
+        message=f"Smoke test exit submitted: {format_order_summary(close_order)}",
+        symbol=symbol,
+        order_id=close_order["id"],
+    )
+    filled_exit = wait_for_order_terminal(
+        alpaca_config,
+        close_order["id"],
+        timeout_seconds=trading_config.entry_timeout_seconds,
+    )
+    event_logger.emit(
+        "smoke_test_exit_update",
+        message=f"Smoke test exit update: {format_order_summary(filled_exit)}",
+        symbol=symbol,
+        order_id=filled_exit["id"],
+        status=filled_exit.get("status"),
+    )
+    if filled_exit.get("status") != "filled":
+        raise RuntimeError(f"Smoke test exit did not fill. Status={filled_exit.get('status')}")
+
+    try:
+        get_position(alpaca_config, symbol)
+        raise RuntimeError(f"Smoke test expected no open position in {symbol}, but one still exists.")
+    except RuntimeError:
+        event_logger.emit(
+            "smoke_test_complete",
+            message=f"Smoke test completed for {symbol}.",
+            symbol=symbol,
+            notional=trading_config.smoke_test_notional,
+        )
 
 
-def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.write_text(json.dumps(state, indent=2, sort_keys=True))
+def record_closure(state: RunnerState, closure: dict[str, Any]) -> None:
+    state.trade_log.append(closure)
+    close_day_key = session_key(closure["closed_at"])
+    state.add_realized_pnl(close_day_key, float(closure["net_pnl"]))
+    state.last_exit_at = closure["closed_at"]
+    state.active_trade = None
 
 
-def trim_old_state(state: dict[str, Any], session_key: str) -> None:
-    state["trade_counts"] = {key: value for key, value in state.get("trade_counts", {}).items() if key >= session_key}
-
-
-def parse_ts(value: str | None) -> pd.Timestamp | None:
-    if not value:
-        return None
-    return pd.Timestamp(value)
-
-
-def parse_hhmm(value: str) -> Any:
-    time.strptime(value, "%H:%M")
-    return pd.Timestamp(f"2000-01-01 {value}", tz=ET_TZ).time()
-
-
-def build_client_order_id(prefix: str) -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:18]}"
+def _to_utc_timestamp(value: str | pd.Timestamp) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
 
 
 if __name__ == "__main__":

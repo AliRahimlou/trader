@@ -1,14 +1,17 @@
 # trader
 
-Simple FVG backtest starter with:
+Paper-trading stack for stocks and ETFs using Alpaca for both market data and execution.
 
-- `fvgBreak.py`: opening-range break plus fair value gap.
-- `fvgPullback.py`: daily sweep, fair value gap, and pullback entry.
-- `run_backtests.py`: downloads 1-minute, 5-minute, and daily OHLCV for one symbol and runs the strategies.
-- `alpaca_api.py`: Alpaca account check plus stock bar downloads for the same runner.
-- `massive_api.py`: Massive market-data adapter for historical/intraday bars.
-- `alpaca_trade.py`: guarded Alpaca paper-trading CLI for account checks, orders, positions, and a smoke test.
-- `live_paper_runner.py`: paper-only live loop that polls Alpaca bars, runs one strategy, places entries, and manages exits.
+Core modules:
+
+- `run_backtests.py`: historical runner for the FVG strategies.
+- `strategy_signals.py`: shared signal-generation logic used by both backtests and the live runner.
+- `live_paper_runner.py`: restart-safe paper-only live loop.
+- `live_execution.py`: order submission, broker reconciliation, bracket handling, and flatten logic.
+- `live_risk.py`: trade limits, buying-power checks, cooldowns, and duplicate-position guards.
+- `live_state.py`: local persisted runner state.
+- `live_logging.py`: machine-readable JSONL event logs plus concise console output.
+- `alpaca_trade.py`: low-level paper-trading CLI for manual inspection and smoke tests.
 
 ## Setup
 
@@ -16,85 +19,86 @@ Simple FVG backtest starter with:
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-```
-
-If you want Alpaca:
-
-```bash
 cp .env.example .env
 ```
 
-Fill in your paper credentials in `.env`.
+Fill in Alpaca paper credentials in `.env`.
 
-## Run
+Important:
 
-```bash
-python run_backtests.py --symbol SPY --strategy both
-```
+- `live_paper_runner.py` is paper-only. It refuses to run against a non-paper Alpaca endpoint.
+- Real order submission requires `--paper-confirm`. This flag is intentionally CLI-only.
+- Massive is optional for historical experimentation. It is not the active live market-data path for the runner.
 
-Run against Alpaca stock data instead of `yfinance`:
+## End To End Paper Mode
 
-```bash
-python run_backtests.py --source alpaca --symbol AAPL --strategy both --check-account
-```
-
-Run against Massive market data:
-
-```bash
-python run_backtests.py --source massive --symbol SPY --strategy both
-```
-
-Paper-trading CLI examples:
+Sanity-check the account and data feed:
 
 ```bash
 python alpaca_trade.py account
-python alpaca_trade.py positions
-python alpaca_trade.py orders --status all --limit 20
-python alpaca_trade.py submit --symbol SPY --side buy --notional 10 --wait-seconds 30
-python alpaca_trade.py close --symbol SPY --wait-seconds 30
-python alpaca_trade.py smoke-test --notional 10
+python run_backtests.py --source alpaca --symbol SPY --strategy both --check-account
 ```
 
-Run the live paper strategy loop:
+Run one dry cycle without submitting orders:
 
 ```bash
-python live_paper_runner.py --symbol SPY --strategy break
+python live_paper_runner.py --symbol SPY --strategy both --once --dry-run --verbose
 ```
 
-One-cycle dry run:
+Run a real paper smoke test through the live runner:
 
 ```bash
-python live_paper_runner.py --symbol SPY --strategy break --once --dry-run --verbose
+python live_paper_runner.py --symbol SPY --strategy both --smoke-test --paper-confirm
 ```
 
-Example with stricter FVG detection, commissions, and slippage:
+Start the continuous live paper loop:
 
 ```bash
-python run_backtests.py \
-  --symbol ES=F \
-  --value-per-point 50 \
-  --commission-per-unit 2.25 \
-  --slippage-bps 1 \
-  --min-gap-atr 0.2 \
-  --verbose
+python live_paper_runner.py --symbol SPY --strategy both --paper-confirm
 ```
 
-## Notes
+Useful variants:
 
-- Intraday data is normalized to `America/New_York`.
-- `is_fair_value_gap()` lives in `backtest_utils.py` and is intentionally simple to keep it easy to tune.
-- Alpaca account checks hit `https://paper-api.alpaca.markets/v2/account`, while Alpaca stock bars come from `https://data.alpaca.markets`.
-- Massive market data uses `https://api.massive.com` minute/day aggregate endpoints.
-- Massive access depends on your plan. On the current local key, some aggregate requests work, but real-time endpoints and bursty request patterns can still return entitlement or rate-limit errors.
-- If you call `/v2/account` without `APCA-API-KEY-ID` and `APCA-API-SECRET-KEY` headers, Alpaca will reject the request.
-- Paper accounts should generally use the `iex` stock data feed unless you have broader market data entitlements.
-- This repo accepts `MASSIVE_API_KEY` or `MASSIVE_API` in `.env`.
-- `alpaca_trade.py` refuses to submit orders unless `APCA_API_BASE_URL` points at the paper endpoint.
-- `live_paper_runner.py` is also paper-only and uses a local JSON state file to avoid duplicate entries across restarts.
-- The live runner currently manages stops and targets in-process. If the runner is down, Alpaca is not holding broker-side protective orders for you.
-- This is still a starter backtest. Real intraday research needs cleaner session handling, holiday calendars, data validation, and instrument-specific contract logic.
+```bash
+python live_paper_runner.py --symbol SPY --strategy break --once --dry-run --reset-state --verbose
+python live_paper_runner.py --symbol SPY --strategy break --paper-confirm --exit-mode bracket
+python live_paper_runner.py --symbol SPY --strategy break --paper-confirm --exit-mode in_process
+python live_paper_runner.py --symbol SPY --strategy break --once --paper-confirm --exit-mode in_process --flatten-at 00:00
+```
 
-Working curl example:
+State and logs land in:
+
+- `runtime/state/*.json`
+- `runtime/logs/*.jsonl`
+
+## Architecture Note
+
+Control flow:
+
+1. `live_paper_runner.py` loads config, checks the Alpaca paper account, and loads persisted local state.
+2. On startup it reconciles local state against Alpaca positions and orders before it does anything else.
+3. Each cycle fetches the Alpaca clock plus fresh `1m`, `5m`, and `1d` bars.
+4. Bar freshness is validated in ET. If bars are stale, the runner halts instead of continuing to trade.
+5. Shared logic in `strategy_signals.py` builds the latest FVG candidate setups.
+6. `live_risk.py` applies risk filters: max size, max daily loss, max trades per day, one-position-per-symbol, cooldown, shortability, and buying power.
+7. `live_execution.py` submits the entry order only after all filters pass, then tracks broker state until the trade is open, flattened, or rejected.
+8. Every cycle persists local state and appends structured events to the JSONL log.
+
+Execution modes:
+
+- `bracket`: safer default. Alpaca holds stop-loss and take-profit orders at the broker.
+- `in_process`: runner-managed exits. If the runner hits stale data or an unexpected exception while a position is open, it attempts a fail-safe flatten before stopping.
+
+## Operational Notes
+
+- Timezone handling is `America/New_York`.
+- Tradable universe is stocks and ETFs only.
+- Duplicate entries are blocked with both `last_processed_bar` and per-signal persistence.
+- Unmanaged broker state is treated as an error. If the runner sees open orders or positions that are not represented in local state, it stops.
+- `strategy_signals.py` is the single signal source for backtests and live trading. There is no separate live-only strategy implementation.
+- `backtest_utils.py:is_fair_value_gap()` is intentionally simple and can be tightened with `LIVE_PAPER_MIN_GAP_PCT`, `LIVE_PAPER_MIN_GAP_ATR`, and `LIVE_PAPER_REQUIRE_DISPLACEMENT`.
+
+Working `curl` example:
 
 ```bash
 curl -X GET \

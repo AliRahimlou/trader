@@ -139,7 +139,13 @@ def main() -> None:
 
 def handle_positions(args: argparse.Namespace, config: AlpacaConfig) -> None:
     if args.symbol:
-        print(format_position_summary(get_position(config, args.symbol)))
+        try:
+            print(format_position_summary(get_position(config, args.symbol)))
+        except RuntimeError as exc:
+            if "position does not exist" in str(exc):
+                print(f"No open position in {args.symbol.upper()}.")
+                return
+            raise
         return
 
     positions = list_positions(config)

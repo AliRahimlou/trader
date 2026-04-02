@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 .env
+runtime/
+.live_state_*.json

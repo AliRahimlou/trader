@@ -7,12 +7,11 @@ import pandas as pd
 
 from backtest_utils import (
     BacktestConfig,
-    calculate_position_size,
     check_exit,
-    get_fair_value_gap_direction,
     restrict_to_regular_hours,
     settle_trade,
 )
+from strategy_signals import detect_break_setup, get_opening_range_bar, materialize_signal
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,15 +33,11 @@ def run_strategy_video1(
         if len(day_data) < 20:
             continue
 
-        opening_range = five_min_df[
-            (five_min_df.index.date == session_date) & (five_min_df.index.time == time(9, 30))
-        ]
-        if opening_range.empty:
+        opening_range_bar = get_opening_range_bar(five_min_df, session_date)
+        if opening_range_bar is None:
             LOGGER.debug("Skipping %s: no 09:30 opening-range candle", session_date)
             continue
 
-        or_high = float(opening_range["high"].iloc[0])
-        or_low = float(opening_range["low"].iloc[0])
         day_1min = day_data[day_data.index.time > time(9, 35)].copy()
         if len(day_1min) < 10:
             continue
@@ -72,56 +67,32 @@ def run_strategy_video1(
                     open_trade = None
                 continue
 
-            direction = get_fair_value_gap_direction(
+            setup = detect_break_setup(
                 day_1min,
+                opening_range_bar,
                 i,
-                min_gap_pct=config.min_gap_pct,
-                min_gap_atr=config.min_gap_atr,
-                require_displacement=config.require_displacement,
+                config=config,
             )
-            if direction is None:
+            if setup is None:
                 continue
 
             entry_bar = day_1min.iloc[i + 1]
             entry_time = day_1min.index[i + 1]
             entry_price = float(entry_bar["open"])
-
-            if direction == "bullish" and bar["close"] > or_high:
-                stop_price = or_low
-                target_price = entry_price + (entry_price - stop_price) * config.rr_ratio
-                trade_direction = "long"
-            elif direction == "bearish" and bar["close"] < or_low:
-                stop_price = or_high
-                target_price = entry_price - (stop_price - entry_price) * config.rr_ratio
-                trade_direction = "short"
-            else:
-                continue
-
-            if target_price <= entry_price and trade_direction == "long":
-                continue
-            if target_price >= entry_price and trade_direction == "short":
-                continue
-
-            quantity = calculate_position_size(entry_price, stop_price, config)
-            if quantity < 1:
-                LOGGER.debug(
-                    "Skipping %s %s at %s: quantity rounded to zero",
-                    session_date,
-                    trade_direction,
-                    entry_time,
-                )
+            signal = materialize_signal(setup, entry_price, config=config)
+            if signal is None:
                 continue
 
             open_trade = {
-                "strategy": "Opening Range + FVG",
+                "strategy": signal.strategy_name,
                 "session_date": session_date,
-                "direction": trade_direction,
+                "direction": signal.direction,
                 "entry_time": entry_time,
                 "entry_price": entry_price,
-                "stop_price": stop_price,
-                "target_price": target_price,
-                "quantity": quantity,
-                "planned_risk": abs(entry_price - stop_price) * quantity * config.value_per_point,
+                "stop_price": signal.stop_price,
+                "target_price": signal.target_price,
+                "quantity": signal.quantity,
+                "planned_risk": abs(entry_price - signal.stop_price) * signal.quantity * config.value_per_point,
             }
 
     return pd.DataFrame(trades)
