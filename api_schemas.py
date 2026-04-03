@@ -40,6 +40,12 @@ class ControlRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class TradePreviewRequest(BaseModel):
+    symbol: str
+    side: str
+    amount_dollars: float
+
+
 class OverviewResponse(BaseModel):
     runner_status: dict[str, Any]
     health: dict[str, Any]

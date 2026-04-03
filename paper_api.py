@@ -10,7 +10,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from api_schemas import CommandRecord, CommandsResponse, ControlRequest, EventRecord, EventsResponse, OverviewResponse
+from api_schemas import (
+    CommandRecord,
+    CommandsResponse,
+    ControlRequest,
+    EventRecord,
+    EventsResponse,
+    OverviewResponse,
+    TradePreviewRequest,
+)
 from live_config import PaperTradingConfig, config_from_env
 from operator_store import OperatorStore
 from paper_supervisor import EngineSupervisor
@@ -27,7 +35,8 @@ def create_app(config: PaperTradingConfig | None = None) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8000"],
+        allow_origins=["http://127.0.0.1:8000"],
+        allow_origin_regex=r"https?://(127\.0\.0\.1|localhost)(:\d+)?",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -105,6 +114,24 @@ def create_app(config: PaperTradingConfig | None = None) -> FastAPI:
             strategy_status=_snapshot_or_default(store, "strategy_status", {}),
             commands=[CommandRecord.model_validate(item) for item in store.list_commands(limit=20)],
         )
+
+    @app.get("/api/trade/context")
+    def get_trade_context(symbol: str | None = None, chart_range: str = "1D") -> dict[str, Any]:
+        try:
+            return supervisor.engine.get_trade_context(symbol=symbol, chart_range=chart_range)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/trade/preview")
+    def post_trade_preview(request: TradePreviewRequest) -> dict[str, Any]:
+        try:
+            return supervisor.engine.preview_manual_trade(
+                symbol=request.symbol,
+                side=request.side,
+                amount_dollars=request.amount_dollars,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/events", response_model=EventsResponse)
     def get_events(

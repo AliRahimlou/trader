@@ -1,16 +1,15 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
+import { formatCurrency } from "../formatters";
 import { useDashboard } from "../state/DashboardContext";
 
 const NAV_ITEMS = [
-  ["Overview", "/"],
-  ["Strategy", "/strategy"],
-  ["Orders", "/orders"],
+  ["Home", "/"],
+  ["Trade", "/trade"],
   ["Positions", "/positions"],
-  ["Events", "/events"],
-  ["Controls", "/controls"],
+  ["Activity", "/activity"],
+  ["Bot", "/bot"],
   ["Settings", "/settings"],
-  ["Health", "/health"],
 ];
 
 export default function AppShell({ children }) {
@@ -40,47 +39,54 @@ export default function AppShell({ children }) {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand-block">
-          <p className="eyebrow">Operator Control</p>
-          <h1>Paper Trading</h1>
-          <p className="subtle">Runner-owned execution. UI is control and observability only.</p>
+        <div className="sidebar-scroll">
+          <div className="brand-block">
+            <p className="eyebrow">Paper Investing</p>
+            <h1>Paper Invest</h1>
+            <p className="subtle">Practice trades, monitor automation, and stay inside paper-only guardrails.</p>
+          </div>
+
+          <div className="sidebar-status">
+            <StatusPill label="Mode" value={overview?.runner_status?.mode === "paper" ? "paper only" : overview?.runner_status?.mode || "paper"} tone="paper" />
+            <StatusPill label="Stream" value={streamConnected ? "connected" : "reconnecting"} tone={streamConnected ? "ok" : "warn"} />
+            <StatusPill label="Market" value={health?.market_open ? "open" : "closed"} tone={health?.market_open ? "ok" : "neutral"} />
+            <StatusPill label="Data" value={health?.data_fresh ? "fresh" : "delayed"} tone={health?.data_fresh ? "ok" : "warn"} />
+          </div>
+
+          <nav className="nav-list">
+            {NAV_ITEMS.map(([label, href]) => (
+              <NavLink
+                key={href}
+                to={href}
+                className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
+              >
+                {label}
+              </NavLink>
+            ))}
+          </nav>
         </div>
-
-        <div className="sidebar-status">
-          <StatusPill label="Mode" value={overview?.runner_status?.mode || "paper"} tone="paper" />
-          <StatusPill label="Stream" value={streamConnected ? "connected" : "disconnected"} tone={streamConnected ? "ok" : "warn"} />
-          <StatusPill label="Market" value={health?.market_open ? "open" : "closed"} tone={health?.market_open ? "ok" : "neutral"} />
-          <StatusPill label="Data" value={health?.data_fresh ? "fresh" : "stale"} tone={health?.data_fresh ? "ok" : "warn"} />
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className={`operator-toggle ${operatorMode ? "operator-on" : ""}`}
+            onClick={() => setOperatorMode(!operatorMode)}
+          >
+            {operatorMode ? "Action mode enabled" : "View only mode"}
+          </button>
         </div>
-
-        <nav className="nav-list">
-          {NAV_ITEMS.map(([label, href]) => (
-            <NavLink
-              key={href}
-              to={href}
-              className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
-            >
-              {label}
-            </NavLink>
-          ))}
-        </nav>
-
-        <button
-          type="button"
-          className={`operator-toggle ${operatorMode ? "operator-on" : ""}`}
-          onClick={() => setOperatorMode(!operatorMode)}
-        >
-          {operatorMode ? "Operator Mode Enabled" : "View Mode Enabled"}
-        </button>
       </aside>
 
       <main className="main-panel">
         <header className="topbar">
           <div>
-            <h2>Local Paper Control Plane</h2>
+            <div className="topbar-title-row">
+              <h2>Your paper portfolio</h2>
+              <span className="paper-badge">Paper trading</span>
+            </div>
             <p className="subtle">Latest heartbeat: {overview?.runner_status?.last_heartbeat || "n/a"}</p>
           </div>
           <div className="topbar-right">
+            <StatusPill label="Portfolio" value={formatCurrency(overview?.account?.portfolio_value || 0)} tone="paper" />
             <StatusPill
               label="Runner"
               value={runnerState}

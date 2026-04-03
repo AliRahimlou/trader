@@ -14,6 +14,12 @@ cd dashboard && npm install && cd ..
 
 Fill in Alpaca paper credentials in `.env`.
 
+Start the full app from the repo root with:
+
+```bash
+npm start
+```
+
 Important:
 
 - Paper only. The runner refuses non-paper Alpaca execution.
@@ -90,12 +96,14 @@ npm run verify
 Run backend plus frontend together:
 
 ```bash
+npm start
 ./scripts/run_full_stack.sh
 ```
 
 Run the full stack in demo mode:
 
 ```bash
+npm run start:demo
 ./scripts/run_demo_stack.sh
 ```
 
@@ -126,14 +134,18 @@ The SSE stream emits runner, signal, order, fill, warning, command-audit, and he
 
 ## Dashboard Views
 
-- Overview: runner status, account, PnL, positions, open orders, and freshness.
-- Strategy: latest signal decisions, cooldowns, daily limits, and per-strategy status.
-- Orders: broker orders plus operator command history.
-- Positions: current positions and manual close control.
-- Events: structured event log with local filtering and JSON export.
-- Controls: start, stop, run-once, smoke test, pause/resume entries, flatten, cancel orders, symbol toggle, and strategy toggle.
-- Settings: effective runtime config plus safe non-secret edits.
-- Health: auth, connectivity, reconciliation, and raw diagnostics.
+- Home: portfolio value, cash, buying power, current positions, quick actions, and recent activity.
+- Trade: chart, invest amount, buy/sell preview, and clear paper-trading actions.
+- Positions: entry, current price, unrealized PnL, time in trade, stop/target, and exit action.
+- Activity: fills, rejections, recent bot decisions, and an advanced history section.
+- Bot: simple automation status, pause/resume/start/stop controls, and signal decisions.
+- Settings: plain-English risk settings with advanced technical controls hidden behind expandable details.
+
+Manual trade note:
+
+- The consumer-style trade ticket is intentionally safest on the configured automation symbol.
+- Manual trades are blocked while automation is running or dry-run mode is enabled.
+- If you open a manual paper position on the automation symbol, close it before restarting the bot so reconciliation stays clean.
 
 ## Safety Rules
 

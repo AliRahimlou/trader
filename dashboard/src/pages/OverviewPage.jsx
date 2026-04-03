@@ -1,62 +1,166 @@
 import React from "react";
+import { Link } from "react-router-dom";
+import { botStateLabel, formatCurrency, formatPercent, formatSignedCurrency, pnlTone } from "../formatters";
 import { useDashboard } from "../state/DashboardContext";
 
 export default function OverviewPage() {
-  const { overview } = useDashboard();
+  const { overview, events } = useDashboard();
   const account = overview?.account || {};
   const positions = overview?.positions || [];
-  const orders = overview?.open_orders || [];
   const strategyStatus = overview?.strategy_status || {};
+  const portfolioValue = Number(account.portfolio_value || 0);
+  const equity = Number(account.equity || portfolioValue);
+  const lastEquity = Number(account.last_equity || equity);
+  const totalPnl = equity - lastEquity;
+  const totalPnlPercent = lastEquity ? (totalPnl / lastEquity) * 100.0 : 0.0;
+  const recentActivity = events.slice(-6).reverse();
+  const activePositionCount = positions.length;
 
   return (
-    <div className="page-grid">
-      <section className="panel panel-hero">
-        <div className="stat-grid">
-          <StatCard label="Cash" value={account.cash || "n/a"} />
-          <StatCard label="Buying Power" value={account.buying_power || "n/a"} />
-          <StatCard label="Portfolio Value" value={account.portfolio_value || "n/a"} />
-          <StatCard label="Today PnL" value={strategyStatus.daily_realized_pnl ?? "n/a"} />
-          <StatCard label="Last Bar" value={overview?.runner_status?.latest_completed_bar_time || "n/a"} />
-          <StatCard label="Trades Today" value={strategyStatus.daily_trade_count ?? 0} />
+    <div className="app-grid">
+      <section className="hero-card hero-portfolio panel-span-2">
+        <div>
+          <p className="eyebrow">Portfolio</p>
+          <h1>{formatCurrency(portfolioValue)}</h1>
+          <p className={`hero-copy tone-${pnlTone(totalPnl)}`}>{formatSignedCurrency(totalPnl)} today · {formatPercent(totalPnlPercent)}</p>
+          <div className="quick-action-row">
+            <Link to="/trade" className="primary-link-button">Invest money</Link>
+            <Link to="/positions" className="ghost-link-button">View positions</Link>
+            <Link to="/bot" className="ghost-link-button">Bot status</Link>
+          </div>
+        </div>
+        <div className="hero-side-grid">
+          <InfoTile label="Cash" value={formatCurrency(account.cash)} />
+          <InfoTile label="Buying power" value={formatCurrency(account.buying_power)} />
+          <InfoTile label="Open positions" value={String(activePositionCount)} />
+          <InfoTile label="Bot state" value={botStateLabel({ status_label: botState(strategyStatus, overview) })} />
         </div>
       </section>
 
       <section className="panel">
-        <h3>Runner Summary</h3>
-        <dl className="detail-list">
-          <Detail label="Paper Only" value={String(overview?.runner_status?.paper_only ?? true)} />
-          <Detail label="Symbol" value={overview?.runner_status?.symbol || "n/a"} />
-          <Detail label="Configured Strategies" value={(overview?.runner_status?.configured_strategies || []).join(", ") || "n/a"} />
-          <Detail label="Enabled Strategies" value={Object.entries(overview?.runner_status?.enabled_strategies || {}).filter(([, enabled]) => enabled).map(([name]) => name).join(", ") || "none"} />
-          <Detail label="Paused Entries" value={String(overview?.runner_status?.paused_new_entries ?? false)} />
-          <Detail label="Latest Heartbeat" value={overview?.runner_status?.last_heartbeat || "n/a"} />
+        <div className="section-head">
+          <div>
+            <h2>Account snapshot</h2>
+            <p className="muted">The numbers most people care about first.</p>
+          </div>
+        </div>
+        <div className="detail-card-grid">
+          <InfoTile label="Portfolio value" value={formatCurrency(account.portfolio_value)} />
+          <InfoTile label="Cash" value={formatCurrency(account.cash)} />
+          <InfoTile label="Buying power" value={formatCurrency(account.buying_power)} />
+          <InfoTile label="Today PnL" value={formatCurrency(strategyStatus.daily_realized_pnl)} tone={pnlTone(strategyStatus.daily_realized_pnl)} />
+          <InfoTile label="Total PnL" value={formatSignedCurrency(totalPnl)} tone={pnlTone(totalPnl)} />
+          <InfoTile label="Trades today" value={String(strategyStatus.daily_trade_count || 0)} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="section-head">
+          <div>
+            <h2>Trading status</h2>
+            <p className="muted">See whether automation is ready, paused, or waiting.</p>
+          </div>
+        </div>
+        <div className="status-spotlight">
+          <strong>{botState(strategyStatus, overview)}</strong>
+          <p>{statusReason(overview)}</p>
+        </div>
+        <dl className="plain-detail-list">
+          <Detail label="Current symbol" value={overview?.runner_status?.symbol || "n/a"} />
+          <Detail label="Last completed bar" value={overview?.runner_status?.latest_completed_bar_time || "n/a"} />
+          <Detail label="Latest heartbeat" value={overview?.runner_status?.last_heartbeat || "n/a"} />
         </dl>
       </section>
 
-      <section className="panel">
-        <h3>Open Positions</h3>
-        <DataTable
-          columns={["symbol", "qty", "avg_entry_price", "market_value", "unrealized_pl"]}
-          rows={positions}
-          emptyMessage="No open positions."
-        />
+      <section className="panel panel-span-2">
+        <div className="section-head">
+          <div>
+            <h2>Open positions</h2>
+            <p className="muted">Your active exposure and unrealized profit or loss.</p>
+          </div>
+          <Link to="/positions" className="ghost-link">See all</Link>
+        </div>
+        {!positions.length ? (
+          <div className="empty-card">
+            <h3>No open positions</h3>
+            <p>Your paper account is flat. Go to Trade to open a position when you are ready.</p>
+          </div>
+        ) : (
+          <div className="position-card-grid">
+            {positions.map((position) => (
+              <div className="position-summary-card" key={position.symbol}>
+                <div className="position-summary-head">
+                  <h3>{position.symbol}</h3>
+                  <span className={`change-pill ${pnlTone(position.unrealized_pl)}`}>{formatSignedCurrency(position.unrealized_pl)}</span>
+                </div>
+                <div className="position-summary-grid">
+                  <InfoTile label="Shares" value={position.qty} compact />
+                  <InfoTile label="Entry" value={formatCurrency(position.avg_entry_price)} compact />
+                  <InfoTile label="Market value" value={formatCurrency(position.market_value)} compact />
+                  <InfoTile label="Current price" value={formatCurrency(position.current_price)} compact />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      <section className="panel">
-        <h3>Open Orders</h3>
-        <DataTable
-          columns={["id", "symbol", "side", "status", "qty", "filled_qty", "filled_avg_price"]}
-          rows={orders}
-          emptyMessage="No open orders."
-        />
+      <section className="panel panel-span-2">
+        <div className="section-head">
+          <div>
+            <h2>Recent activity</h2>
+            <p className="muted">Recent trades, fills, decisions, and safety events.</p>
+          </div>
+          <Link to="/activity" className="ghost-link">Full activity</Link>
+        </div>
+        <div className="activity-feed compact-activity-feed">
+          {recentActivity.map((item) => (
+            <div className="activity-item" key={item.id}>
+              <div className={`event-dot tone-${item.level === "ERROR" ? "negative" : item.level === "WARNING" ? "warn" : "positive"}`} />
+              <div>
+                <strong>{item.message || item.event}</strong>
+                <p className="muted">{item.symbol || "system"} · {item.ts}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </section>
     </div>
   );
 }
 
-function StatCard({ label, value }) {
+function botState(strategyStatus, overview) {
+  if (overview?.runner_status?.startup_state === "starting") {
+    return "Starting up";
+  }
+  if (!overview?.runner_status?.running) {
+    return "Stopped";
+  }
+  if (overview?.runner_status?.paused_new_entries) {
+    return "Paused";
+  }
+  if (!overview?.health?.market_open && !overview?.runner_status?.market_open) {
+    return "Market closed";
+  }
+  if (strategyStatus?.active_trade) {
+    return "In position";
+  }
+  return "Waiting for signal";
+}
+
+function statusReason(overview) {
+  if (overview?.runner_status?.paused_new_entries) {
+    return "Automation is connected, but new entries are paused until you resume.";
+  }
+  if (!overview?.runner_status?.running) {
+    return "The bot is stopped. You can still review positions and trade manually when allowed.";
+  }
+  return "The bot is connected and watching for the next valid setup.";
+}
+
+function InfoTile({ label, value, tone = "neutral", compact = false }) {
   return (
-    <div className="stat-card">
+    <div className={`info-card tone-${tone} ${compact ? "info-card-compact" : ""}`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -72,30 +176,3 @@ function Detail({ label, value }) {
   );
 }
 
-function DataTable({ columns, rows, emptyMessage }) {
-  if (!rows.length) {
-    return <p className="subtle">{emptyMessage}</p>;
-  }
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            {columns.map((column) => (
-              <th key={column}>{column}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={row.id || row.symbol || index}>
-              {columns.map((column) => (
-                <td key={column}>{String(row[column] ?? "n/a")}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}

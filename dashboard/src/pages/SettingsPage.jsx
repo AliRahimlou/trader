@@ -2,20 +2,23 @@ import React, { useEffect, useState } from "react";
 import ConfirmActionButton from "../components/ConfirmActionButton";
 import { useDashboard } from "../state/DashboardContext";
 
-const EDITABLE_KEYS = [
-  "poll_seconds",
-  "max_position_qty",
-  "max_position_notional",
-  "max_daily_loss",
-  "max_trades_per_day",
-  "cooldown_minutes",
-  "flatten_at",
-  "exit_mode",
-  "risk_per_trade",
-  "rr_ratio",
-  "commission_per_unit",
-  "min_gap_pct",
-  "min_gap_atr",
+const BASIC_SETTINGS = [
+  ["poll_seconds", "Refresh speed (seconds)", "How often the app checks for updates and new bars."],
+  ["max_position_notional", "Maximum dollars per position", "The largest paper position size the bot is allowed to open."],
+  ["max_daily_loss", "Daily loss limit", "If losses reach this amount, new entries should stop for the day."],
+  ["max_trades_per_day", "Trade limit per day", "How many new trades the bot can open in one session."],
+  ["cooldown_minutes", "Cooldown after exit", "How long the bot waits after closing a trade before re-entering."],
+  ["flatten_at", "Flatten by time (ET)", "Time of day when the bot should be done holding positions."],
+];
+
+const ADVANCED_SETTINGS = [
+  ["max_position_qty", "Maximum shares", "Hard cap on share size when notional sizing is available."],
+  ["exit_mode", "Exit style", "Choose broker-held brackets or in-process exit handling."],
+  ["risk_per_trade", "Risk per trade", "The internal risk budget used by the strategy engine."],
+  ["rr_ratio", "Reward / risk ratio", "How far the target sits relative to the stop."],
+  ["commission_per_unit", "Commission per share", "Used for more realistic paper PnL estimates."],
+  ["min_gap_pct", "Minimum gap percent", "Minimum fair value gap size as a percent filter."],
+  ["min_gap_atr", "Minimum gap ATR", "Minimum fair value gap size relative to ATR."],
 ];
 
 export default function SettingsPage() {
@@ -27,7 +30,7 @@ export default function SettingsPage() {
       return;
     }
     const next = {};
-    EDITABLE_KEYS.forEach((key) => {
+    [...BASIC_SETTINGS, ...ADVANCED_SETTINGS].forEach(([key]) => {
       next[key] = config[key] ?? "";
     });
     setFormState(next);
@@ -38,17 +41,25 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="page-grid">
+    <div className="app-grid">
       <section className="panel panel-span-2">
-        <h3>Effective Runtime Config</h3>
-        <div className="settings-grid">
-          {EDITABLE_KEYS.map((key) => (
+        <div className="section-head">
+          <div>
+            <h2>Trading defaults</h2>
+            <p className="muted">Plain-English settings for how the paper bot should behave.</p>
+          </div>
+        </div>
+
+        <div className="settings-grid user-settings-grid">
+          {BASIC_SETTINGS.map(([key, label, helper]) => (
             <label key={key}>
-              <span>{key}</span>
+              <span>{label}</span>
               <input value={formState[key] ?? ""} onChange={(event) => updateField(key, event.target.value)} />
+              <small className="helper-text">{helper}</small>
             </label>
           ))}
         </div>
+
         <div className="button-row">
           <ConfirmActionButton
             disabled={!operatorMode || commandPending}
@@ -66,6 +77,20 @@ export default function SettingsPage() {
             Toggle Dry Run
           </ConfirmActionButton>
         </div>
+
+        <details className="advanced-details">
+          <summary>Advanced settings</summary>
+          <div className="settings-grid user-settings-grid advanced-settings-grid">
+            {ADVANCED_SETTINGS.map(([key, label, helper]) => (
+              <label key={key}>
+                <span>{label}</span>
+                <input value={formState[key] ?? ""} onChange={(event) => updateField(key, event.target.value)} />
+                <small className="helper-text">{helper}</small>
+              </label>
+            ))}
+          </div>
+          <pre className="json-block">{JSON.stringify(config, null, 2)}</pre>
+        </details>
       </section>
     </div>
   );

@@ -14,12 +14,14 @@ from alpaca_api import (
     fetch_clock,
     fetch_latest_quote,
     fetch_latest_trade,
+    fetch_stock_bars,
     format_account_summary,
     format_order_summary,
     get_asset,
     get_position,
     list_orders,
     list_positions,
+    period_to_start,
     submit_order,
     wait_for_order_terminal,
 )
@@ -31,6 +33,12 @@ from live_execution import (
     request_flatten,
     submit_entry,
 )
+
+CHART_RANGE_MAP = {
+    "1D": ("1m", "1d"),
+    "1W": ("5m", "7d"),
+    "1M": ("1d", "30d"),
+}
 from live_logging import StructuredLogger
 from live_risk import evaluate_entry_risk
 from live_scheduler import StaleDataError, parse_hhmm, session_key, to_et_timestamp, validate_latest_bar
@@ -385,6 +393,250 @@ class PaperTradingEngine:
             return {
                 "reset": True,
                 "runtime_overrides_active": False,
+            }
+
+    def get_trade_context(self, symbol: str | None = None, chart_range: str = "1D") -> dict[str, Any]:
+        symbol = (symbol or self.base_config.symbol).upper()
+        chart_range = chart_range.upper()
+        if chart_range not in CHART_RANGE_MAP:
+            chart_range = "1D"
+
+        with self.lock:
+            if self.base_config.demo_mode:
+                return self._demo_trade_context(symbol, chart_range)
+
+            assert self.alpaca_config is not None
+            account = fetch_account(self.alpaca_config)
+            trade = fetch_latest_trade(self.alpaca_config, symbol)
+            quote = fetch_latest_quote(self.alpaca_config, symbol)
+            asset = get_asset(self.alpaca_config, symbol)
+            position = self._lookup_position(symbol)
+            chart = self._load_chart_payload(symbol, chart_range)
+            can_manual_trade, manual_reason = self._manual_trade_availability(symbol)
+
+            latest_price = float(trade["p"])
+            prior_close = chart["points"][0]["close"] if chart["points"] else latest_price
+            absolute_change = latest_price - prior_close
+            percent_change = (absolute_change / prior_close * 100.0) if prior_close else 0.0
+            position_summary = self._position_trade_summary(position)
+
+            return {
+                "symbol": symbol,
+                "configured_symbol": self.base_config.symbol,
+                "paper_only": True,
+                "manual_trading_enabled": can_manual_trade,
+                "manual_trading_reason": manual_reason,
+                "manual_trade_warning": self._manual_position_warning(symbol, position),
+                "quote": {
+                    "last_price": latest_price,
+                    "bid": float(quote["bp"]),
+                    "ask": float(quote["ap"]),
+                    "timestamp": trade["t"],
+                    "absolute_change": absolute_change,
+                    "percent_change": percent_change,
+                },
+                "account": {
+                    "cash": float(account.get("cash") or 0.0),
+                    "buying_power": float(account.get("buying_power") or 0.0),
+                    "portfolio_value": float(account.get("portfolio_value") or 0.0),
+                    "equity": float(account.get("equity") or account.get("portfolio_value") or 0.0),
+                    "last_equity": float(account.get("last_equity") or account.get("equity") or 0.0),
+                },
+                "position": position,
+                "position_summary": position_summary,
+                "asset": {
+                    "tradable": bool(asset.get("tradable")),
+                    "fractionable": bool(asset.get("fractionable")),
+                    "shortable": bool(asset.get("shortable")),
+                    "easy_to_borrow": bool(asset.get("easy_to_borrow")),
+                },
+                "chart": chart,
+                "bot": {
+                    "status_label": self._bot_status_label(),
+                    "status_reason": self._bot_status_reason(),
+                    "running": self.running,
+                    "paused": self.runtime_flags["paused_new_entries"],
+                    "market_open": self.market_open,
+                    "data_fresh": self.data_fresh,
+                    "last_heartbeat": self.last_heartbeat_at,
+                    "latest_completed_bar_time": self.last_completed_bar_time,
+                    "enabled_strategies": [
+                        strategy_id
+                        for strategy_id, enabled in self.runtime_flags["enabled_strategies"].items()
+                        if enabled
+                    ],
+                },
+            }
+
+    def preview_manual_trade(self, symbol: str, side: str, amount_dollars: float) -> dict[str, Any]:
+        symbol = symbol.upper()
+        side = side.lower().strip()
+        amount_dollars = float(amount_dollars)
+
+        if side not in {"buy", "sell"}:
+            raise RuntimeError("Manual trade side must be buy or sell.")
+
+        with self.lock:
+            if self.base_config.demo_mode:
+                price = round(self._demo_price, 2)
+                account = self._demo_account_payload()
+                asset = {"tradable": True, "fractionable": True}
+                position = self._demo_position_for_symbol(symbol)
+            else:
+                assert self.alpaca_config is not None
+                trade = fetch_latest_trade(self.alpaca_config, symbol)
+                price = float(trade["p"])
+                account = fetch_account(self.alpaca_config)
+                asset = get_asset(self.alpaca_config, symbol)
+                position = self._lookup_position(symbol)
+
+            can_submit, submit_reason = self._manual_trade_availability(symbol)
+            warnings: list[str] = []
+            if amount_dollars <= 0:
+                can_submit = False
+                submit_reason = "Enter an amount greater than $0."
+
+            estimated_qty = amount_dollars / price if price > 0 else 0.0
+            use_notional = side == "buy" and bool(asset.get("fractionable", False))
+            if not bool(asset.get("fractionable", False)):
+                estimated_qty = float(int(estimated_qty))
+
+            if side == "sell":
+                held_qty = float(position.get("qty") or 0.0) if position else 0.0
+                if held_qty <= 0:
+                    can_submit = False
+                    submit_reason = "You need an open long position before selling from this trade ticket."
+                estimated_qty = min(held_qty, estimated_qty or held_qty)
+                use_notional = False
+                if estimated_qty < held_qty and amount_dollars > price * held_qty:
+                    warnings.append("Sell preview was capped at your current position size.")
+
+            estimated_notional = amount_dollars if use_notional else estimated_qty * price
+            buying_power = float(account.get("buying_power") or 0.0)
+            if side == "buy" and estimated_notional > buying_power + 0.01:
+                can_submit = False
+                submit_reason = "Amount is above your available buying power."
+
+            if not bool(asset.get("tradable", False)):
+                can_submit = False
+                submit_reason = f"{symbol} is not tradable in the connected paper account."
+
+            if estimated_qty <= 0 and not use_notional:
+                can_submit = False
+                submit_reason = submit_reason or "Amount is too small for the current share price."
+
+            if symbol == self.base_config.symbol:
+                warnings.append("Manual positions on the automation symbol should be closed before restarting the bot.")
+
+            return {
+                "symbol": symbol,
+                "configured_symbol": self.base_config.symbol,
+                "side": side,
+                "amount_dollars": amount_dollars,
+                "estimated_price": price,
+                "estimated_qty": estimated_qty,
+                "estimated_notional": estimated_notional,
+                "buying_power": buying_power,
+                "position_qty": float(position.get("qty") or 0.0) if position else 0.0,
+                "paper_only": True,
+                "can_submit": can_submit,
+                "submit_reason": submit_reason,
+                "warnings": warnings,
+                "use_notional": use_notional,
+            }
+
+    def execute_manual_trade(self, symbol: str, side: str, amount_dollars: float) -> dict[str, Any]:
+        with self.lock:
+            preview = self.preview_manual_trade(symbol, side, amount_dollars)
+            if not preview["can_submit"]:
+                raise RuntimeError(preview["submit_reason"] or "Manual trade cannot be submitted.")
+
+            symbol = preview["symbol"]
+            side = preview["side"]
+
+            if self.base_config.demo_mode:
+                order_id = f"demo-manual-{int(time.time())}"
+                self.event_logger.emit(
+                    "manual_trade_submitted",
+                    message=f"Demo manual {side} order submitted for {symbol}.",
+                    symbol=symbol,
+                    side=side,
+                    amount_dollars=preview["amount_dollars"],
+                    estimated_qty=preview["estimated_qty"],
+                    order_id=order_id,
+                )
+                result = {
+                    "order_id": order_id,
+                    "status": "filled",
+                    "symbol": symbol,
+                    "side": side,
+                    "filled_qty": preview["estimated_qty"],
+                    "filled_avg_price": preview["estimated_price"],
+                }
+                self.event_logger.emit(
+                    "manual_trade_update",
+                    message=f"Demo manual {side} order filled for {symbol}.",
+                    symbol=symbol,
+                    side=side,
+                    order_id=order_id,
+                    status="filled",
+                )
+                return result
+
+            assert self.alpaca_config is not None
+            client_order_id = f"manual-{side}-{pd.Timestamp.now(tz='UTC').strftime('%Y%m%d%H%M%S')}"
+            if preview["use_notional"]:
+                order = submit_order(
+                    self.alpaca_config,
+                    symbol=symbol,
+                    side=side,
+                    order_type="market",
+                    time_in_force="day",
+                    notional=preview["estimated_notional"],
+                    client_order_id=client_order_id,
+                )
+            else:
+                order = submit_order(
+                    self.alpaca_config,
+                    symbol=symbol,
+                    side=side,
+                    order_type="market",
+                    time_in_force="day",
+                    qty=preview["estimated_qty"],
+                    client_order_id=client_order_id,
+                )
+
+            self.event_logger.emit(
+                "manual_trade_submitted",
+                message=f"Manual {side} order submitted for {symbol}: {format_order_summary(order)}",
+                symbol=symbol,
+                side=side,
+                amount_dollars=preview["amount_dollars"],
+                estimated_qty=preview["estimated_qty"],
+                order_id=order["id"],
+            )
+            terminal_order = wait_for_order_terminal(
+                self.alpaca_config,
+                order["id"],
+                timeout_seconds=self.effective_config().entry_timeout_seconds,
+            )
+            self.event_logger.emit(
+                "manual_trade_update",
+                message=f"Manual {side} order update for {symbol}: {format_order_summary(terminal_order)}",
+                symbol=symbol,
+                side=side,
+                order_id=terminal_order["id"],
+                status=terminal_order.get("status"),
+            )
+            self._refresh_broker_snapshots()
+            self._publish_all_snapshots()
+            return {
+                "order_id": terminal_order["id"],
+                "status": terminal_order.get("status"),
+                "symbol": symbol,
+                "side": side,
+                "filled_qty": float(terminal_order.get("filled_qty") or 0.0),
+                "filled_avg_price": float(terminal_order.get("filled_avg_price") or 0.0),
             }
 
     def apply_runtime_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -1420,6 +1672,220 @@ class PaperTradingEngine:
 
     def _runtime_overrides_active(self) -> bool:
         return bool(self._runtime_override_keys())
+
+    def _load_chart_payload(self, symbol: str, chart_range: str) -> dict[str, Any]:
+        timeframe, period = CHART_RANGE_MAP[chart_range]
+        end = pd.Timestamp.now(tz="UTC")
+        start = period_to_start(end, period)
+        assert self.alpaca_config is not None
+        bars = fetch_stock_bars(symbol, timeframe, start, end, config=self.alpaca_config)
+        points = [
+            {
+                "time": index.isoformat(),
+                "open": float(row.open),
+                "high": float(row.high),
+                "low": float(row.low),
+                "close": float(row.close),
+                "volume": float(row.volume),
+            }
+            for index, row in bars.tail(120).iterrows()
+        ]
+        markers = []
+        for order in list_orders(self.alpaca_config, status="all", limit=25):
+            if order.get("symbol") != symbol:
+                continue
+            marker_time = order.get("filled_at") or order.get("submitted_at") or order.get("created_at")
+            if not marker_time:
+                continue
+            markers.append(
+                {
+                    "time": marker_time,
+                    "label": order.get("side", "order").upper(),
+                    "status": order.get("status"),
+                    "price": float(order.get("filled_avg_price") or order.get("limit_price") or order.get("stop_price") or 0.0),
+                }
+            )
+        return {
+            "range": chart_range,
+            "timeframe": timeframe,
+            "points": points,
+            "markers": markers,
+        }
+
+    def _demo_trade_context(self, symbol: str, chart_range: str) -> dict[str, Any]:
+        now = pd.Timestamp.now(tz="America/New_York")
+        points = []
+        price = self._demo_price
+        step_minutes = 1 if chart_range == "1D" else 30 if chart_range == "1W" else 240
+        total_points = 60 if chart_range == "1D" else 40
+        for index in range(total_points):
+            timestamp = (now - pd.Timedelta(minutes=step_minutes * (total_points - index))).tz_convert("UTC")
+            drift = ((index % 7) - 3) * 0.18
+            close_price = round(price + drift, 2)
+            points.append(
+                {
+                    "time": timestamp.isoformat(),
+                    "open": round(close_price - 0.22, 2),
+                    "high": round(close_price + 0.4, 2),
+                    "low": round(close_price - 0.45, 2),
+                    "close": close_price,
+                    "volume": float(1000 + index * 13),
+                }
+            )
+        latest_price = points[-1]["close"]
+        can_manual_trade, manual_reason = self._manual_trade_availability(symbol)
+        position = self._demo_position_for_symbol(symbol)
+        return {
+            "symbol": symbol,
+            "configured_symbol": self.base_config.symbol,
+            "paper_only": True,
+            "manual_trading_enabled": can_manual_trade,
+            "manual_trading_reason": manual_reason,
+            "manual_trade_warning": self._manual_position_warning(symbol, position),
+            "quote": {
+                "last_price": latest_price,
+                "bid": round(latest_price - 0.03, 2),
+                "ask": round(latest_price + 0.03, 2),
+                "timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
+                "absolute_change": latest_price - points[0]["close"],
+                "percent_change": ((latest_price - points[0]["close"]) / points[0]["close"]) * 100.0,
+            },
+            "account": self._demo_account_payload(),
+            "position": position,
+            "position_summary": self._position_trade_summary(position),
+            "asset": {
+                "tradable": True,
+                "fractionable": True,
+                "shortable": False,
+                "easy_to_borrow": False,
+            },
+            "chart": {
+                "range": chart_range,
+                "timeframe": CHART_RANGE_MAP[chart_range][0],
+                "points": points,
+                "markers": [],
+            },
+            "bot": {
+                "status_label": self._bot_status_label(),
+                "status_reason": self._bot_status_reason(),
+                "running": self.running,
+                "paused": self.runtime_flags["paused_new_entries"],
+                "market_open": self.market_open,
+                "data_fresh": self.data_fresh,
+                "last_heartbeat": self.last_heartbeat_at,
+                "latest_completed_bar_time": self.last_completed_bar_time,
+                "enabled_strategies": [
+                    strategy_id
+                    for strategy_id, enabled in self.runtime_flags["enabled_strategies"].items()
+                    if enabled
+                ],
+            },
+        }
+
+    def _manual_trade_availability(self, symbol: str) -> tuple[bool, str | None]:
+        if symbol != self.base_config.symbol:
+            return False, f"Trading is currently enabled only for {self.base_config.symbol}."
+        if self.running:
+            return False, "Stop the bot before placing a manual trade so positions stay in sync."
+        if self.effective_config().dry_run:
+            return False, "Turn off dry run before placing a manual paper trade."
+        if not self.runtime_flags["enabled_symbols"].get(symbol, False):
+            return False, f"{symbol} is disabled in automation controls right now."
+        return True, None
+
+    def _manual_position_warning(self, symbol: str, position: dict[str, Any] | None) -> str | None:
+        if symbol != self.base_config.symbol:
+            return None
+        if position is not None and self.state.active_trade is None:
+            return "Manual positions on the bot symbol should be closed before restarting automation."
+        return None
+
+    def _lookup_position(self, symbol: str) -> dict[str, Any] | None:
+        symbol = symbol.upper()
+        for position in self.latest_positions:
+            if position.get("symbol") == symbol:
+                return position
+        if self.base_config.demo_mode:
+            return self._demo_position_for_symbol(symbol)
+        assert self.alpaca_config is not None
+        try:
+            return get_position(self.alpaca_config, symbol)
+        except RuntimeError:
+            return None
+
+    def _demo_account_payload(self) -> dict[str, float]:
+        return {
+            "cash": 100000.0,
+            "buying_power": 200000.0,
+            "portfolio_value": 100250.0,
+            "equity": 100250.0,
+            "last_equity": 100000.0,
+        }
+
+    def _demo_position_for_symbol(self, symbol: str) -> dict[str, Any] | None:
+        if symbol != self.base_config.symbol or self.state.active_trade is None:
+            return None
+        trade = self.state.active_trade
+        return {
+            "symbol": symbol,
+            "qty": trade.get("filled_qty", 0),
+            "side": "long",
+            "avg_entry_price": trade.get("entry_fill_price"),
+            "market_value": round(float(trade.get("filled_qty", 0)) * self._demo_price, 2),
+            "current_price": self._demo_price,
+            "unrealized_pl": round((self._demo_price - float(trade.get("entry_fill_price", self._demo_price))) * float(trade.get("filled_qty", 0)), 2),
+        }
+
+    def _position_trade_summary(self, position: dict[str, Any] | None) -> dict[str, Any] | None:
+        if position is None:
+            return None
+        active_trade = self.state.active_trade if self.state.active_trade and self.state.active_trade.get("symbol") == position.get("symbol") else None
+        opened_at = active_trade.get("opened_at") if active_trade else None
+        time_in_trade_minutes = None
+        if opened_at:
+            time_in_trade_minutes = int((pd.Timestamp.now(tz="UTC") - pd.Timestamp(opened_at)).total_seconds() // 60)
+        return {
+            "entry_price": float(position.get("avg_entry_price") or active_trade.get("entry_fill_price") or 0.0),
+            "current_price": float(position.get("current_price") or 0.0),
+            "unrealized_pnl": float(position.get("unrealized_pl") or 0.0),
+            "realized_pnl": float(position.get("realized_intraday_pl") or 0.0),
+            "time_in_trade_minutes": time_in_trade_minutes,
+            "stop_price": active_trade.get("stop_price") if active_trade else None,
+            "target_price": active_trade.get("target_price") if active_trade else None,
+            "opened_at": opened_at,
+        }
+
+    def _bot_status_label(self) -> str:
+        if self.startup_state == "starting":
+            return "Starting"
+        if self.startup_state == "failed":
+            return "Needs attention"
+        if not self.running:
+            return "Stopped"
+        if self.runtime_flags["paused_new_entries"]:
+            return "Paused"
+        if not self.market_open:
+            return "Market closed"
+        if not self.data_fresh:
+            return "Data delayed"
+        if self.state.active_trade is not None:
+            return "In position"
+        return "Waiting for signal"
+
+    def _bot_status_reason(self) -> str:
+        if self.startup_error:
+            return self.startup_error
+        if self.runtime_flags["paused_new_entries"]:
+            return "Automation is connected but new entries are paused."
+        if not self.running:
+            return "The bot is not running right now."
+        if not self.market_open:
+            return "The market is closed, so the bot is waiting for the next session."
+        if not self.data_fresh:
+            return "Live market data is stale, so trading is blocked until it refreshes."
+        if self.state.active_trade is not None:
+            return "A paper position is open and the runner is managing it."
+        return "Everything is connected and the bot is waiting for the next valid setup."
 
     def _publish_all_snapshots(self) -> None:
         self.store.upsert_snapshot("runner_status", self._runner_status_snapshot())

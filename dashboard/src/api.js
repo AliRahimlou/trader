@@ -17,7 +17,12 @@ export async function fetchJson(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed with status ${response.status}`);
+    try {
+      const parsed = JSON.parse(body);
+      throw new Error(parsed.detail || body || `Request failed with status ${response.status}`);
+    } catch {
+      throw new Error(body || `Request failed with status ${response.status}`);
+    }
   }
   return response.json();
 }

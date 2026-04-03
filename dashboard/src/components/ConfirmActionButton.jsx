@@ -6,6 +6,7 @@ export default function ConfirmActionButton({
   onConfirm,
   disabled = false,
   className = "",
+  confirmWithDialog = true,
 }) {
   const [pending, setPending] = useState(false);
 
@@ -13,9 +14,11 @@ export default function ConfirmActionButton({
     if (disabled || pending) {
       return;
     }
-    const approved = window.confirm(confirmText);
-    if (!approved) {
-      return;
+    if (confirmWithDialog) {
+      const approved = window.confirm(confirmText);
+      if (!approved) {
+        return;
+      }
     }
     setPending(true);
     try {

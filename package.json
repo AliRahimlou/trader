@@ -1,0 +1,14 @@
+{
+  "name": "trader-root",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "start": "./scripts/run_full_stack.sh",
+    "start:demo": "./scripts/run_demo_stack.sh",
+    "backend": "./scripts/run_backend.sh",
+    "backend:demo": "./scripts/run_backend.sh --demo",
+    "frontend": "./scripts/run_frontend.sh",
+    "build": "npm --prefix ./dashboard run build",
+    "verify": "npm --prefix ./dashboard run verify"
+  }
+}

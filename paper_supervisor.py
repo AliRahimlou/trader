@@ -18,6 +18,7 @@ DANGEROUS_COMMANDS = {
     "apply_config",
     "close_symbol",
     "smoke_test",
+    "manual_trade",
 }
 
 
@@ -198,6 +199,12 @@ class EngineSupervisor:
             return self.engine.apply_runtime_settings(payload)
         if command_type == "close_symbol":
             return self.engine.close_symbol(payload["symbol"])
+        if command_type == "manual_trade":
+            return self.engine.execute_manual_trade(
+                payload["symbol"],
+                payload["side"],
+                float(payload["amount_dollars"]),
+            )
         if command_type == "run_once":
             if self.is_running():
                 raise RuntimeError("Cannot run once while the continuous runner is active.")
