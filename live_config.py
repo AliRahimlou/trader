@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from alpaca_api import AlpacaConfig, load_env_file
 from backtest_utils import BacktestConfig
 
 SUPPORTED_STRATEGIES = ("break", "pullback", "both")
+SUPPORTED_UNIVERSE_MODES = ("fixed", "alpaca_assets")
 
 
 def _env(name: str, default: str) -> str:
@@ -22,10 +23,59 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_csv(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    symbols = [item.strip().upper() for item in raw.split(",") if item.strip()]
+    deduped = list(dict.fromkeys(symbols))
+    return tuple(deduped)
+
+
+def _bool_arg(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _demo_variant_path(path: Path) -> Path:
+    if path.parts[:2] == ("runtime", "demo"):
+        return path
+    if path.parts and path.parts[0] == "runtime":
+        suffix = Path(*path.parts[1:]) if len(path.parts) > 1 else Path()
+        return Path("runtime") / "demo" / suffix
+    if path.is_absolute():
+        return path.parent / "demo" / path.name
+    return Path("runtime") / "demo" / path
+
+
+def isolate_demo_runtime(config: "PaperTradingConfig") -> "PaperTradingConfig":
+    if not config.demo_mode:
+        return config
+    return replace(
+        config,
+        database_path=_demo_variant_path(config.database_path),
+        log_dir=_demo_variant_path(config.log_dir),
+        state_dir=_demo_variant_path(config.state_dir),
+    )
+
+
 @dataclass(frozen=True)
 class PaperTradingConfig:
     symbol: str
     strategies: tuple[str, ...]
+    universe_mode: str
+    universe_symbols: tuple[str, ...]
+    universe_max_symbols: int
+    universe_refresh_seconds: int
+    watchlist_size: int
+    watchlist_hold_buffer: int
+    pinned_symbols: tuple[str, ...]
+    universe_allow_stocks: bool
+    universe_allow_etfs: bool
+    exclude_leveraged_etfs: bool
+    scanner_min_price: float
+    scanner_max_price: float
+    scanner_min_avg_daily_volume: float
+    scanner_max_spread_bps: float
     startup_timeout_seconds: float
     poll_seconds: float
     entry_timeout_seconds: int
@@ -38,8 +88,12 @@ class PaperTradingConfig:
     max_bar_age_seconds: int
     max_position_qty: float
     max_position_notional: float
+    max_concurrent_positions: int
+    max_capital_deployed: float
+    max_capital_per_symbol: float
     max_daily_loss: float
     max_trades_per_day: int
+    correlation_threshold: float
     one_position_per_symbol: bool
     cooldown_minutes: int
     flatten_at: str
@@ -59,24 +113,111 @@ class PaperTradingConfig:
     keep_state_days: int
     alpaca_feed: str | None
     demo_mode: bool
+    scanner_weight_liquidity: float
+    scanner_weight_volatility: float
+    scanner_weight_momentum: float
+    scanner_weight_gap: float
+    scanner_weight_trend: float
+    scanner_weight_setup: float
+    scanner_weight_spread: float
+    scanner_weight_freshness: float
+
+    @property
+    def configured_symbols(self) -> tuple[str, ...]:
+        ordered = [self.symbol, *self.universe_symbols, *self.pinned_symbols]
+        return tuple(dict.fromkeys(symbol.upper() for symbol in ordered if symbol))
+
+    @property
+    def multi_symbol_mode(self) -> bool:
+        return self.universe_mode != "fixed" or len(self.configured_symbols) > 1
 
     @property
     def state_path(self) -> Path:
         joined = "_".join(self.strategies)
         suffix = "dryrun" if self.dry_run else "paper"
-        return self.state_dir / f"{self.symbol.lower()}_{joined}_{suffix}.json"
+        prefix = "multi" if self.multi_symbol_mode else self.symbol.lower()
+        return self.state_dir / f"{prefix}_{joined}_{suffix}.json"
 
     @property
     def log_path(self) -> Path:
         joined = "_".join(self.strategies)
         suffix = "dryrun" if self.dry_run else "paper"
-        return self.log_dir / f"{self.symbol.lower()}_{joined}_{suffix}.jsonl"
+        prefix = "multi" if self.multi_symbol_mode else self.symbol.lower()
+        return self.log_dir / f"{prefix}_{joined}_{suffix}.jsonl"
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
     load_env_file(".env")
     parser = argparse.ArgumentParser(description="Run the FVG strategy live on Alpaca paper.")
     parser.add_argument("--symbol", default=_env("LIVE_PAPER_SYMBOL", "SPY"))
+    parser.add_argument(
+        "--universe-mode",
+        choices=SUPPORTED_UNIVERSE_MODES,
+        default=_env("LIVE_PAPER_UNIVERSE_MODE", "alpaca_assets"),
+    )
+    parser.add_argument(
+        "--universe-symbols",
+        default=_env("LIVE_PAPER_UNIVERSE_SYMBOLS", ""),
+    )
+    parser.add_argument(
+        "--universe-max-symbols",
+        type=int,
+        default=int(_env("LIVE_PAPER_UNIVERSE_MAX_SYMBOLS", "120")),
+    )
+    parser.add_argument(
+        "--universe-refresh-seconds",
+        type=int,
+        default=int(_env("LIVE_PAPER_UNIVERSE_REFRESH_SECONDS", "180")),
+    )
+    parser.add_argument(
+        "--watchlist-size",
+        type=int,
+        default=int(_env("LIVE_PAPER_WATCHLIST_SIZE", "10")),
+    )
+    parser.add_argument(
+        "--watchlist-hold-buffer",
+        type=int,
+        default=int(_env("LIVE_PAPER_WATCHLIST_HOLD_BUFFER", "4")),
+    )
+    parser.add_argument(
+        "--pinned-symbols",
+        default=_env("LIVE_PAPER_PINNED_SYMBOLS", ""),
+    )
+    parser.add_argument(
+        "--universe-allow-stocks",
+        type=_bool_arg,
+        default=_env_bool("LIVE_PAPER_UNIVERSE_ALLOW_STOCKS", True),
+    )
+    parser.add_argument(
+        "--universe-allow-etfs",
+        type=_bool_arg,
+        default=_env_bool("LIVE_PAPER_UNIVERSE_ALLOW_ETFS", True),
+    )
+    parser.add_argument(
+        "--exclude-leveraged-etfs",
+        type=_bool_arg,
+        default=_env_bool("LIVE_PAPER_EXCLUDE_LEVERAGED_ETFS", True),
+    )
+    parser.add_argument(
+        "--scanner-min-price",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_MIN_PRICE", "5")),
+    )
+    parser.add_argument(
+        "--scanner-max-price",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_MAX_PRICE", "0")),
+    )
+    parser.add_argument(
+        "--scanner-min-avg-daily-volume",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_MIN_AVG_DAILY_VOLUME", "1000000")),
+    )
+    parser.add_argument(
+        "--scanner-max-spread-bps",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_MAX_SPREAD_BPS", "35")),
+    )
     parser.add_argument(
         "--startup-timeout-seconds",
         type=float,
@@ -139,6 +280,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=float(_env("LIVE_PAPER_MAX_POSITION_NOTIONAL", "25000")),
     )
     parser.add_argument(
+        "--max-concurrent-positions",
+        type=int,
+        default=int(_env("LIVE_PAPER_MAX_CONCURRENT_POSITIONS", "3")),
+    )
+    parser.add_argument(
+        "--max-capital-deployed",
+        type=float,
+        default=float(_env("LIVE_PAPER_MAX_CAPITAL_DEPLOYED", "60000")),
+    )
+    parser.add_argument(
+        "--max-capital-per-symbol",
+        type=float,
+        default=float(_env("LIVE_PAPER_MAX_CAPITAL_PER_SYMBOL", "20000")),
+    )
+    parser.add_argument(
         "--max-daily-loss",
         type=float,
         default=float(_env("LIVE_PAPER_MAX_DAILY_LOSS", "300")),
@@ -157,6 +313,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--cooldown-minutes",
         type=int,
         default=int(_env("LIVE_PAPER_COOLDOWN_MINUTES", "5")),
+    )
+    parser.add_argument(
+        "--correlation-threshold",
+        type=float,
+        default=float(_env("LIVE_PAPER_CORRELATION_THRESHOLD", "0.92")),
     )
     parser.add_argument("--flatten-at", default=_env("LIVE_PAPER_FLATTEN_AT", "15:55"))
     parser.add_argument(
@@ -201,15 +362,75 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=("iex", "sip", "boats", "overnight"),
         default=_env("LIVE_PAPER_ALPACA_FEED", ""),
     )
+    parser.add_argument(
+        "--scanner-weight-liquidity",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_LIQUIDITY", "1.3")),
+    )
+    parser.add_argument(
+        "--scanner-weight-volatility",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_VOLATILITY", "1.0")),
+    )
+    parser.add_argument(
+        "--scanner-weight-momentum",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_MOMENTUM", "1.0")),
+    )
+    parser.add_argument(
+        "--scanner-weight-gap",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_GAP", "0.8")),
+    )
+    parser.add_argument(
+        "--scanner-weight-trend",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_TREND", "0.7")),
+    )
+    parser.add_argument(
+        "--scanner-weight-setup",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_SETUP", "1.5")),
+    )
+    parser.add_argument(
+        "--scanner-weight-spread",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_SPREAD", "0.8")),
+    )
+    parser.add_argument(
+        "--scanner-weight-freshness",
+        type=float,
+        default=float(_env("LIVE_PAPER_SCANNER_WEIGHT_FRESHNESS", "0.9")),
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
 
 def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
     strategies = ("break", "pullback") if args.strategy == "both" else (args.strategy,)
-    return PaperTradingConfig(
+    universe_symbols = _env_csv("LIVE_PAPER_UNIVERSE_SYMBOLS", args.universe_symbols)
+    if not universe_symbols:
+        universe_symbols = (args.symbol.upper(),)
+    if args.symbol.upper() not in universe_symbols:
+        universe_symbols = (args.symbol.upper(), *universe_symbols)
+    pinned_symbols = _env_csv("LIVE_PAPER_PINNED_SYMBOLS", args.pinned_symbols)
+    config = PaperTradingConfig(
         symbol=args.symbol.upper(),
         strategies=strategies,
+        universe_mode=args.universe_mode,
+        universe_symbols=universe_symbols,
+        universe_max_symbols=args.universe_max_symbols,
+        universe_refresh_seconds=args.universe_refresh_seconds,
+        watchlist_size=args.watchlist_size,
+        watchlist_hold_buffer=args.watchlist_hold_buffer,
+        pinned_symbols=pinned_symbols,
+        universe_allow_stocks=bool(args.universe_allow_stocks),
+        universe_allow_etfs=bool(args.universe_allow_etfs),
+        exclude_leveraged_etfs=bool(args.exclude_leveraged_etfs),
+        scanner_min_price=args.scanner_min_price,
+        scanner_max_price=args.scanner_max_price,
+        scanner_min_avg_daily_volume=args.scanner_min_avg_daily_volume,
+        scanner_max_spread_bps=args.scanner_max_spread_bps,
         startup_timeout_seconds=args.startup_timeout_seconds,
         poll_seconds=args.poll_seconds,
         entry_timeout_seconds=args.entry_timeout_seconds,
@@ -222,8 +443,12 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
         max_bar_age_seconds=args.max_bar_age_seconds,
         max_position_qty=args.max_position_qty,
         max_position_notional=args.max_position_notional,
+        max_concurrent_positions=args.max_concurrent_positions,
+        max_capital_deployed=args.max_capital_deployed,
+        max_capital_per_symbol=args.max_capital_per_symbol,
         max_daily_loss=args.max_daily_loss,
         max_trades_per_day=args.max_trades_per_day,
+        correlation_threshold=args.correlation_threshold,
         one_position_per_symbol=not args.disable_one_position_per_symbol,
         cooldown_minutes=args.cooldown_minutes,
         flatten_at=args.flatten_at,
@@ -251,7 +476,16 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
         keep_state_days=args.keep_state_days,
         alpaca_feed=args.alpaca_feed or None,
         demo_mode=args.demo_mode,
+        scanner_weight_liquidity=args.scanner_weight_liquidity,
+        scanner_weight_volatility=args.scanner_weight_volatility,
+        scanner_weight_momentum=args.scanner_weight_momentum,
+        scanner_weight_gap=args.scanner_weight_gap,
+        scanner_weight_trend=args.scanner_weight_trend,
+        scanner_weight_setup=args.scanner_weight_setup,
+        scanner_weight_spread=args.scanner_weight_spread,
+        scanner_weight_freshness=args.scanner_weight_freshness,
     )
+    return isolate_demo_runtime(config)
 
 
 def config_from_env() -> PaperTradingConfig:

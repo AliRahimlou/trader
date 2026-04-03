@@ -77,6 +77,22 @@ def create_app(config: PaperTradingConfig | None = None) -> FastAPI:
     def get_signals() -> dict[str, Any]:
         return _snapshot_or_default(store, "strategy_status", {})
 
+    @app.get("/api/scanner/status")
+    def get_scanner_status() -> dict[str, Any]:
+        return _snapshot_or_default(store, "scanner_status", {})
+
+    @app.get("/api/scanner/ranked")
+    def get_scanner_ranked(limit: int = Query(default=50, le=200)) -> dict[str, Any]:
+        payload = _snapshot_or_default(store, "scanner_ranked", {"items": []})
+        return {
+            **payload,
+            "items": list(payload.get("items", []))[:limit],
+        }
+
+    @app.get("/api/watchlist")
+    def get_watchlist() -> dict[str, Any]:
+        return _snapshot_or_default(store, "watchlist", {"entries": []})
+
     @app.get("/api/strategy-status")
     def get_strategy_status() -> dict[str, Any]:
         return _snapshot_or_default(store, "strategy_status", {})
@@ -96,6 +112,9 @@ def create_app(config: PaperTradingConfig | None = None) -> FastAPI:
         return {
             "health": _snapshot_or_default(store, "health", {}),
             "runner_status": _snapshot_or_default(store, "runner_status", {}),
+            "scanner_status": _snapshot_or_default(store, "scanner_status", {}),
+            "scanner_ranked": _snapshot_or_default(store, "scanner_ranked", {"items": []}),
+            "watchlist": _snapshot_or_default(store, "watchlist", {}),
             "market_snapshot": _snapshot_or_default(store, "market_snapshot", {}),
             "state": _snapshot_or_default(store, "state", {}),
             "database_path": str(config.database_path),
@@ -112,6 +131,8 @@ def create_app(config: PaperTradingConfig | None = None) -> FastAPI:
             positions=_snapshot_or_default(store, "positions", {"items": []}).get("items", []),
             open_orders=open_orders,
             strategy_status=_snapshot_or_default(store, "strategy_status", {}),
+            scanner_status=_snapshot_or_default(store, "scanner_status", {}),
+            watchlist=_snapshot_or_default(store, "watchlist", {}),
             commands=[CommandRecord.model_validate(item) for item in store.list_commands(limit=20)],
         )
 

@@ -7,6 +7,7 @@ const STREAM_EVENTS = [
   "runner_start",
   "runner_error",
   "market_snapshot",
+  "scanner_cycle_complete",
   "signal_evaluated",
   "entry_submitted",
   "entry_order_update",
@@ -14,6 +15,9 @@ const STREAM_EVENTS = [
   "trade_closed",
   "flatten_submitted",
   "flatten_order_update",
+  "watchlist_symbol_added",
+  "watchlist_symbol_removed",
+  "watchlist_pin_updated",
   "audit_command_requested",
   "audit_command_applied",
   "audit_command_rejected",
@@ -25,11 +29,34 @@ const STREAM_EVENTS = [
   "stale_data_halt",
 ];
 
+function normalizeWatchlistEntries(entries) {
+  if (Array.isArray(entries)) {
+    return entries;
+  }
+  if (entries && typeof entries === "object") {
+    return Object.values(entries);
+  }
+  return [];
+}
+
+function normalizeWatchlistPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { active_symbols: [], entries: [] };
+  }
+  return {
+    ...payload,
+    entries: normalizeWatchlistEntries(payload.entries),
+  };
+}
+
 export function DashboardProvider({ children }) {
   const [overview, setOverview] = useState(null);
   const [health, setHealth] = useState(null);
   const [config, setConfig] = useState(null);
   const [strategyStatus, setStrategyStatus] = useState(null);
+  const [scannerStatus, setScannerStatus] = useState(null);
+  const [scannerRanked, setScannerRanked] = useState([]);
+  const [watchlist, setWatchlist] = useState(null);
   const [positions, setPositions] = useState([]);
   const [orders, setOrders] = useState([]);
   const [commands, setCommands] = useState([]);
@@ -48,21 +75,35 @@ export function DashboardProvider({ children }) {
   const periodicRefreshRef = useRef(null);
 
   const refreshCore = useCallback(async () => {
-    const [overviewData, healthData, configData, strategyData, positionsData, ordersData, commandsData] =
+    const [overviewData, healthData, configData, strategyData, scannerStatusData, scannerRankedData, watchlistData, positionsData, ordersData, commandsData] =
       await Promise.all([
         fetchJson("/api/overview"),
         fetchJson("/api/health"),
         fetchJson("/api/config"),
         fetchJson("/api/strategy-status"),
+        fetchJson("/api/scanner/status"),
+        fetchJson("/api/scanner/ranked?limit=50"),
+        fetchJson("/api/watchlist"),
         fetchJson("/api/positions"),
         fetchJson("/api/orders"),
         fetchJson("/api/commands?limit=25"),
       ]);
 
-    setOverview(overviewData);
+    const normalizedWatchlist = normalizeWatchlistPayload(watchlistData);
+    const normalizedOverview = overviewData && typeof overviewData === "object"
+      ? {
+          ...overviewData,
+          watchlist: normalizeWatchlistPayload(overviewData.watchlist),
+        }
+      : overviewData;
+
+    setOverview(normalizedOverview);
     setHealth(healthData);
     setConfig(configData);
     setStrategyStatus(strategyData);
+    setScannerStatus(scannerStatusData);
+    setScannerRanked(scannerRankedData.items || []);
+    setWatchlist(normalizedWatchlist);
     setPositions(positionsData);
     setOrders(ordersData);
     setCommands(commandsData.items || []);
@@ -214,6 +255,9 @@ export function DashboardProvider({ children }) {
       health,
       config,
       strategyStatus,
+      scannerStatus,
+      scannerRanked,
+      watchlist,
       positions,
       orders,
       commands,
@@ -246,9 +290,12 @@ export function DashboardProvider({ children }) {
       overview,
       positions,
       refreshAll,
+      scannerRanked,
+      scannerStatus,
       sendCommand,
       streamConnected,
       strategyStatus,
+      watchlist,
     ],
   );
 

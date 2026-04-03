@@ -5,6 +5,7 @@ import { useDashboard } from "../state/DashboardContext";
 
 const NAV_ITEMS = [
   ["Home", "/"],
+  ["Scanner", "/scanner"],
   ["Trade", "/trade"],
   ["Positions", "/positions"],
   ["Activity", "/activity"],

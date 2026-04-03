@@ -117,6 +117,36 @@ def ensure_no_unmanaged_broker_state(
         )
 
 
+def ensure_no_unmanaged_broker_state_multi(
+    alpaca_config: AlpacaConfig,
+    *,
+    active_trades: dict[str, dict[str, Any]],
+) -> None:
+    tracked_symbols = {symbol.upper() for symbol in active_trades}
+    unmanaged_positions = [
+        position["symbol"]
+        for position in list_positions(alpaca_config)
+        if position["symbol"].upper() not in tracked_symbols
+    ]
+    unmanaged_orders = [
+        order["symbol"]
+        for order in list_orders(alpaca_config, status="open", limit=100)
+        if order["symbol"].upper() not in tracked_symbols
+    ]
+    if unmanaged_positions:
+        raise RuntimeError(
+            "Found unmanaged open positions in {}. Close them manually before starting the runner.".format(
+                ", ".join(sorted(unmanaged_positions))
+            )
+        )
+    if unmanaged_orders:
+        raise RuntimeError(
+            "Found unmanaged open orders in {}. Cancel them manually before starting the runner.".format(
+                ", ".join(sorted(unmanaged_orders))
+            )
+        )
+
+
 def submit_entry(
     alpaca_config: AlpacaConfig,
     signal: StrategySignal,

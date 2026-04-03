@@ -53,6 +53,8 @@ class OverviewResponse(BaseModel):
     positions: list[dict[str, Any]]
     open_orders: list[dict[str, Any]]
     strategy_status: dict[str, Any]
+    scanner_status: dict[str, Any] = Field(default_factory=dict)
+    watchlist: dict[str, Any] = Field(default_factory=dict)
     commands: list[CommandRecord]
 
 

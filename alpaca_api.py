@@ -124,6 +124,22 @@ def get_asset(config: AlpacaConfig, symbol: str) -> dict[str, Any]:
     return _request_trading(config, "GET", f"/v2/assets/{encoded_symbol}", action=f"fetch asset {symbol}")
 
 
+def list_assets(
+    config: AlpacaConfig,
+    *,
+    status: str = "active",
+    asset_class: str = "us_equity",
+) -> list[dict[str, Any]]:
+    response = _request_trading(
+        config,
+        "GET",
+        "/v2/assets",
+        params={"status": status, "asset_class": asset_class},
+        action=f"list {status} {asset_class} assets",
+    )
+    return list(response)
+
+
 def list_positions(config: AlpacaConfig) -> list[dict[str, Any]]:
     response = _request_trading(config, "GET", "/v2/positions", action="list positions")
     return list(response)
@@ -332,6 +348,96 @@ def fetch_latest_quote(config: AlpacaConfig, symbol: str) -> dict[str, Any]:
     _raise_for_status(response, f"fetch latest quote for {symbol}")
     payload = response.json()
     return payload["quotes"][symbol.upper()]
+
+
+def fetch_stock_snapshots(
+    symbols: list[str],
+    *,
+    config: AlpacaConfig,
+    chunk_size: int = 50,
+) -> dict[str, dict[str, Any]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    normalized_symbols = [symbol.upper() for symbol in symbols if symbol]
+    for start_index in range(0, len(normalized_symbols), chunk_size):
+        chunk = normalized_symbols[start_index : start_index + chunk_size]
+        if not chunk:
+            continue
+        response = requests.get(
+            f"{config.data_base_url}/v2/stocks/snapshots",
+            headers=config.headers,
+            params={"symbols": ",".join(chunk), "feed": config.feed},
+            timeout=30,
+        )
+        _raise_for_status(response, f"fetch stock snapshots for {','.join(chunk)}")
+        payload = response.json()
+        snapshot_payload = payload.get("snapshots") if isinstance(payload, dict) else None
+        if isinstance(snapshot_payload, dict):
+            snapshots.update(snapshot_payload)
+        elif isinstance(payload, dict):
+            snapshots.update({symbol.upper(): value for symbol, value in payload.items() if isinstance(value, dict)})
+    return snapshots
+
+
+def fetch_multi_stock_bars(
+    symbols: list[str],
+    interval: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    config: AlpacaConfig,
+    chunk_size: int = 25,
+) -> dict[str, pd.DataFrame]:
+    timeframe = TIMEFRAME_MAP[interval]
+    normalized_symbols = [symbol.upper() for symbol in symbols if symbol]
+    frames: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in normalized_symbols}
+    url = f"{config.data_base_url}/v2/stocks/bars"
+
+    for start_index in range(0, len(normalized_symbols), chunk_size):
+        chunk = normalized_symbols[start_index : start_index + chunk_size]
+        params: dict[str, Any] = {
+            "symbols": ",".join(chunk),
+            "timeframe": timeframe,
+            "start": to_api_timestamp(start),
+            "end": to_api_timestamp(end),
+            "limit": 10_000,
+            "sort": "asc",
+            "adjustment": "raw",
+            "feed": config.feed,
+        }
+        page_token: str | None = None
+        while True:
+            if page_token:
+                params["page_token"] = page_token
+            elif "page_token" in params:
+                del params["page_token"]
+            response = requests.get(url, headers=config.headers, params=params, timeout=30)
+            _raise_for_status(response, f"fetch {interval} bars for {','.join(chunk)}")
+            payload = response.json()
+            for symbol, bars in payload.get("bars", {}).items():
+                frames.setdefault(symbol.upper(), []).extend(list(bars))
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+
+    normalized_frames: dict[str, pd.DataFrame] = {}
+    for symbol in normalized_symbols:
+        bars = frames.get(symbol, [])
+        if not bars:
+            normalized_frames[symbol] = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            continue
+        frame = pd.DataFrame(
+            {
+                "timestamp": [bar["t"] for bar in bars],
+                "open": [bar["o"] for bar in bars],
+                "high": [bar["h"] for bar in bars],
+                "low": [bar["l"] for bar in bars],
+                "close": [bar["c"] for bar in bars],
+                "volume": [bar["v"] for bar in bars],
+            }
+        ).set_index("timestamp")
+        frame.index = pd.to_datetime(frame.index, utc=True)
+        normalized_frames[symbol] = normalize_ohlcv(frame, interval=interval)
+    return normalized_frames
 
 
 def fetch_stock_bars(

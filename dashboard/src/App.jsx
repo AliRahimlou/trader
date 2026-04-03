@@ -4,6 +4,7 @@ import AppShell from "./components/AppShell";
 import OrdersPage from "./pages/OrdersPage";
 import OverviewPage from "./pages/OverviewPage";
 import PositionsPage from "./pages/PositionsPage";
+import ScannerPage from "./pages/ScannerPage";
 import SettingsPage from "./pages/SettingsPage";
 import StrategyMonitorPage from "./pages/StrategyMonitorPage";
 import TradePage from "./pages/TradePage";
@@ -13,6 +14,7 @@ export default function App() {
     <AppShell>
       <Routes>
         <Route path="/" element={<OverviewPage />} />
+        <Route path="/scanner" element={<ScannerPage />} />
         <Route path="/trade" element={<TradePage />} />
         <Route path="/positions" element={<PositionsPage />} />
         <Route path="/activity" element={<OrdersPage />} />

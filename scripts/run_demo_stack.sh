@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 . .venv/bin/activate
-.venv/bin/python backend_server.py --demo &
+.venv/bin/python backend_server.py --demo --reload &
 BACKEND_PID=$!
 
 cleanup() {

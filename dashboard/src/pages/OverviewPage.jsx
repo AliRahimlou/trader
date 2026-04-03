@@ -4,10 +4,14 @@ import { botStateLabel, formatCurrency, formatPercent, formatSignedCurrency, pnl
 import { useDashboard } from "../state/DashboardContext";
 
 export default function OverviewPage() {
-  const { overview, events } = useDashboard();
+  const { overview, events, scannerStatus, watchlist } = useDashboard();
   const account = overview?.account || {};
   const positions = overview?.positions || [];
   const strategyStatus = overview?.strategy_status || {};
+  const activeWatchlist = watchlist?.active_symbols || overview?.watchlist?.active_symbols || [];
+  const watchlistEntries = watchlist?.entries || overview?.watchlist?.entries || [];
+  const scannedCount = scannerStatus?.scanned_count ?? overview?.scanner_status?.scanned_count ?? 0;
+  const universeCount = scannerStatus?.universe_count ?? overview?.scanner_status?.universe_count ?? 0;
   const portfolioValue = Number(account.portfolio_value || 0);
   const equity = Number(account.equity || portfolioValue);
   const lastEquity = Number(account.last_equity || equity);
@@ -32,7 +36,7 @@ export default function OverviewPage() {
         <div className="hero-side-grid">
           <InfoTile label="Cash" value={formatCurrency(account.cash)} />
           <InfoTile label="Buying power" value={formatCurrency(account.buying_power)} />
-          <InfoTile label="Open positions" value={String(activePositionCount)} />
+          <InfoTile label="Watchlist" value={String(activeWatchlist.length)} />
           <InfoTile label="Bot state" value={botStateLabel({ status_label: botState(strategyStatus, overview) })} />
         </div>
       </section>
@@ -66,10 +70,45 @@ export default function OverviewPage() {
           <p>{statusReason(overview)}</p>
         </div>
         <dl className="plain-detail-list">
-          <Detail label="Current symbol" value={overview?.runner_status?.symbol || "n/a"} />
+          <Detail label="Open positions" value={String(activePositionCount)} />
+          <Detail label="Active watchlist" value={activeWatchlist.length ? activeWatchlist.join(", ") : "none"} />
+          <Detail label="Universe scanned" value={universeCount ? `${scannedCount} of ${universeCount}` : "n/a"} />
           <Detail label="Last completed bar" value={overview?.runner_status?.latest_completed_bar_time || "n/a"} />
           <Detail label="Latest heartbeat" value={overview?.runner_status?.last_heartbeat || "n/a"} />
         </dl>
+      </section>
+
+      <section className="panel panel-span-2">
+        <div className="section-head">
+          <div>
+            <h2>Scanner watchlist</h2>
+            <p className="muted">What the runner is actively ranking and monitoring right now.</p>
+          </div>
+          <Link to="/scanner" className="ghost-link">Manage scanner</Link>
+        </div>
+        {!watchlistEntries.length ? (
+          <div className="empty-card">
+            <h3>No active watchlist</h3>
+            <p>The scanner has not published a watchlist yet, or nothing currently qualifies.</p>
+          </div>
+        ) : (
+          <div className="position-card-grid">
+            {watchlistEntries.slice(0, 6).map((entry) => (
+              <div className="position-summary-card" key={entry.symbol}>
+                <div className="position-summary-head">
+                  <h3>{entry.symbol}</h3>
+                  <span className="change-pill neutral">#{entry.rank || "-"}</span>
+                </div>
+                <div className="position-summary-grid">
+                  <InfoTile label="Score" value={Number(entry.score || 0).toFixed(1)} compact />
+                  <InfoTile label="Signals" value={String((entry.signals || []).length)} compact />
+                  <InfoTile label="Reason" value={entry.watch_reason || "ranked"} compact />
+                  <InfoTile label="Status" value={entry.pinned ? "Pinned" : entry.active_position ? "Open position" : entry.enabled ? "Eligible" : "Disabled"} compact />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="panel panel-span-2">
@@ -142,7 +181,7 @@ function botState(strategyStatus, overview) {
   if (!overview?.health?.market_open && !overview?.runner_status?.market_open) {
     return "Market closed";
   }
-  if (strategyStatus?.active_trade) {
+  if ((strategyStatus?.active_trades || []).length) {
     return "In position";
   }
   return "Waiting for signal";

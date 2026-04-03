@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import PriceChart from "../components/PriceChart";
 import TradePreviewModal from "../components/TradePreviewModal";
 import { fetchJson } from "../api";
@@ -9,9 +10,10 @@ const RANGE_OPTIONS = ["1D", "1W", "1M"];
 const QUICK_AMOUNTS = [50, 100, 500];
 
 export default function TradePage() {
-  const { overview, sendCommand, commandPending, refreshAll } = useDashboard();
+  const { overview, sendCommand, commandPending, refreshAll, watchlist: liveWatchlist, scannerRanked } = useDashboard();
+  const [searchParams, setSearchParams] = useSearchParams();
   const configuredSymbol = overview?.runner_status?.symbol || "SPY";
-  const [selectedSymbol, setSelectedSymbol] = useState(configuredSymbol);
+  const selectedSymbol = (searchParams.get("symbol") || configuredSymbol).toUpperCase();
   const [chartRange, setChartRange] = useState("1D");
   const [tradeContext, setTradeContext] = useState(null);
   const [amount, setAmount] = useState("100");
@@ -21,26 +23,37 @@ export default function TradePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [watchlist, setWatchlist] = useState(() => {
-    const stored = window.localStorage.getItem("paper-watchlist");
+  const [recentSymbols, setRecentSymbols] = useState(() => {
+    const stored = window.localStorage.getItem("paper-recent-symbols");
     if (!stored) {
-      return [configuredSymbol, "QQQ", "AAPL", "MSFT"];
+      return [];
     }
     try {
       return JSON.parse(stored);
     } catch {
-      return [configuredSymbol, "QQQ", "AAPL", "MSFT"];
+      return [];
     }
   });
+  const activeWatchlist = liveWatchlist?.active_symbols || [];
+  const rankedSymbols = scannerRanked.slice(0, 8).map((candidate) => candidate.symbol);
+  const pickerSymbols = Array.from(
+    new Set([selectedSymbol, ...activeWatchlist, ...rankedSymbols, ...recentSymbols, configuredSymbol].filter(Boolean)),
+  ).slice(0, 12);
 
   useEffect(() => {
-    setSelectedSymbol(configuredSymbol);
-    setSymbolInput(configuredSymbol);
-  }, [configuredSymbol]);
+    setSymbolInput(selectedSymbol);
+  }, [selectedSymbol]);
 
   useEffect(() => {
-    window.localStorage.setItem("paper-watchlist", JSON.stringify(Array.from(new Set([configuredSymbol, ...watchlist]))));
-  }, [configuredSymbol, watchlist]);
+    if (!selectedSymbol) {
+      return;
+    }
+    setRecentSymbols((current) => Array.from(new Set([selectedSymbol, ...current])).slice(0, 8));
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    window.localStorage.setItem("paper-recent-symbols", JSON.stringify(recentSymbols));
+  }, [recentSymbols]);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,7 +80,6 @@ export default function TradePage() {
     };
   }, [chartRange, selectedSymbol]);
 
-  const isConfiguredSymbol = selectedSymbol === configuredSymbol;
   const account = tradeContext?.account || {};
   const position = tradeContext?.position || null;
   const quote = tradeContext?.quote || {};
@@ -125,13 +137,12 @@ export default function TradePage() {
     }
   };
 
-  const addToWatchlist = () => {
+  const loadSymbol = () => {
     const symbol = symbolInput.trim().toUpperCase();
     if (!symbol) {
       return;
     }
-    setWatchlist((current) => Array.from(new Set([symbol, ...current])).slice(0, 8));
-    setSelectedSymbol(symbol);
+    setSearchParams({ symbol });
   };
 
   return (
@@ -150,17 +161,17 @@ export default function TradePage() {
         </div>
         <div className="symbol-search-card">
           <label>
-            <span>Search a symbol</span>
+            <span>Open a symbol</span>
             <div className="symbol-search-row">
               <input value={symbolInput} onChange={(event) => setSymbolInput(event.target.value.toUpperCase())} placeholder="SPY" />
-              <button type="button" className="ghost-button" onClick={addToWatchlist}>
-                Load
+              <button type="button" className="ghost-button" onClick={loadSymbol}>
+                Open
               </button>
             </div>
           </label>
           <div className="chip-row">
-            {watchlist.map((symbol) => (
-              <button key={symbol} type="button" className={`chip ${symbol === selectedSymbol ? "chip-active" : ""}`} onClick={() => setSelectedSymbol(symbol)}>
+            {pickerSymbols.map((symbol) => (
+              <button key={symbol} type="button" className={`chip ${symbol === selectedSymbol ? "chip-active" : ""}`} onClick={() => setSearchParams({ symbol })}>
                 {symbol}
               </button>
             ))}
@@ -214,7 +225,6 @@ export default function TradePage() {
           <TicketMetric label="Current position" value={position ? formatNumber(position.qty, 6) : "No position"} />
         </div>
 
-        {!isConfiguredSymbol && <div className="inline-banner warn">You can chart any watchlist symbol, but manual trading is currently enabled only for {configuredSymbol}.</div>}
         {tradeContext?.manual_trading_reason && <div className="inline-banner warn">{tradeContext.manual_trading_reason}</div>}
         {tradeContext?.manual_trade_warning && <div className="inline-banner warn">{tradeContext.manual_trade_warning}</div>}
         {message && <div className="inline-banner success">{message}</div>}
@@ -230,8 +240,8 @@ export default function TradePage() {
           <button
             type="button"
             className="ghost-button"
-            disabled={commandPending || !position || !isConfiguredSymbol}
-            onClick={() => sendCommand("close_symbol", { symbol: configuredSymbol }, { confirm: true })}
+            disabled={commandPending || !position}
+            onClick={() => sendCommand("close_symbol", { symbol: selectedSymbol }, { confirm: true })}
           >
             Exit current position now
           </button>

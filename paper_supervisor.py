@@ -189,6 +189,10 @@ class EngineSupervisor:
             return self.engine.cancel_open_orders()
         if command_type == "set_symbol_enabled":
             return self.engine.set_symbol_enabled(payload["symbol"], bool(payload["enabled"]))
+        if command_type == "pin_symbol":
+            return self.engine.pin_symbol(payload["symbol"], bool(payload.get("pinned", True)))
+        if command_type == "refresh_scanner":
+            return self.engine.refresh_scanner()
         if command_type == "set_strategy_enabled":
             return self.engine.set_strategy_enabled(payload["strategy"], bool(payload["enabled"]))
         if command_type == "set_dry_run":
