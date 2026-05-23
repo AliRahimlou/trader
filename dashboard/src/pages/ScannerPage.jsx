@@ -39,10 +39,20 @@ export default function ScannerPage() {
   const watchlistBySymbol = Object.fromEntries(
     watchlistEntries.map((entry) => [entry.symbol, entry]),
   );
-  const bestCandidate = scannerRanked.find((candidate) => isEligibleCandidate(candidate)) || scannerRanked[0] || null;
-  const bestOpportunities = scannerRanked.filter((candidate) => isEligibleCandidate(candidate)).slice(0, 3);
+  const strategyReadyCandidates = scannerRanked.filter((candidate) => isEligibleCandidate(candidate) && Boolean(candidate.best_signal));
+  const bestCandidate = strategyReadyCandidates[0] || scannerRanked.find((candidate) => isEligibleCandidate(candidate)) || scannerRanked[0] || null;
+  const bestOpportunities = (strategyReadyCandidates.length ? strategyReadyCandidates : scannerRanked.filter((candidate) => isEligibleCandidate(candidate))).slice(0, 3);
   const eligibleCount = scannerRanked.filter((candidate) => isEligibleCandidate(candidate)).length;
   const excludedCount = scannerRanked.length - eligibleCount;
+  const bestWatchlistEntry = bestCandidate ? watchlistBySymbol[bestCandidate.symbol] : null;
+  const bestCandidateStatus = bestCandidate ? candidateStatusLabel(bestCandidate, activeWatchlist, bestWatchlistEntry) : "Waiting";
+  const bestCandidateTone = bestCandidate ? candidateStatusTone(bestCandidate, activeWatchlist, bestWatchlistEntry) : "neutral";
+  const heroDrivers = bestCandidate ? sortedScoreComponents(bestCandidate.score_components).slice(0, 3) : [];
+  const stageCounts = scannerStatus?.health?.stage_counts || {};
+  const scannerFallback = Boolean(scannerStatus?.health?.fallback);
+  const scannerWarning = scannerFallback
+    ? scannerStatus?.health?.last_error || "Using the last successful scanner snapshot while the data feed cools down."
+    : "";
 
   const filteredCandidates = [...scannerRanked]
     .filter((candidate) => matchesCandidateSearch(candidate, deferredSearch))
@@ -67,15 +77,28 @@ export default function ScannerPage() {
   return (
     <div className="app-grid scanner-page">
       <section className="hero-card panel-span-2 scanner-hero">
-        <div>
-          <p className="eyebrow">Scanner</p>
-          <h1>{bestCandidate ? `${bestCandidate.symbol} leads the board` : "Scanner is ready to rank"}</h1>
+        <div className="scanner-hero-main">
+          <div className="scanner-hero-badge-row">
+            <p className="eyebrow">Scanner live</p>
+            {bestCandidate && <span className="scanner-symbol-badge">{bestCandidate.symbol}</span>}
+            <span className={`status-chip status-chip-${bestCandidateTone}`}>{bestCandidateStatus}</span>
+          </div>
+          <h1>{bestCandidate ? `${bestCandidate.symbol} is the clearest opportunity right now` : "Scanner is ready to rank"}</h1>
           <p className="hero-copy">
             {bestCandidate
-              ? buildCandidateHeadline(bestCandidate, watchlistBySymbol[bestCandidate.symbol], activeWatchlist)
+              ? buildCandidateHeadline(bestCandidate, bestWatchlistEntry, activeWatchlist)
               : "Refresh the scanner to build a ranked list of the strongest paper-trading opportunities."}
           </p>
-          <div className="quick-action-row">
+          {heroDrivers.length > 0 && (
+            <div className="chip-row scanner-highlight-strip">
+              {heroDrivers.map(([name, value]) => (
+                <span className="change-pill neutral" key={name}>
+                  {formatComponentLabel(name)} {formatNumber(value, 0)}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="quick-action-row scanner-action-row">
             <button
               type="button"
               className="ghost-button"
@@ -86,7 +109,7 @@ export default function ScannerPage() {
             </button>
             {bestCandidate && (
               <Link to={`/trade?symbol=${bestCandidate.symbol}`} className="primary-link-button">
-                Open best idea
+                Open ticket
               </Link>
             )}
             <Link to="/bot" className="ghost-link-button">
@@ -94,11 +117,58 @@ export default function ScannerPage() {
             </Link>
           </div>
         </div>
-        <div className="hero-side-grid">
-          <InfoCard label="Universe scanned" value={scannerStatus?.universe_count ? `${scannerStatus.scanned_count} of ${scannerStatus.universe_count}` : "n/a"} />
-          <InfoCard label="Live watchlist" value={String(activeWatchlist.length)} />
-          <InfoCard label="Eligible now" value={String(eligibleCount)} tone="positive" />
-          <InfoCard label="Excluded now" value={String(excludedCount)} tone={excludedCount ? "warn" : "neutral"} />
+        <div className="scanner-hero-rail">
+          <div className="hero-side-grid scanner-hero-stats">
+            <InfoCard label="Universe scanned" value={scannerStatus?.universe_count ? `${scannerStatus.scanned_count} of ${scannerStatus.universe_count}` : "n/a"} />
+            <InfoCard label="Deep scan set" value={String(stageCounts.deep_scan_symbols || scannerStatus?.scanned_count || 0)} />
+            <InfoCard label="Live watchlist" value={String(activeWatchlist.length)} />
+            <InfoCard label="Live setups" value={String(stageCounts.live_signal_symbols || 0)} tone={stageCounts.live_signal_symbols ? "positive" : "neutral"} />
+            <InfoCard label="Eligible now" value={String(eligibleCount)} tone="positive" />
+            <InfoCard label="Excluded now" value={String(excludedCount)} tone={excludedCount ? "warn" : "neutral"} />
+          </div>
+          {bestCandidate && (
+            <div className="scanner-hero-summary-card">
+              <div className="section-head scanner-subsection-head">
+                <div>
+                  <h3>Why it leads</h3>
+                  <p className="muted">A quick read before you drill into the board.</p>
+                </div>
+                <div className="chip-row">
+                  <span className="change-pill neutral">#{bestCandidate.rank || "-"}</span>
+                  {bestCandidate.best_signal?.selection_score ? (
+                    <span className="change-pill neutral">Best setup {formatNumber(bestCandidate.best_signal.selection_score, 1)}</span>
+                  ) : null}
+                </div>
+              </div>
+              <p className="scanner-note-copy">{buildSelectionNarrative(bestCandidate, bestWatchlistEntry, activeWatchlist)}</p>
+              {bestOpportunities.length > 0 && (
+                <div className="scanner-shortcut-list">
+                  {bestOpportunities.map((candidate) => {
+                    const shortcutEntry = watchlistBySymbol[candidate.symbol];
+                    return (
+                      <Link to={`/trade?symbol=${candidate.symbol}`} className="scanner-shortcut-card" key={candidate.symbol}>
+                        <div>
+                          <strong>{candidate.symbol}</strong>
+                          <p className="muted">{candidateStatusLabel(candidate, activeWatchlist, shortcutEntry)}</p>
+                        </div>
+                        <div className="scanner-shortcut-metrics">
+                          <span>#{candidate.rank || "-"}</span>
+                          <strong>{formatNumber(candidate.score || 0, 1)}</strong>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {scannerWarning && (
+            <div className="scanner-alert-card">
+              <p className="eyebrow">Scanner fallback</p>
+              <strong>Showing the last successful board</strong>
+              <p className="muted">{scannerWarning}</p>
+            </div>
+          )}
         </div>
       </section>
 
@@ -107,6 +177,10 @@ export default function ScannerPage() {
           <div>
             <h2>Browse the ranked universe</h2>
             <p className="muted">Search symbols, filter by live status, and inspect why each name is rising or being rejected.</p>
+          </div>
+          <div className="scanner-toolbar-meta">
+            <span className="change-pill neutral">{filteredCandidates.length} shown</span>
+            {selectedCandidate && <span className="muted">Focused on {selectedCandidate.symbol}</span>}
           </div>
         </div>
         <div className="scanner-toolbar">
@@ -166,6 +240,7 @@ export default function ScannerPage() {
                   </div>
                   <div className="position-summary-grid">
                     <InfoCard label="Score" value={formatNumber(candidate.score || 0, 1)} compact />
+                    <InfoCard label="Best setup" value={candidate.best_signal?.selection_score ? formatNumber(candidate.best_signal.selection_score || 0, 1) : "n/a"} compact />
                     <InfoCard label="Signals" value={String((candidate.signals || []).length)} compact />
                     <InfoCard label="Price" value={formatCurrency(candidate.features?.price)} compact />
                     <InfoCard label="Status" value={candidateStatusLabel(candidate, activeWatchlist, watchlistEntry)} compact />
@@ -307,6 +382,7 @@ export default function ScannerPage() {
 
                 <div className="detail-card-grid scanner-detail-grid">
                   <InfoCard label="Scanner score" value={formatNumber(selectedCandidate.score || 0, 1)} />
+                  <InfoCard label="Best setup" value={selectedCandidate.best_signal?.selection_score ? formatNumber(selectedCandidate.best_signal.selection_score || 0, 1) : "n/a"} />
                   <InfoCard label="Watchlist reason" value={selectedWatchlistEntry ? formatReasonLabel(selectedWatchlistEntry.watch_reason) : "Not selected"} />
                   <InfoCard label="Signals" value={String((selectedCandidate.signals || []).length)} />
                   <InfoCard label="Price" value={formatCurrency(selectedCandidate.features?.price)} />
@@ -314,6 +390,26 @@ export default function ScannerPage() {
                   <InfoCard label="Session return" value={formatPercent(selectedCandidate.features?.intraday_return_pct)} />
                   <InfoCard label="Relative volume" value={formatNumber(selectedCandidate.features?.relative_volume || 0, 2)} />
                   <InfoCard label="Spread" value={selectedCandidate.features?.spread_bps != null ? `${formatNumber(selectedCandidate.features?.spread_bps || 0, 1)} bps` : "n/a"} />
+                </div>
+
+                <div className="section-head scanner-subsection-head">
+                  <div>
+                    <h3>Stage scores</h3>
+                    <p className="muted">How the symbol moved from broad scan to execution-ready opportunity.</p>
+                  </div>
+                </div>
+                <div className="score-bar-list">
+                  {sortedStageScores(selectedCandidate.stage_scores).map(([name, value]) => (
+                    <div className="score-bar-row" key={name}>
+                      <div className="score-bar-head">
+                        <span>{formatComponentLabel(name)}</span>
+                        <strong>{formatNumber(value, 1)}</strong>
+                      </div>
+                      <div className="score-bar-track">
+                        <div className="score-bar-fill" style={{ width: `${Math.max(0, Math.min(100, Number(value) || 0))}%` }} />
+                      </div>
+                    </div>
+                  ))}
                 </div>
 
                 <div className="section-head scanner-subsection-head">
@@ -340,6 +436,8 @@ export default function ScannerPage() {
                   <div className="card-like scanner-note-card">
                     <h3>Why it ranks</h3>
                     <p className="muted">{buildSelectionNarrative(selectedCandidate, selectedWatchlistEntry, activeWatchlist)}</p>
+                    {selectedCandidate.rank_reason ? <p className="muted scanner-note-copy">{selectedCandidate.rank_reason}</p> : null}
+                    {selectedCandidate.relative_ranking_reason ? <p className="muted scanner-note-copy">{selectedCandidate.relative_ranking_reason}</p> : null}
                     <div className="chip-row">
                       {sortedScoreComponents(selectedCandidate.score_components).slice(0, 4).map(([name]) => (
                         <span className="change-pill neutral" key={name}>{formatComponentLabel(name)}</span>
@@ -348,7 +446,7 @@ export default function ScannerPage() {
                   </div>
 
                   <div className="card-like scanner-note-card">
-                    <h3>Exclusions</h3>
+                    <h3>Exclusions and near misses</h3>
                     {selectedCandidate.exclusion_reasons?.length ? (
                       <div className="chip-row">
                         {selectedCandidate.exclusion_reasons.map((reason) => (
@@ -358,6 +456,13 @@ export default function ScannerPage() {
                     ) : (
                       <p className="muted">No active exclusions. This symbol is currently eligible for watchlist routing.</p>
                     )}
+                    {selectedCandidate.near_miss_reasons?.length ? (
+                      <div className="chip-row">
+                        {selectedCandidate.near_miss_reasons.map((reason) => (
+                          <span className="change-pill neutral" key={reason}>{formatReasonLabel(reason)}</span>
+                        ))}
+                      </div>
+                    ) : null}
                     {selectedCandidate.notes?.length ? <p className="muted scanner-note-copy">{selectedCandidate.notes.join(" · ")}</p> : null}
                   </div>
                 </div>
@@ -386,8 +491,11 @@ export default function ScannerPage() {
                             <p className="muted">
                               {formatComponentLabel(signal.direction)} · {formatReasonLabel(signal.reason || "strategy_match")}
                             </p>
+                            {signal.summary ? <p className="muted scanner-note-copy">{signal.summary}</p> : null}
                           </div>
                           <div className="scanner-signal-metrics">
+                            <span>{signal.selection_score != null ? `${formatNumber(signal.selection_score || 0, 1)} score` : "n/a"}</span>
+                            <span>{signal.expectancy_score != null ? `${formatNumber(signal.expectancy_score || 0, 1)} expectancy` : "n/a"}</span>
                             <span>{formatCurrency(signal.entry_reference_price)}</span>
                             <span>{formatCurrency(signal.stop_price)} stop</span>
                             <span>{formatCurrency(signal.target_price)} target</span>
@@ -535,9 +643,19 @@ function sortedScoreComponents(scoreComponents = {}) {
   return Object.entries(scoreComponents).sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0));
 }
 
+function sortedStageScores(stageScores = {}) {
+  return Object.entries(stageScores).sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0));
+}
+
 function summarizeCandidate(candidate) {
+  if (candidate.best_signal?.summary) {
+    return candidate.best_signal.summary;
+  }
   if (candidate.exclusion_reasons?.length) {
     return formatReasonLabel(candidate.exclusion_reasons[0]);
+  }
+  if (candidate.rank_reason) {
+    return candidate.rank_reason;
   }
   if (candidate.signals?.length) {
     return formatSignalSummary(candidate);
@@ -552,7 +670,9 @@ function summarizeCandidate(candidate) {
 function buildCandidateHeadline(candidate, watchlistEntry, activeWatchlist) {
   const reasons = [];
   const topDrivers = sortedScoreComponents(candidate.score_components).slice(0, 2).map(([name]) => formatComponentLabel(name).toLowerCase());
-  if (candidate.signals?.length) {
+  if (candidate.best_signal?.strategy_name) {
+    reasons.push(`${candidate.best_signal.strategy_name.toLowerCase()} is the best live setup`);
+  } else if (candidate.signals?.length) {
     reasons.push(`${candidate.signals.length} live setup match${candidate.signals.length === 1 ? "" : "es"}`);
   }
   if (topDrivers.length) {
@@ -576,6 +696,9 @@ function buildSelectionNarrative(candidate, watchlistEntry, activeWatchlist) {
   if (candidate.exclusion_reasons?.length) {
     return `${candidate.symbol} is currently ${status}. It still scores on ${topDrivers.join(", ") || "scanner context"}, but routing is blocked by ${candidate.exclusion_reasons.map((reason) => formatReasonLabel(reason).toLowerCase()).join(", ")}.`;
   }
+  if (candidate.best_signal?.summary) {
+    return `${candidate.symbol} is currently ${status}. ${candidate.best_signal.summary}. Its strongest scanner drivers are ${topDrivers.join(", ") || "balanced scanner components"}, and its watchlist state is ${watchReason}.`;
+  }
   return `${candidate.symbol} is currently ${status}. Its strongest drivers are ${topDrivers.join(", ") || "balanced scanner components"}, and its watchlist state is ${watchReason}.`;
 }
 
@@ -583,20 +706,28 @@ function formatSignalSummary(candidate) {
   if (!candidate.signals?.length) {
     return "No active setup";
   }
-  return candidate.signals.map((signal) => `${formatComponentLabel(signal.strategy_id)} ${formatComponentLabel(signal.direction)}`).join(" · ");
+  return candidate.signals.map((signal) => `${formatComponentLabel(signal.strategy_id)} ${formatComponentLabel(signal.direction)}${signal.selection_score != null ? ` ${formatNumber(signal.selection_score || 0, 0)}` : ""}`).join(" · ");
 }
 
 function formatComponentLabel(value) {
   const labels = {
     atr_pct: "ATR %",
+    context: "Context",
     daily_bias: "Daily bias",
+    execution: "Execution",
+    expectancy: "Expectancy",
     freshness: "Freshness",
     gap: "Gap",
     intraday_return_pct: "Session return",
     liquidity: "Liquidity",
     momentum: "Momentum",
+    opportunity_window: "Opportunity window",
+    portfolio_fit: "Portfolio fit",
+    prefilter: "Prefilter",
     pullback: "Pullback",
     recent_momentum_pct: "Recent momentum",
+    regime_clarity: "Regime clarity",
+    setup_quality: "Setup quality",
     setup: "Setup fit",
     signals: "Signals",
     spread: "Spread",
@@ -614,8 +745,10 @@ function formatReasonLabel(reason) {
   const labels = {
     above_max_price: "Above max price",
     asset_not_tradable: "Asset not tradable",
+    awaiting_live_strategy_trigger: "Awaiting live trigger",
     below_min_average_volume: "Below minimum average volume",
     below_min_price: "Below minimum price",
+    correlated_with_open_positions: "Too correlated with open positions",
     disabled_override: "Disabled by operator",
     dropped_from_watchlist: "Dropped from watchlist",
     leveraged_etf_excluded: "Leveraged ETF excluded",
@@ -623,10 +756,14 @@ function formatReasonLabel(reason) {
     missing_price: "Missing price",
     missing_session_bars: "Missing session bars",
     open_position: "Open position",
+    portfolio_at_capacity: "Portfolio at capacity",
+    portfolio_fit_soft_cap: "Portfolio fit is soft-capped",
     pinned_symbol: "Pinned symbol",
+    symbol_already_held: "Already held",
     spread_too_wide: "Spread too wide",
     top_ranked: "Top ranked",
     retained_buffer: "Retained in hold buffer",
+    weak_higher_timeframe_context: "Weak higher timeframe context",
   };
   if (labels[reason]) {
     return labels[reason];

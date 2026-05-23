@@ -1,5 +1,5 @@
 import React from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import { formatCurrency } from "../formatters";
 import { useDashboard } from "../state/DashboardContext";
 
@@ -13,7 +13,46 @@ const NAV_ITEMS = [
   ["Settings", "/settings"],
 ];
 
+const PAGE_META = {
+  "/": {
+    eyebrow: "Overview",
+    title: "Your paper portfolio",
+    description: "Cash, exposure, watchlist, and automation health in one place.",
+  },
+  "/scanner": {
+    eyebrow: "Scanner",
+    title: "Ranked opportunity board",
+    description: "See what the bot should care about next and why each symbol is moving up or down the board.",
+  },
+  "/trade": {
+    eyebrow: "Trade",
+    title: "Manual trade ticket",
+    description: "Open a symbol, review context, and place paper-only discretionary orders without losing runner visibility.",
+  },
+  "/positions": {
+    eyebrow: "Positions",
+    title: "Open exposure",
+    description: "Track live paper positions, unrealized PnL, and what the runner is already managing.",
+  },
+  "/activity": {
+    eyebrow: "Activity",
+    title: "Decision and order log",
+    description: "Review fills, rejections, scanner changes, and operator actions in one chronological stream.",
+  },
+  "/bot": {
+    eyebrow: "Automation",
+    title: "Runner controls",
+    description: "Start, stop, pause, and inspect the automation loop without guessing what it is doing.",
+  },
+  "/settings": {
+    eyebrow: "Settings",
+    title: "Runtime controls",
+    description: "Adjust the live paper runtime carefully and keep the system inside paper-only guardrails.",
+  },
+};
+
 export default function AppShell({ children }) {
+  const location = useLocation();
   const {
     health,
     overview,
@@ -36,6 +75,7 @@ export default function AppShell({ children }) {
         : "stopped";
   const runnerTone = runnerState === "running" ? "ok" : runnerState === "starting" ? "info" : runnerState === "failed" ? "warn" : "neutral";
   const startupTone = startupState === "ready" ? "ok" : startupState === "starting" ? "info" : startupState === "failed" ? "warn" : "neutral";
+  const pageMeta = PAGE_META[location.pathname] || PAGE_META["/"];
 
   return (
     <div className="app-shell">
@@ -79,12 +119,14 @@ export default function AppShell({ children }) {
 
       <main className="main-panel">
         <header className="topbar">
-          <div>
+          <div className="topbar-copy">
+            <p className="eyebrow topbar-eyebrow">{pageMeta.eyebrow}</p>
             <div className="topbar-title-row">
-              <h2>Your paper portfolio</h2>
+              <h2>{pageMeta.title}</h2>
               <span className="paper-badge">Paper trading</span>
             </div>
-            <p className="subtle">Latest heartbeat: {overview?.runner_status?.last_heartbeat || "n/a"}</p>
+            <p className="subtle">{pageMeta.description}</p>
+            <p className="topbar-meta">Latest heartbeat: {overview?.runner_status?.last_heartbeat || "n/a"}</p>
           </div>
           <div className="topbar-right">
             <StatusPill label="Portfolio" value={formatCurrency(overview?.account?.portfolio_value || 0)} tone="paper" />

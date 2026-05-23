@@ -28,9 +28,16 @@ class RankedSymbol:
     rank: int = 0
     eligible: bool = False
     score_components: dict[str, float] = field(default_factory=dict)
+    stage_scores: dict[str, float] = field(default_factory=dict)
+    stage_components: dict[str, dict[str, float]] = field(default_factory=dict)
     exclusion_reasons: list[str] = field(default_factory=list)
+    near_miss_reasons: list[str] = field(default_factory=list)
     features: dict[str, Any] = field(default_factory=dict)
     signals: list[dict[str, Any]] = field(default_factory=list)
+    best_signal: dict[str, Any] | None = None
+    opportunity_scores: list[dict[str, Any]] = field(default_factory=list)
+    rank_reason: str | None = None
+    relative_ranking_reason: str | None = None
     asset: dict[str, Any] = field(default_factory=dict)
     status: str = "scanned"
     notes: list[str] = field(default_factory=list)
@@ -49,9 +56,17 @@ class WatchlistEntry:
     enabled: bool = True
     active_position: bool = False
     score_components: dict[str, float] = field(default_factory=dict)
+    stage_scores: dict[str, float] = field(default_factory=dict)
+    stage_components: dict[str, dict[str, float]] = field(default_factory=dict)
     exclusion_reasons: list[str] = field(default_factory=list)
+    near_miss_reasons: list[str] = field(default_factory=list)
     signals: list[dict[str, Any]] = field(default_factory=list)
+    best_signal: dict[str, Any] | None = None
+    opportunity_scores: list[dict[str, Any]] = field(default_factory=list)
+    rank_reason: str | None = None
+    relative_ranking_reason: str | None = None
     features: dict[str, Any] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
     added_at: str | None = None
     updated_at: str | None = None
 

@@ -45,6 +45,7 @@ from live_risk import PortfolioRiskSnapshot, evaluate_entry_risk
 from live_scheduler import StaleDataError, parse_hhmm, session_key, to_et_timestamp, validate_latest_bar
 from live_state import RunnerState, StateStore
 from market_data_cache import MarketContextCache
+from opportunity_scoring import build_live_calibration, score_signal_opportunity
 from operator_store import OperatorStore
 from scanner_engine import ScannerEngine, evaluate_strategy_signals, serialize_signal
 from strategy_signals import (
@@ -1698,7 +1699,8 @@ class PaperTradingEngine:
         top_candidate_score = max((float(candidate.get("score") or 0.0) for candidate in ranked_candidates), default=0.0)
         positions_by_symbol = self._positions_by_symbol()
         account = fetch_account(self.alpaca_config)
-        portfolio_full = False
+        calibration = build_live_calibration(list(self.state.trade_log))
+        allowed_entries: list[dict[str, Any]] = []
 
         for candidate in ranked_candidates:
             symbol = str(candidate.get("symbol") or "").upper()
@@ -1757,6 +1759,20 @@ class PaperTradingEngine:
                     )
                     continue
 
+                serialized_signal = serialize_signal(signal)
+                opportunity = score_signal_opportunity(
+                    serialized_signal,
+                    minute_df=market_data["1m"],
+                    daily_df=market_data["1d"],
+                    candidate_features=dict(candidate.get("features") or {}),
+                    calibration=calibration,
+                )
+                selection_score = round(
+                    (float(opportunity.get("quality_score") or 0.0) * 0.45)
+                    + (float(opportunity.get("expectancy_score") or 0.0) * 0.35)
+                    + (float(opportunity.get("execution_score") or 0.0) * 0.20),
+                    2,
+                )
                 correlation_to_open_positions = self._correlation_to_open_positions(symbol, market_data["1d"])
                 risk_decision = evaluate_entry_risk(
                     signal,
@@ -1792,6 +1808,14 @@ class PaperTradingEngine:
                         "rank": candidate.get("rank"),
                         "score": candidate.get("score"),
                         "correlation_to_open_positions": correlation_to_open_positions,
+                        "quality_score": opportunity.get("quality_score"),
+                        "expectancy_score": opportunity.get("expectancy_score"),
+                        "execution_score": opportunity.get("execution_score"),
+                        "selection_score": selection_score,
+                        "candidate_stage_scores": dict(candidate.get("stage_scores") or {}),
+                        "candidate_rank_reason": candidate.get("rank_reason"),
+                        "selected": False,
+                        "selection_outcome": "risk_blocked" if not risk_decision.allowed else "eligible",
                     }
                 )
                 self.latest_signal_records.append(signal_record)
@@ -1813,57 +1837,114 @@ class PaperTradingEngine:
                     reasons=list(risk_decision.reasons),
                     rank=candidate.get("rank"),
                     score=candidate.get("score"),
+                    selection_score=selection_score,
                 )
                 if not risk_decision.allowed:
                     continue
 
                 approved_signal = replace(signal, quantity=risk_decision.approved_qty)
-                if config.dry_run:
-                    self.event_logger.emit(
-                        "entry_dry_run",
-                        message=(
-                            f"Dry run: would submit {approved_signal.direction} {symbol} "
-                            f"qty={approved_signal.quantity} for {approved_signal.strategy_name}"
-                        ),
-                        symbol=symbol,
-                        strategy=approved_signal.strategy_id,
-                        signal_key=approved_signal.signal_key,
-                        qty=approved_signal.quantity,
-                        notional=risk_decision.approved_notional,
-                    )
-                    continue
-
-                active_trade = submit_entry(
-                    self.alpaca_config,
-                    approved_signal,
-                    symbol=symbol,
-                    qty=approved_signal.quantity,
-                    exit_mode=config.exit_mode,
-                    entry_timeout_seconds=config.entry_timeout_seconds,
-                    logger=self.event_logger,
+                runner_priority_score = round(
+                    (selection_score * 0.72)
+                    + (float(candidate.get("score") or 0.0) * 0.20)
+                    + (float((candidate.get("best_signal") or {}).get("selection_score") or 0.0) * 0.08),
+                    2,
                 )
-                if active_trade.status == "entry_failed":
-                    raise RuntimeError(f"Entry order failed for {symbol}; stopping the runner.")
-                active_trade_payload = active_trade.to_dict()
-                self._maybe_count_trade(active_trade_payload)
-                self.state.set_active_trade(active_trade_payload)
-                positions_by_symbol[symbol] = {
-                    "symbol": symbol,
-                    "qty": active_trade_payload.get("filled_qty") or approved_signal.quantity,
-                    "avg_entry_price": active_trade_payload.get("entry_fill_price") or approved_signal.entry_reference_price,
-                    "market_value": abs(
-                        float(active_trade_payload.get("filled_qty") or approved_signal.quantity)
-                        * float(active_trade_payload.get("entry_fill_price") or approved_signal.entry_reference_price)
-                    ),
-                }
-                account = fetch_account(self.alpaca_config)
-                if config.max_concurrent_positions > 0 and len(self.state.active_trades) >= config.max_concurrent_positions:
-                    portfolio_full = True
-                    break
+                allowed_entries.append(
+                    {
+                        "symbol": symbol,
+                        "candidate": candidate,
+                        "approved_signal": approved_signal,
+                        "risk_decision": risk_decision,
+                        "signal_record_index": len(self.latest_signal_records) - 1,
+                        "runner_priority_score": runner_priority_score,
+                    }
+                )
 
             self.state.set_last_processed_bar(symbol, latest_bar_time.isoformat())
-            if portfolio_full:
-                break
+
+        if not allowed_entries:
+            self.event_logger.emit(
+                "no_allowed_entries",
+                level="DEBUG",
+                message="No eligible signals passed live risk checks across the current watchlist.",
+                symbol=self.base_config.symbol,
+            )
+            return
+
+        allowed_entries.sort(
+            key=lambda item: (
+                -float(item.get("runner_priority_score") or 0.0),
+                float(item.get("candidate", {}).get("rank") or 999),
+                -float(item.get("risk_decision").approved_notional or 0.0),
+                str(item.get("symbol") or ""),
+            )
+        )
+        selected_entry = allowed_entries[0]
+        selected_candidate = selected_entry["candidate"]
+        approved_signal = selected_entry["approved_signal"]
+        risk_decision = selected_entry["risk_decision"]
+
+        for index, entry in enumerate(allowed_entries):
+            record = self.latest_signal_records[entry["signal_record_index"]]
+            record["selected"] = index == 0
+            record["runner_priority_score"] = entry["runner_priority_score"]
+            record["selection_outcome"] = "chosen" if index == 0 else "outranked"
+
+        self.event_logger.emit(
+            "entry_candidate_selected",
+            message=(
+                f"Selected {selected_entry['symbol']} {approved_signal.strategy_name} "
+                f"with runner priority {selected_entry['runner_priority_score']:.1f}"
+            ),
+            symbol=selected_entry["symbol"],
+            strategy=approved_signal.strategy_id,
+            signal_key=approved_signal.signal_key,
+            runner_priority_score=selected_entry["runner_priority_score"],
+            candidate_rank=selected_candidate.get("rank"),
+            candidate_score=selected_candidate.get("score"),
+            outranked=len(allowed_entries) - 1,
+        )
+
+        if config.dry_run:
+            self.event_logger.emit(
+                "entry_dry_run",
+                message=(
+                    f"Dry run: would submit {approved_signal.direction} {selected_entry['symbol']} "
+                    f"qty={approved_signal.quantity} for {approved_signal.strategy_name}"
+                ),
+                symbol=selected_entry["symbol"],
+                strategy=approved_signal.strategy_id,
+                signal_key=approved_signal.signal_key,
+                qty=approved_signal.quantity,
+                notional=risk_decision.approved_notional,
+                runner_priority_score=selected_entry["runner_priority_score"],
+            )
+            return
+
+        active_trade = submit_entry(
+            self.alpaca_config,
+            approved_signal,
+            symbol=selected_entry["symbol"],
+            qty=approved_signal.quantity,
+            exit_mode=config.exit_mode,
+            entry_timeout_seconds=config.entry_timeout_seconds,
+            logger=self.event_logger,
+        )
+        if active_trade.status == "entry_failed":
+            raise RuntimeError(f"Entry order failed for {selected_entry['symbol']}; stopping the runner.")
+        active_trade_payload = active_trade.to_dict()
+        self._maybe_count_trade(active_trade_payload)
+        self.state.set_active_trade(active_trade_payload)
+        positions_by_symbol[selected_entry["symbol"]] = {
+            "symbol": selected_entry["symbol"],
+            "qty": active_trade_payload.get("filled_qty") or approved_signal.quantity,
+            "avg_entry_price": active_trade_payload.get("entry_fill_price") or approved_signal.entry_reference_price,
+            "market_value": abs(
+                float(active_trade_payload.get("filled_qty") or approved_signal.quantity)
+                * float(active_trade_payload.get("entry_fill_price") or approved_signal.entry_reference_price)
+            ),
+        }
+        fetch_account(self.alpaca_config)
 
     def _collect_latest_signals(
         self,

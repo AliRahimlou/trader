@@ -43,7 +43,7 @@ def run_strategy_video2(
         open_trade: dict[str, object] | None = None
         day_1min = day_data.copy()
 
-        for i in range(2, len(day_1min) - 1):
+        for i in range(2, len(day_1min) - 2):
             bar = day_1min.iloc[i]
             bar_time = day_1min.index[i]
 
@@ -76,21 +76,40 @@ def run_strategy_video2(
             if setup is None:
                 continue
 
-            next_time = day_1min.index[i + 1]
-            signal = materialize_signal(setup, setup.suggested_entry_price, config=config)
+            entry_bar = day_1min.iloc[i + 2]
+            entry_time = day_1min.index[i + 2]
+            entry_price = float(entry_bar["open"])
+            signal = materialize_signal(setup, entry_price, config=config)
             if signal is None:
                 continue
 
             open_trade = {
+                "strategy_id": signal.strategy_id,
                 "strategy": signal.strategy_name,
                 "session_date": session_date,
                 "direction": signal.direction,
-                "entry_time": next_time,
+                "signal_time": signal.signal_time,
+                "signal_reason": signal.reason,
+                "signal_metadata": dict(signal.metadata),
+                "entry_time": entry_time,
                 "entry_price": signal.entry_reference_price,
                 "stop_price": signal.stop_price,
                 "target_price": signal.target_price,
                 "quantity": signal.quantity,
                 "planned_risk": abs(signal.entry_reference_price - signal.stop_price) * signal.quantity * config.value_per_point,
             }
+
+        if open_trade is not None:
+            final_bar = day_1min.iloc[-1]
+            final_time = day_1min.index[-1]
+            trades.append(
+                settle_trade(
+                    open_trade,
+                    exit_price=float(final_bar["close"]),
+                    exit_time=final_time,
+                    reason="session_close",
+                    config=config,
+                )
+            )
 
     return pd.DataFrame(trades)

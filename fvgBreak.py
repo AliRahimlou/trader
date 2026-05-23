@@ -84,9 +84,13 @@ def run_strategy_video1(
                 continue
 
             open_trade = {
+                "strategy_id": signal.strategy_id,
                 "strategy": signal.strategy_name,
                 "session_date": session_date,
                 "direction": signal.direction,
+                "signal_time": signal.signal_time,
+                "signal_reason": signal.reason,
+                "signal_metadata": dict(signal.metadata),
                 "entry_time": entry_time,
                 "entry_price": entry_price,
                 "stop_price": signal.stop_price,
@@ -94,5 +98,18 @@ def run_strategy_video1(
                 "quantity": signal.quantity,
                 "planned_risk": abs(entry_price - signal.stop_price) * signal.quantity * config.value_per_point,
             }
+
+        if open_trade is not None:
+            final_bar = day_1min.iloc[-1]
+            final_time = day_1min.index[-1]
+            trades.append(
+                settle_trade(
+                    open_trade,
+                    exit_price=float(final_bar["close"]),
+                    exit_time=final_time,
+                    reason="session_close",
+                    config=config,
+                )
+            )
 
     return pd.DataFrame(trades)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time
 
 import pandas as pd
@@ -25,6 +25,7 @@ class StrategySignal:
     target_price: float
     quantity: float
     reason: str
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def signal_key(self) -> str:
@@ -41,6 +42,7 @@ class SetupCandidate:
     target_price: float | None
     suggested_entry_price: float
     reason: str
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 def get_opening_range_bar(
@@ -80,6 +82,33 @@ def detect_break_setup(
     suggested_entry_price = float(bar["close"])
     or_high = float(opening_range_bar["high"])
     or_low = float(opening_range_bar["low"])
+    gap_low, gap_high = get_fair_value_gap_bounds(session_1m_df, signal_idx, direction)
+    gap_size = abs(float(gap_high - gap_low))
+    atr_value = float(bar.get("atr") or 0.0)
+    signal_range = abs(float(bar["high"] - bar["low"]))
+    middle_bar = session_1m_df.iloc[signal_idx - 1]
+    metadata = {
+        "setup_type": "break",
+        "fvg_direction": direction,
+        "gap_low": float(min(gap_low, gap_high)),
+        "gap_high": float(max(gap_low, gap_high)),
+        "gap_size": gap_size,
+        "gap_pct": (gap_size / suggested_entry_price * 100.0) if suggested_entry_price > 0 else 0.0,
+        "gap_atr_ratio": (gap_size / atr_value) if atr_value > 0 else 0.0,
+        "opening_range_high": or_high,
+        "opening_range_low": or_low,
+        "opening_range_width_pct": ((or_high - or_low) / suggested_entry_price * 100.0) if suggested_entry_price > 0 else 0.0,
+        "breakout_clearance_pct": (
+            ((float(bar["close"]) - or_high) / suggested_entry_price * 100.0)
+            if direction == "bullish"
+            else ((or_low - float(bar["close"])) / suggested_entry_price * 100.0)
+        ) if suggested_entry_price > 0 else 0.0,
+        "signal_bar_range_pct": (signal_range / suggested_entry_price * 100.0) if suggested_entry_price > 0 else 0.0,
+        "middle_bar_body_ratio": _body_ratio(middle_bar),
+        "signal_bar_body_ratio": _body_ratio(bar),
+        "signal_close_location": _close_location(bar, bullish=(direction == "bullish")),
+        "bars_from_open": int(signal_idx + 1),
+    }
 
     if direction == "bullish" and bar["close"] > or_high:
         return SetupCandidate(
@@ -91,6 +120,7 @@ def detect_break_setup(
             target_price=None,
             suggested_entry_price=suggested_entry_price,
             reason="Bullish FVG closed above opening-range high",
+            metadata=metadata,
         )
     if direction == "bearish" and bar["close"] < or_low:
         return SetupCandidate(
@@ -102,6 +132,7 @@ def detect_break_setup(
             target_price=None,
             suggested_entry_price=suggested_entry_price,
             reason="Bearish FVG closed below opening-range low",
+            metadata=metadata,
         )
     return None
 
@@ -142,6 +173,11 @@ def detect_pullback_setup(
     swept_prev_high = bool((session_1m_df.iloc[: fvg_idx + 1]["high"] > prev_day_high).any())
     gap_low, gap_high = get_fair_value_gap_bounds(session_1m_df, fvg_idx, fvg_direction)
     gap_midpoint = (gap_low + gap_high) / 2
+    reference_price = float(next_bar["close"] or next_bar["open"] or bar["close"])
+    atr_value = float(next_bar.get("atr") or bar.get("atr") or 0.0)
+    gap_size = abs(float(gap_high - gap_low))
+    sweep_low = float(session_1m_df.iloc[: fvg_idx + 1]["low"].min())
+    sweep_high = float(session_1m_df.iloc[: fvg_idx + 1]["high"].max())
 
     if (
         bias == "long"
@@ -151,6 +187,27 @@ def detect_pullback_setup(
         and next_bar["low"] <= gap_high
         and next_bar["close"] >= gap_midpoint
     ):
+        metadata = {
+            "setup_type": "pullback",
+            "bias": bias,
+            "fvg_direction": fvg_direction,
+            "gap_low": float(min(gap_low, gap_high)),
+            "gap_high": float(max(gap_low, gap_high)),
+            "gap_midpoint": float(gap_midpoint),
+            "gap_size": gap_size,
+            "gap_pct": (gap_size / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "gap_atr_ratio": (gap_size / atr_value) if atr_value > 0 else 0.0,
+            "prev_day_high": float(prev_day_high),
+            "prev_day_low": float(prev_day_low),
+            "sweep_depth_pct": ((float(prev_day_low) - sweep_low) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "reclaim_distance_pct": ((float(bar["close"]) - float(prev_day_low)) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "retracement_fill_pct": ((float(gap_high) - float(next_bar["low"])) / gap_size * 100.0) if gap_size > 0 else 0.0,
+            "midpoint_hold_pct": ((float(next_bar["close"]) - gap_midpoint) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "signal_bar_range_pct": ((float(next_bar["high"]) - float(next_bar["low"])) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "signal_bar_body_ratio": _body_ratio(next_bar),
+            "signal_close_location": _close_location(next_bar, bullish=True),
+            "bars_from_open": int(fvg_idx + 2),
+        }
         return SetupCandidate(
             strategy_id="pullback",
             strategy_name="Daily Sweep + Pullback FVG",
@@ -160,6 +217,7 @@ def detect_pullback_setup(
             target_price=float(prev_day_high),
             suggested_entry_price=max(float(next_bar["open"]), gap_midpoint),
             reason="Daily low sweep with bullish pullback FVG",
+            metadata=metadata,
         )
 
     if (
@@ -170,6 +228,27 @@ def detect_pullback_setup(
         and next_bar["high"] >= gap_low
         and next_bar["close"] <= gap_midpoint
     ):
+        metadata = {
+            "setup_type": "pullback",
+            "bias": bias,
+            "fvg_direction": fvg_direction,
+            "gap_low": float(min(gap_low, gap_high)),
+            "gap_high": float(max(gap_low, gap_high)),
+            "gap_midpoint": float(gap_midpoint),
+            "gap_size": gap_size,
+            "gap_pct": (gap_size / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "gap_atr_ratio": (gap_size / atr_value) if atr_value > 0 else 0.0,
+            "prev_day_high": float(prev_day_high),
+            "prev_day_low": float(prev_day_low),
+            "sweep_depth_pct": ((sweep_high - float(prev_day_high)) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "reclaim_distance_pct": ((float(prev_day_high) - float(bar["close"])) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "retracement_fill_pct": ((float(next_bar["high"]) - float(gap_low)) / gap_size * 100.0) if gap_size > 0 else 0.0,
+            "midpoint_hold_pct": ((gap_midpoint - float(next_bar["close"])) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "signal_bar_range_pct": ((float(next_bar["high"]) - float(next_bar["low"])) / reference_price * 100.0) if reference_price > 0 else 0.0,
+            "signal_bar_body_ratio": _body_ratio(next_bar),
+            "signal_close_location": _close_location(next_bar, bullish=False),
+            "bars_from_open": int(fvg_idx + 2),
+        }
         return SetupCandidate(
             strategy_id="pullback",
             strategy_name="Daily Sweep + Pullback FVG",
@@ -179,6 +258,7 @@ def detect_pullback_setup(
             target_price=float(prev_day_low),
             suggested_entry_price=min(float(next_bar["open"]), gap_midpoint),
             reason="Daily high sweep with bearish pullback FVG",
+            metadata=metadata,
         )
 
     return None
@@ -226,4 +306,21 @@ def materialize_signal(
         target_price=target_price,
         quantity=quantity,
         reason=setup.reason,
+        metadata=dict(setup.metadata),
     )
+
+
+def _body_ratio(bar: pd.Series) -> float:
+    full_range = float(bar["high"] - bar["low"])
+    if full_range <= 0:
+        return 0.0
+    return abs(float(bar["close"] - bar["open"])) / full_range
+
+
+def _close_location(bar: pd.Series, *, bullish: bool) -> float:
+    full_range = float(bar["high"] - bar["low"])
+    if full_range <= 0:
+        return 0.5
+    if bullish:
+        return (float(bar["close"]) - float(bar["low"])) / full_range
+    return (float(bar["high"]) - float(bar["close"])) / full_range

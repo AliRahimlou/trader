@@ -14,6 +14,14 @@ from alpaca_api import (
 )
 from live_scheduler import parse_hhmm, validate_latest_bar
 from market_data_cache import MarketContextCache
+from opportunity_scoring import (
+    build_context_stage,
+    build_live_calibration,
+    build_portfolio_fit_stage,
+    build_prefilter_stage,
+    explain_ranked_candidates,
+    score_signal_opportunity,
+)
 from ranking_engine import build_score_components, total_score
 from scanner_models import RankedSymbol, ScanResult, WatchlistState
 from strategy_context import get_daily_bias, get_previous_day_levels
@@ -284,9 +292,61 @@ class ScannerEngine:
                 score=score,
                 eligible=runtime_flags.get("enabled_symbols", {}).get(symbol, True),
                 score_components=build_score_components(features, signal_count=1 if index < 2 else 0),
+                stage_scores={
+                    "prefilter": round(score - 8.0, 2),
+                    "context": round(score - 4.0, 2),
+                    "setup_quality": 76.0 if index < 2 else 24.0,
+                    "expectancy": 71.0 if index < 2 else 20.0,
+                    "execution": 74.0 if index < 2 else 28.0,
+                    "portfolio_fit": 100.0,
+                },
+                stage_components={
+                    "prefilter": {"liquidity": 82.0, "spread": 78.0, "freshness": 100.0},
+                    "context": {"trend": 70.0, "relative_volume": 68.0},
+                },
                 exclusion_reasons=[] if runtime_flags.get("enabled_symbols", {}).get(symbol, True) else ["disabled_override"],
+                near_miss_reasons=[] if index < 2 else ["awaiting_live_strategy_trigger"],
                 features=features,
-                signals=[{"strategy_id": "break", "direction": "long", "reason": "demo_setup"}] if index < 2 else [],
+                signals=[{
+                    "strategy_id": "break",
+                    "strategy_name": "Break",
+                    "direction": "long",
+                    "signal_key": f"demo:{symbol}:break",
+                    "reason": "demo_setup",
+                    "entry_reference_price": round(100.0 + index * 12.0, 2),
+                    "stop_price": round(98.8 + index * 12.0, 2),
+                    "target_price": round(102.4 + index * 12.0, 2),
+                    "selection_score": round(score, 2),
+                    "quality_score": round(score - 3.0, 2),
+                    "expectancy_score": round(score - 5.0, 2),
+                    "execution_score": round(score - 4.0, 2),
+                    "summary": "Demo-mode live setup placeholder with healthy structure and actionability.",
+                }] if index < 2 else [],
+                best_signal={
+                    "strategy_id": "break",
+                    "strategy_name": "Break",
+                    "direction": "long",
+                    "signal_key": f"demo:{symbol}:break",
+                    "entry_reference_price": round(100.0 + index * 12.0, 2),
+                    "stop_price": round(98.8 + index * 12.0, 2),
+                    "target_price": round(102.4 + index * 12.0, 2),
+                    "selection_score": round(score, 2),
+                    "quality_score": round(score - 3.0, 2),
+                    "expectancy_score": round(score - 5.0, 2),
+                    "execution_score": round(score - 4.0, 2),
+                    "summary": "Demo-mode live setup placeholder with healthy structure and actionability.",
+                } if index < 2 else None,
+                opportunity_scores=[{
+                    "strategy_id": "break",
+                    "strategy_name": "Break",
+                    "direction": "long",
+                    "selection_score": round(score, 2),
+                    "quality_score": round(score - 3.0, 2),
+                    "expectancy_score": round(score - 5.0, 2),
+                    "execution_score": round(score - 4.0, 2),
+                    "summary": "Demo-mode live setup placeholder with healthy structure and actionability.",
+                }] if index < 2 else [],
+                rank_reason="Demo candidate is ranked from simulated liquidity, range, and live setup quality.",
                 asset={"tradable": True, "fractionable": True, "shortable": True},
             )
             ranked.append(candidate)
@@ -333,6 +393,12 @@ class ScannerEngine:
         disabled_symbols = sorted(symbol for symbol, enabled in runtime_flags.get("enabled_symbols", {}).items() if not enabled)
         pinned_symbols = sorted(runtime_flags.get("pinned_symbols", []))
         position_symbols = sorted({str(position.get("symbol") or "").upper() for position in latest_positions if position.get("symbol")})
+        positions_by_symbol = {
+            str(position.get("symbol") or "").upper(): position
+            for position in latest_positions
+            if position.get("symbol")
+        }
+        calibration = build_live_calibration(list(getattr(state, "trade_log", [])))
         snapshot_symbols = self._snapshot_symbols_for_refresh(
             universe_members,
             pinned_symbols=pinned_symbols,
@@ -348,12 +414,16 @@ class ScannerEngine:
             quick_candidates.append(candidate)
 
         scan_symbols = self._select_scan_symbols(quick_candidates, pinned_symbols=pinned_symbols, position_symbols=position_symbols)
-        daily_frames = fetch_multi_stock_bars(
-            scan_symbols,
-            "1d",
-            period_to_start(now, self.config.daily_lookback),
-            now,
-            config=self.alpaca_config,
+        daily_frames = (
+            fetch_multi_stock_bars(
+                scan_symbols,
+                "1d",
+                period_to_start(now, self.config.daily_lookback),
+                now,
+                config=self.alpaca_config,
+            )
+            if scan_symbols
+            else {}
         )
 
         candidates: list[RankedSymbol] = []
@@ -362,52 +432,149 @@ class ScannerEngine:
                 continue
             daily_frame = daily_frames.get(candidate.symbol)
             self._enrich_with_daily_features(candidate, daily_frame)
+            if daily_frame is not None and not daily_frame.empty:
+                context_stage = build_context_stage(candidate.features, daily_frame)
+                candidate.stage_scores["context"] = float(context_stage.get("score") or 0.0)
+                candidate.stage_components["context"] = dict(context_stage.get("components") or {})
+                candidate.features.update(dict(context_stage.get("feature_updates") or {}))
+                candidate.notes.extend(list(context_stage.get("notes") or []))
             candidates.append(candidate)
 
         shortlist_symbols = self._build_shortlist(candidates, pinned_symbols=pinned_symbols, position_symbols=position_symbols)
         for candidate in candidates:
-            if candidate.symbol not in shortlist_symbols:
-                candidate.score_components = build_score_components(candidate.features, signal_count=0)
-                candidate.score = total_score(candidate.score_components, config=self.config)
-                continue
+            daily_frame = daily_frames.get(candidate.symbol)
+            if daily_frame is None:
+                daily_frame = pd.DataFrame()
+            correlation_to_open_positions: float | None = None
             try:
-                market_data = self.ensure_symbol_market_data(candidate.symbol, now)
-                latest_bar_time = market_data["1m"].index.max()
-                if market_open:
-                    validate_latest_bar(now.tz_convert("America/New_York"), latest_bar_time, max_bar_age_seconds=self.config.max_bar_age_seconds)
-                    candidate.features["data_fresh"] = True
-                reference_price = float(fetch_latest_trade(self.alpaca_config, candidate.symbol)["p"])
-                signals = evaluate_strategy_signals(
-                    symbol=candidate.symbol,
-                    market_data=market_data,
-                    reference_price=reference_price,
-                    strategies=self.config.strategies,
-                    strategy_config=self.config.strategy_config,
-                    enabled_strategies=[
-                        strategy_id
-                        for strategy_id in self.config.strategies
-                        if runtime_flags.get("enabled_strategies", {}).get(strategy_id, True)
-                    ],
-                )
-                candidate.signals = [serialize_signal(signal) for signal in signals]
-                self._enrich_with_intraday_features(candidate, market_data)
+                if candidate.symbol in shortlist_symbols:
+                    market_data = self.ensure_symbol_market_data(candidate.symbol, now)
+                    latest_bar_time = market_data["1m"].index.max()
+                    if market_open:
+                        validate_latest_bar(
+                            now.tz_convert("America/New_York"),
+                            latest_bar_time,
+                            max_bar_age_seconds=self.config.max_bar_age_seconds,
+                        )
+                        candidate.features["data_fresh"] = True
+                    reference_price = float(candidate.features.get("price") or 0.0)
+                    if reference_price <= 0:
+                        reference_price = float(fetch_latest_trade(self.alpaca_config, candidate.symbol)["p"])
+                    signals = evaluate_strategy_signals(
+                        symbol=candidate.symbol,
+                        market_data=market_data,
+                        reference_price=reference_price,
+                        strategies=self.config.strategies,
+                        strategy_config=self.config.strategy_config,
+                        enabled_strategies=[
+                            strategy_id
+                            for strategy_id in self.config.strategies
+                            if runtime_flags.get("enabled_strategies", {}).get(strategy_id, True)
+                        ],
+                    )
+                    self._enrich_with_intraday_features(candidate, market_data)
+                    correlation_to_open_positions = self._correlation_to_open_positions(candidate.symbol, market_data["1d"])
+                    portfolio_fit = build_portfolio_fit_stage(
+                        candidate.symbol,
+                        current_positions=positions_by_symbol,
+                        current_active_trades=dict(getattr(state, "active_trades", {})),
+                        correlation_to_open_positions=correlation_to_open_positions,
+                        max_concurrent_positions=int(self.config.max_concurrent_positions),
+                        correlation_threshold=float(self.config.correlation_threshold),
+                    )
+                    candidate.stage_scores["portfolio_fit"] = float(portfolio_fit.get("score") or 0.0)
+                    candidate.stage_components["portfolio_fit"] = dict(portfolio_fit.get("components") or {})
+                    candidate.features["correlation_to_open_positions"] = correlation_to_open_positions
+                    candidate.notes.extend(self._portfolio_notes(portfolio_fit))
+
+                    scored_signals: list[dict[str, Any]] = []
+                    for signal in signals:
+                        serialized = serialize_signal(signal)
+                        opportunity = score_signal_opportunity(
+                            serialized,
+                            minute_df=market_data["1m"],
+                            daily_df=daily_frame,
+                            candidate_features=candidate.features,
+                            calibration=calibration,
+                        )
+                        selection_score = round(
+                            (float(opportunity.get("quality_score") or 0.0) * 0.45)
+                            + (float(opportunity.get("expectancy_score") or 0.0) * 0.35)
+                            + (float(opportunity.get("execution_score") or 0.0) * 0.20),
+                            2,
+                        )
+                        serialized.update(opportunity)
+                        serialized["selection_score"] = selection_score
+                        scored_signals.append(serialized)
+                    scored_signals.sort(
+                        key=lambda item: (
+                            -float(item.get("selection_score") or 0.0),
+                            -float(item.get("expectancy_score") or 0.0),
+                            -float(item.get("quality_score") or 0.0),
+                            str(item.get("strategy_id") or ""),
+                        )
+                    )
+                    candidate.signals = scored_signals
+                    candidate.opportunity_scores = [
+                        {
+                            "strategy_id": signal.get("strategy_id"),
+                            "strategy_name": signal.get("strategy_name"),
+                            "direction": signal.get("direction"),
+                            "selection_score": signal.get("selection_score"),
+                            "quality_score": signal.get("quality_score"),
+                            "expectancy_score": signal.get("expectancy_score"),
+                            "execution_score": signal.get("execution_score"),
+                            "summary": signal.get("summary"),
+                        }
+                        for signal in scored_signals
+                    ]
+                    candidate.best_signal = scored_signals[0] if scored_signals else None
+                    if candidate.best_signal is not None:
+                        candidate.stage_scores["setup_quality"] = float(candidate.best_signal.get("quality_score") or 0.0)
+                        candidate.stage_scores["expectancy"] = float(candidate.best_signal.get("expectancy_score") or 0.0)
+                        candidate.stage_scores["execution"] = float(candidate.best_signal.get("execution_score") or 0.0)
+                        candidate.stage_components["setup_quality"] = dict(candidate.best_signal.get("quality_components") or {})
+                        candidate.stage_components["expectancy"] = dict(candidate.best_signal.get("expectancy_components") or {})
+                        candidate.stage_components["execution"] = {
+                            "execution": float(candidate.best_signal.get("execution_score") or 0.0),
+                            "selection": float(candidate.best_signal.get("selection_score") or 0.0),
+                        }
             except Exception as exc:
                 candidate.features["data_fresh"] = False
                 candidate.exclusion_reasons.append(f"scanner_error:{exc}")
                 candidate.notes.append(str(exc))
-            candidate.score_components = build_score_components(candidate.features, signal_count=len(candidate.signals))
-            candidate.score = total_score(candidate.score_components, config=self.config)
-            candidate.eligible = not candidate.exclusion_reasons
+            self._finalize_candidate_ranking(candidate, correlation_to_open_positions=correlation_to_open_positions)
 
-        candidates.sort(key=lambda item: (-item.score, -float(item.features.get("dollar_volume") or 0.0), item.symbol))
+        candidates.sort(
+            key=lambda item: (
+                -item.score,
+                -float((item.best_signal or {}).get("selection_score") or 0.0),
+                -float(item.stage_scores.get("context") or 0.0),
+                -float(item.features.get("dollar_volume") or 0.0),
+                item.symbol,
+            )
+        )
         for index, candidate in enumerate(candidates, start=1):
             candidate.rank = index
+            candidate.rank_reason = self._build_rank_reason(candidate)
+
+        explain_ranked_candidates(candidates)
+
+        stage_counts = {
+            "snapshot_symbols": len(snapshot_symbols),
+            "deep_scan_symbols": len(scan_symbols),
+            "shortlist_symbols": len(shortlist_symbols),
+            "live_signal_symbols": sum(1 for candidate in candidates if candidate.best_signal is not None),
+            "eligible_symbols": sum(1 for candidate in candidates if candidate.eligible),
+        }
 
         health = {
             "healthy": any(candidate.eligible for candidate in candidates),
             "market_open": market_open,
             "failures": sum(1 for candidate in candidates if any(reason.startswith("scanner_error:") for reason in candidate.exclusion_reasons)),
             "disabled_symbols": disabled_symbols,
+            "stage_counts": stage_counts,
+            "top_symbol": candidates[0].symbol if candidates else None,
         }
         watchlist_state = self.watchlist_manager.build(
             candidates,
@@ -488,9 +655,23 @@ class ScannerEngine:
             exclusions.append("leveraged_etf_excluded")
         if runtime_flags.get("enabled_symbols", {}).get(symbol, True) is False:
             exclusions.append("disabled_override")
+        prefilter = build_prefilter_stage(features)
         return RankedSymbol(
             symbol=symbol,
             eligible=not exclusions,
+            score=float(prefilter.get("score") or 0.0),
+            score_components={
+                "liquidity": round(float(prefilter.get("components", {}).get("liquidity") or 0.0), 2),
+                "volatility": round(float(prefilter.get("components", {}).get("volatility") or 0.0), 2),
+                "momentum": round(float(prefilter.get("components", {}).get("momentum") or 0.0), 2),
+                "gap": round(float(prefilter.get("components", {}).get("gap_context") or 0.0), 2),
+                "trend": 0.0,
+                "setup": 0.0,
+                "spread": round(float(prefilter.get("components", {}).get("spread") or 0.0), 2),
+                "freshness": round(float(prefilter.get("components", {}).get("freshness") or 0.0), 2),
+            },
+            stage_scores={"prefilter": float(prefilter.get("score") or 0.0)},
+            stage_components={"prefilter": dict(prefilter.get("components") or {})},
             exclusion_reasons=exclusions,
             features=features,
             asset={
@@ -503,6 +684,8 @@ class ScannerEngine:
                 "is_etf": member.is_etf,
                 "is_leveraged": member.is_leveraged,
             },
+            notes=[str(prefilter.get("summary") or "")],
+            status="prefiltered",
         )
 
     def _select_scan_symbols(
@@ -514,16 +697,26 @@ class ScannerEngine:
     ) -> list[str]:
         sorted_candidates = sorted(
             candidates,
-            key=lambda item: (-float(item.features.get("dollar_volume") or 0.0), item.symbol),
+            key=lambda item: (
+                bool(item.exclusion_reasons),
+                -float(item.stage_scores.get("prefilter") or 0.0),
+                -float(item.features.get("dollar_volume") or 0.0),
+                item.symbol,
+            ),
         )
         symbols: list[str] = []
         for symbol in pinned_symbols + position_symbols:
             if symbol and symbol not in symbols:
                 symbols.append(symbol)
+        target = min(
+            len(candidates),
+            max(self.config.watchlist_size * 6, self.config.watchlist_hold_buffer * 4, 40),
+            max(int(self.config.universe_max_symbols), 1),
+        )
         for candidate in sorted_candidates:
             if candidate.symbol not in symbols:
                 symbols.append(candidate.symbol)
-            if len(symbols) >= self.config.universe_max_symbols:
+            if len(symbols) >= target:
                 break
         return symbols
 
@@ -540,9 +733,15 @@ class ScannerEngine:
                 shortlist.append(symbol)
         sorted_candidates = sorted(
             candidates,
-            key=lambda item: (-float(item.features.get("dollar_volume") or 0.0), item.symbol),
+            key=lambda item: (
+                bool(item.exclusion_reasons),
+                -float(item.stage_scores.get("context") or item.stage_scores.get("prefilter") or 0.0),
+                -float(item.stage_scores.get("prefilter") or 0.0),
+                -float(item.features.get("dollar_volume") or 0.0),
+                item.symbol,
+            ),
         )
-        target = self.config.watchlist_size + self.config.watchlist_hold_buffer + 4
+        target = max(self.config.watchlist_size + self.config.watchlist_hold_buffer + 8, 18)
         for candidate in sorted_candidates:
             if candidate.symbol not in shortlist:
                 shortlist.append(candidate.symbol)
@@ -589,6 +788,132 @@ class ScannerEngine:
             return
         candidate.features["session_range_expansion_pct"] = round(((session_df["high"].max() - session_df["low"].min()) / max(float(candidate.features.get("price") or 1.0), 1e-6)) * 100.0, 4)
         candidate.features["recent_momentum_pct"] = round(((session_df["close"].iloc[-1] / session_df["close"].iloc[max(0, len(session_df) - 6)]) - 1.0) * 100.0, 4) if len(session_df) >= 6 else 0.0
+        recent_window = session_df["close"].tail(20)
+        recent_distance = float(recent_window.diff().abs().sum()) if len(recent_window) >= 2 else 0.0
+        recent_net = abs(float(recent_window.iloc[-1] - recent_window.iloc[0])) if len(recent_window) >= 2 else 0.0
+        candidate.features["recent_trend_efficiency"] = round((recent_net / recent_distance * 100.0), 2) if recent_distance > 0 else 0.0
+
+    def _finalize_candidate_ranking(
+        self,
+        candidate: RankedSymbol,
+        *,
+        correlation_to_open_positions: float | None,
+    ) -> None:
+        prefilter_components = dict(candidate.stage_components.get("prefilter") or {})
+        context_components = dict(candidate.stage_components.get("context") or {})
+        best_signal = dict(candidate.best_signal or {})
+        setup_quality = float(best_signal.get("quality_score") or 0.0)
+        expectancy = float(best_signal.get("expectancy_score") or 0.0)
+        execution = float(best_signal.get("execution_score") or 0.0)
+
+        if not best_signal:
+            context_score = float(candidate.stage_scores.get("context") or 0.0)
+            prefilter_score = float(candidate.stage_scores.get("prefilter") or 0.0)
+            setup_quality = min(12.0, max(context_score - 45.0, 0.0) * 0.20)
+            expectancy = min(10.0, max(context_score - 50.0, 0.0) * 0.15)
+            execution = min(18.0, max(prefilter_score - 40.0, 0.0) * 0.25)
+
+        candidate.stage_scores.setdefault("setup_quality", round(setup_quality, 2))
+        candidate.stage_scores.setdefault("expectancy", round(expectancy, 2))
+        candidate.stage_scores.setdefault("execution", round(execution, 2))
+        candidate.stage_scores.setdefault("portfolio_fit", 100.0)
+
+        volatility_component = self._average_scores(
+            float(prefilter_components.get("volatility") or 0.0),
+            float(context_components.get("volatility_quality") or 0.0),
+        )
+        momentum_component = self._average_scores(
+            float(prefilter_components.get("momentum") or 0.0),
+            float(context_components.get("relative_volume") or 0.0),
+            min(abs(float(candidate.features.get("recent_momentum_pct") or 0.0)) * 20.0, 100.0),
+        )
+        trend_component = self._average_scores(
+            float(context_components.get("trend") or 0.0),
+            float(context_components.get("regime_clarity") or 0.0),
+            float(context_components.get("noise_control") or 0.0),
+        )
+        freshness_component = self._average_scores(
+            float(prefilter_components.get("freshness") or 0.0),
+            float(best_signal.get("quality_components", {}).get("freshness") or 0.0),
+        )
+
+        candidate.score_components = {
+            "liquidity": round(float(prefilter_components.get("liquidity") or 0.0), 2),
+            "volatility": round(volatility_component, 2),
+            "momentum": round(momentum_component, 2),
+            "gap": round(float(prefilter_components.get("gap_context") or 0.0), 2),
+            "trend": round(trend_component, 2),
+            "setup": round(self._average_scores(setup_quality, expectancy), 2),
+            "spread": round(float(prefilter_components.get("spread") or 0.0), 2),
+            "freshness": round(freshness_component, 2),
+        }
+        candidate.score = total_score(candidate.score_components, config=self.config)
+        candidate.eligible = not candidate.exclusion_reasons
+        candidate.status = "signal_ready" if candidate.best_signal and candidate.eligible else "monitoring" if candidate.eligible else "excluded"
+
+        candidate.near_miss_reasons = self._dedupe_strings(
+            [
+                *candidate.near_miss_reasons,
+                *self._signal_near_miss_reasons(candidate),
+            ]
+        )
+        if correlation_to_open_positions is not None:
+            candidate.features["correlation_to_open_positions"] = round(correlation_to_open_positions, 4)
+        if candidate.best_signal is not None:
+            candidate.features["best_signal_selection_score"] = float(candidate.best_signal.get("selection_score") or 0.0)
+        candidate.notes = self._dedupe_strings([note for note in candidate.notes if note])
+
+    def _portfolio_notes(self, portfolio_fit: dict[str, Any]) -> list[str]:
+        reasons = list(portfolio_fit.get("reasons") or [])
+        notes: list[str] = []
+        for reason in reasons:
+            if reason == "symbol_already_held":
+                notes.append("Symbol already exists in the active book.")
+            elif reason == "correlated_with_open_positions":
+                notes.append("Portfolio fit is reduced by correlation to current open positions.")
+            elif reason == "portfolio_at_capacity":
+                notes.append("Portfolio is already near its concurrent-position limit.")
+        return notes
+
+    def _signal_near_miss_reasons(self, candidate: RankedSymbol) -> list[str]:
+        reasons: list[str] = []
+        if candidate.best_signal is None and candidate.eligible:
+            reasons.append("awaiting_live_strategy_trigger")
+        if float(candidate.stage_scores.get("portfolio_fit") or 0.0) < 60.0:
+            reasons.append("portfolio_fit_soft_cap")
+        if float(candidate.stage_scores.get("context") or 0.0) < 45.0:
+            reasons.append("weak_higher_timeframe_context")
+        return reasons
+
+    def _build_rank_reason(self, candidate: RankedSymbol) -> str:
+        top_components = [
+            name
+            for name, _ in sorted(candidate.score_components.items(), key=lambda item: item[1], reverse=True)[:3]
+        ]
+        top_labels = ", ".join(top_components) if top_components else "balanced scoring"
+        if candidate.best_signal is not None:
+            return (
+                f"Best live opportunity is {candidate.best_signal.get('strategy_name') or candidate.best_signal.get('strategy_id')} "
+                f"with selection score {float(candidate.best_signal.get('selection_score') or 0.0):.1f}; led by {top_labels}."
+            )
+        return f"Rank is supported by {top_labels}, but this is still only a monitor candidate until one of the video strategy triggers confirms."
+
+    @staticmethod
+    def _average_scores(*values: float) -> float:
+        valid = [float(value) for value in values if value is not None]
+        if not valid:
+            return 0.0
+        return sum(valid) / len(valid)
+
+    @staticmethod
+    def _dedupe_strings(values: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for value in values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in deduped:
+                continue
+            deduped.append(normalized)
+        return deduped
 
 
 def evaluate_strategy_signals(
@@ -651,4 +976,5 @@ def serialize_signal(signal: StrategySignal) -> dict[str, Any]:
         "allowed": True,
         "reasons": [],
         "reason": signal.reason,
+        "metadata": dict(signal.metadata),
     }
