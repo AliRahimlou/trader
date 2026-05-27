@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: trader
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: trader
+    ports:
+      - "5432:5432"
+    volumes:
+      - trader_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      TRADER_DATABASE_URL: postgresql+psycopg://trader:trader@db:5432/trader
+      TRADER_FRONTEND_ORIGIN: http://127.0.0.1:5174
+      TRADER_EMBED_WORKER: "false"
+      TRADER_MARKET_DATA_PROVIDER: demo
+      TRADER_BROKER_PROVIDER: paper
+      TRADER_LIVE_TRADING_ENABLED: "false"
+    ports:
+      - "8100:8100"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: ["python", "-m", "backend.app.workers.jobs"]
+    environment:
+      TRADER_DATABASE_URL: postgresql+psycopg://trader:trader@db:5432/trader
+      TRADER_EMBED_WORKER: "false"
+      TRADER_WORKER_INTERVAL_SECONDS: "5"
+      TRADER_MARKET_DATA_PROVIDER: demo
+      TRADER_BROKER_PROVIDER: paper
+      TRADER_LIVE_TRADING_ENABLED: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      VITE_TRADER_API_BASE_URL: http://127.0.0.1:8100
+    ports:
+      - "5174:5174"
+    depends_on:
+      - backend
+
+volumes:
+  trader_postgres:

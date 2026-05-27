@@ -31,6 +31,7 @@ class PortfolioRiskSnapshot:
     correlation_to_open_positions: float | None = None
     correlation_threshold: float = 0.0
     allocation_floor_fraction: float = 0.4
+    candidate_decision: str | None = None
 
 
 def evaluate_entry_risk(
@@ -49,8 +50,9 @@ def evaluate_entry_risk(
     one_position_per_symbol: bool,
     exit_mode: str,
     allow_fractional_long: bool,
+    protection_reasons: tuple[str, ...] = (),
 ) -> RiskDecision:
-    reasons: list[str] = []
+    reasons: list[str] = list(protection_reasons)
     approved_qty = float(signal.quantity)
     day_key = str(to_et_timestamp(now).date())
     realized_pnl = state.daily_realized_pnl.get(day_key, 0.0)
@@ -128,6 +130,9 @@ def evaluate_entry_risk(
         and portfolio.correlation_to_open_positions >= portfolio.correlation_threshold
     ):
         reasons.append("correlated_exposure")
+
+    if portfolio.candidate_decision == "block":
+        reasons.append("atlas_cro_block")
 
     buying_power = float(account.get("buying_power", 0) or 0)
     capital_cap = min(capital_cap, buying_power)

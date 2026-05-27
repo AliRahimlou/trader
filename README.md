@@ -2,6 +2,83 @@
 
 Local paper-trading platform for stocks and ETFs using Alpaca for both market data and execution. The trading runner is the source of truth. The web dashboard is the local control plane and observability layer.
 
+## New Autonomous Bot App
+
+This repo now also includes a production-shaped, paper-first trading bot app inspired by the Atlas multi-agent architecture:
+
+- Backend: `backend/app` with FastAPI, SQLAlchemy models, broker/data abstractions, risk, sizing, scanner/ranker, execution, worker loop, and backtesting.
+- Frontend: `frontend/src` with a TypeScript dashboard for mode, ticker/Auto-Pick, capital, risk, strategy, Start/Pause/Stop/Emergency Stop, rankings, positions, orders, audit logs, settings, and backtests.
+- Deployment: `docker-compose.yml` starts Postgres, backend, worker, and frontend.
+- Tests: `pytest backend/app/tests`.
+
+The default broker is paper-only and the default market-data provider is deterministic demo data. Live trading is intentionally disabled unless a real adapter is added, credentials are configured, live mode is selected, the confirmation phrase is typed, and all risk checks pass. The scanner estimates risk-adjusted opportunity; it does not guarantee profits.
+
+Start the new stack:
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open:
+
+- Frontend: http://127.0.0.1:5174
+- Backend health: http://127.0.0.1:8100/health
+
+Local non-Docker development:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+npm --prefix frontend install
+npm run backend:new
+npm run frontend:new
+```
+
+Run tests:
+
+```bash
+. .venv/bin/activate
+pytest backend/app/tests
+npm --prefix frontend run build
+```
+
+Core API routes:
+
+- `POST /bot/start`
+- `POST /bot/{session_id}/pause`
+- `POST /bot/{session_id}/resume`
+- `POST /bot/{session_id}/stop`
+- `POST /bot/{session_id}/emergency-stop`
+- `GET /bot/{session_id}/status`
+- `GET /bot/{session_id}/audit-log`
+- `GET /positions`
+- `GET /orders`
+- `POST /backtest/run`
+- `GET /backtest/{run_id}`
+- `GET /market/quote/{ticker}`
+- `GET /market/rankings`
+- `GET /settings`
+- `PUT /settings`
+
+Dashboard walkthrough:
+
+1. Leave mode on Paper Trading.
+2. Choose Auto-Pick or Pick Stock.
+3. Enter the capital allocation.
+4. Pick risk level and strategy preset.
+5. Use Rank to preview candidates or Start Bot to create a session.
+6. Watch status, ranked candidates, reason text, stops, targets, size, orders, P&L, and audit timeline.
+7. Use Pause, Stop New Trades, Close Position, or Emergency Stop as needed.
+
+Known limitations:
+
+- The new app uses deterministic demo market data until a real provider adapter is added.
+- The live broker adapter is a safety placeholder, not an execution integration.
+- SQLAlchemy creates tables on startup for local speed; Alembic scaffolding is included for managed migrations.
+- Backtesting includes slippage/commission hooks and avoids look-ahead, but it is intentionally simple and should be expanded before relying on results.
+
 ## Setup
 
 ```bash
@@ -23,6 +100,10 @@ npm start
 Important:
 
 - Paper only. The runner refuses non-paper Alpaca execution.
+- Alpaca is the active paper broker and market-data path. The runner uses REST for historical bars/latest snapshots and an Alpaca stock-data websocket for live trades, quotes, and bars when enabled.
+- `LIVE_PAPER_ALPACA_FEED=iex` is the default free live feed. Use `sip` only if your Alpaca account has SIP entitlement; otherwise Alpaca will reject the stream/auth request. `delayed_sip` is available for delayed SIP testing.
+- `LIVE_PAPER_MARKET_STREAM_ENABLED=true` starts the websocket stream for the active watchlist and open positions. The runner still falls back to REST snapshots when needed.
+- `LIVE_PAPER_LIVE_QUOTE_MAX_AGE_SECONDS=30` blocks new entries when the latest quote or trade is stale or missing. During closed market hours this is expected to show stale.
 - Massive is optional for historical experimentation only. It is not the active live path.
 - Secrets stay in `.env` and are never returned by the API or UI.
 
@@ -43,10 +124,12 @@ Runtime behavior:
 1. On startup the engine validates the Alpaca paper account and reconciles persisted state against broker account, open orders, and positions.
 2. The scanner builds a universe from Alpaca assets by default, scores candidates with explicit ranking weights, and maintains a watchlist with add/remove reasons.
 3. Every cycle the engine checks the Alpaca clock, refreshes `1m`, `5m`, and `1d` context for the active watchlist plus open positions, and rejects stale bars.
-4. Shared signal code in `strategy_signals.py` evaluates the existing FVG strategies on the shortlisted symbols.
-5. `live_risk.py` enforces size, daily-loss, cooldown, daily-trade-count, concurrent-position, deployed-capital, per-symbol-capital, correlation, tradability, and buying-power limits.
-6. `live_execution.py` handles paper order submission, bracket or in-process exits, lifecycle tracking, and flatten logic.
-7. The engine persists JSON runner state, writes JSONL log events, and mirrors snapshots plus audit history into SQLite for the API/UI.
+4. When the market-data stream is enabled, websocket trade/quote/bar messages wake the runner between normal polling intervals, subject to `LIVE_PAPER_MARKET_STREAM_MIN_CYCLE_SECONDS`.
+5. Shared signal code in `strategy_signals.py` evaluates the existing FVG strategies on the shortlisted symbols.
+6. `live_risk.py` enforces size, daily-loss, cooldown, daily-trade-count, concurrent-position, deployed-capital, per-symbol-capital, correlation, tradability, and buying-power limits.
+7. `live_protections.py` adds Freqtrade-inspired paper protections that can temporarily block new entries after loss clusters, symbol-specific losing streaks, or intraday closed-trade drawdown.
+8. `live_execution.py` handles paper order submission, bracket or in-process exits, lifecycle tracking, and flatten logic.
+9. The engine persists JSON runner state, writes JSONL log events, and mirrors snapshots plus audit history into SQLite for the API/UI.
 
 ## Scanner And Watchlist Config
 
@@ -60,7 +143,12 @@ Runtime behavior:
 - `LIVE_PAPER_UNIVERSE_ALLOW_STOCKS`, `LIVE_PAPER_UNIVERSE_ALLOW_ETFS`, `LIVE_PAPER_EXCLUDE_LEVERAGED_ETFS`: structural filters
 - `LIVE_PAPER_SCANNER_MIN_PRICE`, `LIVE_PAPER_SCANNER_MAX_PRICE`, `LIVE_PAPER_SCANNER_MIN_AVG_DAILY_VOLUME`, `LIVE_PAPER_SCANNER_MAX_SPREAD_BPS`: scanner quality filters
 - `LIVE_PAPER_MAX_CONCURRENT_POSITIONS`, `LIVE_PAPER_MAX_CAPITAL_DEPLOYED`, `LIVE_PAPER_MAX_CAPITAL_PER_SYMBOL`, `LIVE_PAPER_CORRELATION_THRESHOLD`: portfolio-level controls
+- `LIVE_PAPER_PROTECTION_*`: loss-streak, symbol-lock, and intraday drawdown protections that can block new paper entries even when a strategy says buy
 - `LIVE_PAPER_SCANNER_WEIGHT_*`: explicit ranking weights for liquidity, volatility, momentum, gap, trend, setup, spread, and freshness
+- `LIVE_PAPER_ALPACA_FEED`: Alpaca data feed, usually `iex` for free live IEX data or `sip` for entitled consolidated tape data
+- `LIVE_PAPER_MARKET_STREAM_ENABLED`: enable Alpaca websocket trades/quotes/bars for the active watchlist and open positions
+- `LIVE_PAPER_MARKET_STREAM_MIN_CYCLE_SECONDS`: minimum time between stream-triggered runner cycles
+- `LIVE_PAPER_LIVE_QUOTE_MAX_AGE_SECONDS`: maximum quote/trade age allowed before new orders are blocked
 
 ## Backend Commands
 
@@ -160,8 +248,8 @@ The SSE stream emits runner, signal, order, fill, warning, command-audit, and he
 - Trade: chart, scanner-driven symbol picker, buy/sell preview, and clear paper-trading actions.
 - Positions: entry, current price, unrealized PnL, time in trade, stop/target, and exit action.
 - Activity: fills, rejections, recent bot decisions, and an advanced history section.
-- Bot: simple automation status, pause/resume/start/stop controls, and signal decisions.
-- Settings: plain-English risk settings with advanced technical controls hidden behind expandable details.
+- Bot: simple automation status, protection status, pause/resume/start/stop controls, and signal decisions.
+- Settings: plain-English risk settings with dry-run clarity and advanced protection controls hidden behind expandable details.
 
 Manual trade note:
 

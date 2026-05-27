@@ -41,9 +41,11 @@ CHART_RANGE_MAP = {
     "1M": ("1d", "30d"),
 }
 from live_logging import StructuredLogger
+from live_protections import ProtectionSettings, evaluate_trade_protections, summarize_trade_protections
 from live_risk import PortfolioRiskSnapshot, evaluate_entry_risk
 from live_scheduler import StaleDataError, parse_hhmm, session_key, to_et_timestamp, validate_latest_bar
 from live_state import RunnerState, StateStore
+from alpaca_stream import AlpacaMarketDataStream
 from market_data_cache import MarketContextCache
 from opportunity_scoring import build_live_calibration, score_signal_opportunity
 from operator_store import OperatorStore
@@ -55,6 +57,23 @@ from strategy_signals import (
     get_opening_range_bar,
     materialize_signal,
 )
+
+
+def _age_seconds(raw_timestamp: Any, now: pd.Timestamp) -> float | None:
+    if not raw_timestamp:
+        return None
+    try:
+        timestamp = to_et_timestamp(raw_timestamp)
+        now_et = to_et_timestamp(now)
+    except Exception:
+        return None
+    return max(0.0, float((now_et - timestamp).total_seconds()))
+
+
+def _live_data_reason(status: dict[str, Any]) -> str:
+    reasons = ", ".join(status.get("reasons") or ["unknown"])
+    max_allowed = status.get("max_allowed_age_seconds")
+    return f"Latest Alpaca quote/trade data is stale or missing ({reasons}); limit is {max_allowed}s."
 
 
 class PaperTradingEngine:
@@ -105,6 +124,8 @@ class PaperTradingEngine:
         self.scanner_engine.load_cached_state()
         self.latest_scan_result = self.scanner_engine.latest_result
         self.market_cache = None
+        self.market_stream: AlpacaMarketDataStream | None = None
+        self._last_cycle_monotonic = 0.0
         if not config.demo_mode and self.alpaca_config is not None:
             self.market_cache = MarketContextCache(
                 symbol=config.symbol,
@@ -202,6 +223,12 @@ class PaperTradingEngine:
             "max_capital_per_symbol": self.base_config.max_capital_per_symbol,
             "max_daily_loss": self.base_config.max_daily_loss,
             "max_trades_per_day": self.base_config.max_trades_per_day,
+            "protection_loss_lookback_trades": self.base_config.protection_loss_lookback_trades,
+            "protection_loss_limit": self.base_config.protection_loss_limit,
+            "protection_loss_lock_minutes": self.base_config.protection_loss_lock_minutes,
+            "protection_max_intraday_drawdown": self.base_config.protection_max_intraday_drawdown,
+            "protection_symbol_loss_limit": self.base_config.protection_symbol_loss_limit,
+            "protection_symbol_lock_minutes": self.base_config.protection_symbol_lock_minutes,
             "cooldown_minutes": self.base_config.cooldown_minutes,
             "flatten_at": self.base_config.flatten_at,
             "exit_mode": self.base_config.exit_mode,
@@ -236,6 +263,12 @@ class PaperTradingEngine:
             max_capital_per_symbol=float(self.runtime_settings["max_capital_per_symbol"]),
             max_daily_loss=float(self.runtime_settings["max_daily_loss"]),
             max_trades_per_day=int(self.runtime_settings["max_trades_per_day"]),
+            protection_loss_lookback_trades=int(self.runtime_settings["protection_loss_lookback_trades"]),
+            protection_loss_limit=int(self.runtime_settings["protection_loss_limit"]),
+            protection_loss_lock_minutes=int(self.runtime_settings["protection_loss_lock_minutes"]),
+            protection_max_intraday_drawdown=float(self.runtime_settings["protection_max_intraday_drawdown"]),
+            protection_symbol_loss_limit=int(self.runtime_settings["protection_symbol_loss_limit"]),
+            protection_symbol_lock_minutes=int(self.runtime_settings["protection_symbol_lock_minutes"]),
             cooldown_minutes=int(self.runtime_settings["cooldown_minutes"]),
             flatten_at=str(self.runtime_settings["flatten_at"]),
             exit_mode=str(self.runtime_settings["exit_mode"]),
@@ -243,6 +276,73 @@ class PaperTradingEngine:
             dry_run=bool(self.runtime_flags["dry_run"]),
             pinned_symbols=tuple(self.runtime_flags["pinned_symbols"]),
         )
+
+    def _protection_settings(self) -> ProtectionSettings:
+        config = self.effective_config()
+        return ProtectionSettings(
+            loss_lookback_trades=config.protection_loss_lookback_trades,
+            loss_limit=config.protection_loss_limit,
+            loss_lock_minutes=config.protection_loss_lock_minutes,
+            max_intraday_drawdown=config.protection_max_intraday_drawdown,
+            symbol_loss_limit=config.protection_symbol_loss_limit,
+            symbol_lock_minutes=config.protection_symbol_lock_minutes,
+        )
+
+    def _protection_status_snapshot(self) -> dict[str, Any]:
+        symbols = self._active_watchlist_symbols() or list(self.effective_config().configured_symbols)
+        return summarize_trade_protections(
+            symbols=symbols,
+            trade_log=list(self.state.trade_log),
+            now=pd.Timestamp.now(tz="UTC"),
+            settings=self._protection_settings(),
+        )
+
+    def _sync_market_stream_symbols(self, symbols: list[str] | set[str] | tuple[str, ...]) -> None:
+        config = self.effective_config()
+        if self.base_config.demo_mode or self.alpaca_config is None or not config.market_stream_enabled:
+            return
+        normalized = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
+        if not normalized:
+            return
+        if self.market_stream is None:
+            self.market_stream = AlpacaMarketDataStream(self.alpaca_config)
+            self.market_stream.start(normalized)
+            self.event_logger.emit(
+                "market_stream_started",
+                message=(
+                    f"Alpaca market stream requested for feed={self.market_stream.feed} "
+                    f"symbols={','.join(normalized)}"
+                ),
+                symbol=self.base_config.symbol,
+                feed=self.market_stream.feed,
+                stream_supported=self.market_stream.supported,
+                symbols=normalized,
+            )
+            return
+        self.market_stream.update_symbols(normalized)
+
+    def _stop_market_stream(self) -> None:
+        if self.market_stream is None:
+            return
+        self.market_stream.stop()
+        self.market_stream = None
+
+    def _market_stream_status(self) -> dict[str, Any]:
+        if self.base_config.demo_mode:
+            return {"enabled": False, "reason": "demo_mode"}
+        config = self.effective_config()
+        if not config.market_stream_enabled:
+            return {"enabled": False, "reason": "disabled"}
+        if self.market_stream is None:
+            return {
+                "enabled": True,
+                "connected": False,
+                "authenticated": False,
+                "feed": self.alpaca_config.feed if self.alpaca_config else config.alpaca_feed,
+                "last_error": None,
+                "subscribed_symbols": [],
+            }
+        return self.market_stream.status()
 
     def run_forever(self) -> None:
         with self.lock:
@@ -264,7 +364,8 @@ class PaperTradingEngine:
                 self._publish_all_snapshots()
             while not self.stop_event.is_set():
                 self.run_cycle()
-                if self.stop_event.wait(self.effective_config().poll_seconds):
+                self._last_cycle_monotonic = time.monotonic()
+                if self._wait_for_next_cycle():
                     break
         except KeyboardInterrupt:
             if not self.base_config.demo_mode and self.alpaca_config is not None:
@@ -307,6 +408,7 @@ class PaperTradingEngine:
             )
             raise
         finally:
+            self._stop_market_stream()
             with self.lock:
                 self.running = False
                 self.startup_complete.set()
@@ -362,6 +464,7 @@ class PaperTradingEngine:
             )
             raise
         finally:
+            self._stop_market_stream()
             with self.lock:
                 self.running = False
                 self.startup_complete.set()
@@ -377,6 +480,22 @@ class PaperTradingEngine:
 
     def request_stop(self) -> None:
         self.stop_event.set()
+
+    def _wait_for_next_cycle(self) -> bool:
+        config = self.effective_config()
+        timeout = max(float(config.poll_seconds), 0.2)
+        if self.market_stream is None:
+            return self.stop_event.wait(timeout)
+
+        stream_message_seen = self.market_stream.wait_for_message(timeout)
+        if self.stop_event.is_set():
+            return True
+        if stream_message_seen:
+            min_cycle_seconds = max(float(config.market_stream_min_cycle_seconds), 0.2)
+            elapsed = time.monotonic() - self._last_cycle_monotonic
+            if elapsed < min_cycle_seconds and self.stop_event.wait(min_cycle_seconds - elapsed):
+                return True
+        return False
 
     def set_pause_new_entries(self, paused: bool) -> dict[str, Any]:
         with self.lock:
@@ -531,6 +650,14 @@ class PaperTradingEngine:
             position = self._lookup_position(symbol)
             chart = self._load_chart_payload(symbol, chart_range)
             can_manual_trade, manual_reason = self._manual_trade_availability(symbol)
+            live_data_status = self._live_data_snapshot_for_symbol(
+                symbol,
+                pd.Timestamp.now(tz="America/New_York"),
+                allow_rest_fallback=True,
+            )
+            if can_manual_trade and not live_data_status.get("fresh"):
+                can_manual_trade = False
+                manual_reason = _live_data_reason(live_data_status)
 
             latest_price = float(trade["p"])
             prior_close = chart["points"][0]["close"] if chart["points"] else latest_price
@@ -545,6 +672,7 @@ class PaperTradingEngine:
                 "manual_trading_enabled": can_manual_trade,
                 "manual_trading_reason": manual_reason,
                 "manual_trade_warning": self._manual_position_warning(symbol, position),
+                "market_data": live_data_status,
                 "quote": {
                     "last_price": latest_price,
                     "bid": float(quote["bp"]),
@@ -609,6 +737,16 @@ class PaperTradingEngine:
                 position = self._lookup_position(symbol)
 
             can_submit, submit_reason = self._manual_trade_availability(symbol)
+            live_data_status: dict[str, Any] | None = None
+            if not self.base_config.demo_mode:
+                live_data_status = self._live_data_snapshot_for_symbol(
+                    symbol,
+                    pd.Timestamp.now(tz="America/New_York"),
+                    allow_rest_fallback=True,
+                )
+                if not live_data_status.get("fresh"):
+                    can_submit = False
+                    submit_reason = _live_data_reason(live_data_status)
             warnings: list[str] = []
             if amount_dollars <= 0:
                 can_submit = False
@@ -660,6 +798,7 @@ class PaperTradingEngine:
                 "can_submit": can_submit,
                 "submit_reason": submit_reason,
                 "warnings": warnings,
+                "market_data": live_data_status,
                 "use_notional": use_notional,
             }
 
@@ -782,6 +921,12 @@ class PaperTradingEngine:
             "max_capital_per_symbol",
             "max_daily_loss",
             "max_trades_per_day",
+            "protection_loss_lookback_trades",
+            "protection_loss_limit",
+            "protection_loss_lock_minutes",
+            "protection_max_intraday_drawdown",
+            "protection_symbol_loss_limit",
+            "protection_symbol_lock_minutes",
             "cooldown_minutes",
             "risk_per_trade",
             "rr_ratio",
@@ -795,7 +940,17 @@ class PaperTradingEngine:
             normalized["max_trades_per_day"] = int(normalized["max_trades_per_day"])
         if "cooldown_minutes" in normalized:
             normalized["cooldown_minutes"] = int(normalized["cooldown_minutes"])
-        for int_key in {"universe_refresh_seconds", "watchlist_size", "watchlist_hold_buffer", "max_concurrent_positions"}:
+        for int_key in {
+            "universe_refresh_seconds",
+            "watchlist_size",
+            "watchlist_hold_buffer",
+            "max_concurrent_positions",
+            "protection_loss_lookback_trades",
+            "protection_loss_limit",
+            "protection_loss_lock_minutes",
+            "protection_symbol_loss_limit",
+            "protection_symbol_lock_minutes",
+        }:
             if int_key in normalized:
                 normalized[int_key] = int(normalized[int_key])
 
@@ -1125,14 +1280,43 @@ class PaperTradingEngine:
             return None
         return max(correlations)
 
-    def _log_watchlist_market_snapshot(self, symbol_market_data: dict[str, dict[str, pd.DataFrame]]) -> None:
+    def _log_watchlist_market_snapshot(
+        self,
+        symbol_market_data: dict[str, dict[str, pd.DataFrame]],
+        now: pd.Timestamp,
+    ) -> None:
+        live_data = {
+            symbol: self._live_data_snapshot_for_symbol(symbol, now, allow_rest_fallback=True)
+            for symbol in sorted(symbol_market_data)
+        }
         snapshot = {
+            "feed": self.alpaca_config.feed if self.alpaca_config else self.effective_config().alpaca_feed,
+            "market_stream": self._market_stream_status(),
             "watchlist_symbols": sorted(symbol_market_data),
             "latest_bar_times": {
                 symbol: data["1m"].index.max().isoformat()
                 for symbol, data in symbol_market_data.items()
                 if not data["1m"].empty
             },
+            "live_data": live_data,
+            "latest_quote_times": {
+                symbol: payload.get("latest_quote_timestamp")
+                for symbol, payload in live_data.items()
+                if payload.get("latest_quote_timestamp")
+            },
+            "latest_trade_times": {
+                symbol: payload.get("latest_trade_timestamp")
+                for symbol, payload in live_data.items()
+                if payload.get("latest_trade_timestamp")
+            },
+            "max_live_data_age_seconds": max(
+                [
+                    float(payload.get("max_age_seconds"))
+                    for payload in live_data.values()
+                    if payload.get("max_age_seconds") is not None
+                ],
+                default=None,
+            ),
             "rows_1m": {symbol: len(data["1m"]) for symbol, data in symbol_market_data.items()},
             "rows_5m": {symbol: len(data["5m"]) for symbol, data in symbol_market_data.items()},
             "rows_1d": {symbol: len(data["1d"]) for symbol, data in symbol_market_data.items()},
@@ -1144,7 +1328,79 @@ class PaperTradingEngine:
             message=f"Refreshed market context for {len(symbol_market_data)} watchlist symbols.",
             watchlist=snapshot["watchlist_symbols"],
             latest_bar_times=snapshot["latest_bar_times"],
+            feed=snapshot["feed"],
+            market_stream=snapshot["market_stream"],
         )
+
+    def _live_data_snapshot_for_symbol(
+        self,
+        symbol: str,
+        now: pd.Timestamp,
+        *,
+        allow_rest_fallback: bool,
+    ) -> dict[str, Any]:
+        config = self.effective_config()
+        normalized_symbol = symbol.upper()
+        source = "stream"
+        quote: dict[str, Any] | None = None
+        trade: dict[str, Any] | None = None
+        if self.market_stream is not None:
+            latest = self.market_stream.latest_for_symbol(normalized_symbol)
+            quote = latest.get("quote")
+            trade = latest.get("trade")
+
+        if allow_rest_fallback and self.alpaca_config is not None and (quote is None or trade is None):
+            source = "rest"
+            try:
+                if quote is None:
+                    quote = fetch_latest_quote(self.alpaca_config, normalized_symbol)
+                if trade is None:
+                    trade = fetch_latest_trade(self.alpaca_config, normalized_symbol)
+            except Exception as exc:
+                return {
+                    "symbol": normalized_symbol,
+                    "feed": self.alpaca_config.feed,
+                    "source": source,
+                    "fresh": False,
+                    "reasons": ["live_market_data_unavailable"],
+                    "error": str(exc),
+                }
+
+        quote_ts = quote.get("t") if isinstance(quote, dict) else None
+        trade_ts = trade.get("t") if isinstance(trade, dict) else None
+        quote_age = _age_seconds(quote_ts, now)
+        trade_age = _age_seconds(trade_ts, now)
+        max_allowed_age = int(config.live_quote_max_age_seconds)
+        reasons: list[str] = []
+        if quote_age is None:
+            reasons.append("live_quote_missing")
+        elif quote_age > max_allowed_age:
+            reasons.append("live_quote_stale")
+        if trade_age is None:
+            reasons.append("live_trade_missing")
+        elif trade_age > max_allowed_age:
+            reasons.append("live_trade_stale")
+
+        quote_bid = quote.get("bp") if isinstance(quote, dict) else None
+        quote_ask = quote.get("ap") if isinstance(quote, dict) else None
+        trade_price = trade.get("p") if isinstance(trade, dict) else None
+        ages = [age for age in (quote_age, trade_age) if age is not None]
+        return {
+            "symbol": normalized_symbol,
+            "feed": self.alpaca_config.feed if self.alpaca_config else config.alpaca_feed,
+            "source": source,
+            "fresh": not reasons,
+            "reasons": reasons,
+            "latest_quote_timestamp": quote_ts,
+            "latest_trade_timestamp": trade_ts,
+            "quote_age_seconds": round(quote_age, 2) if quote_age is not None else None,
+            "trade_age_seconds": round(trade_age, 2) if trade_age is not None else None,
+            "max_age_seconds": round(max(ages), 2) if ages else None,
+            "max_allowed_age_seconds": max_allowed_age,
+            "bid": quote_bid,
+            "ask": quote_ask,
+            "latest_trade_price": trade_price,
+        }
 
     def _reconcile_open_trade_symbol(self, symbol: str) -> None:
         assert self.alpaca_config is not None
@@ -1320,6 +1576,7 @@ class PaperTradingEngine:
         self._startup_reconcile()
         self._refresh_broker_snapshots()
         self._refresh_scanner(pd.Timestamp.now(tz="UTC"), force=True, allow_cached_on_failure=True)
+        self._sync_market_stream_symbols(self._active_watchlist_symbols() or list(config.configured_symbols))
         self._publish_all_snapshots()
 
     def _startup_reconcile(self) -> None:
@@ -1385,6 +1642,7 @@ class PaperTradingEngine:
             allow_cached_on_failure=True,
         )
         tracked_symbols = sorted(set(self._active_watchlist_symbols()) | set(self.state.active_trades))
+        self._sync_market_stream_symbols(tracked_symbols)
 
         if not clock.get("is_open"):
             self.data_fresh = False
@@ -1439,7 +1697,7 @@ class PaperTradingEngine:
         self.data_fresh = bool(symbol_market_data)
         if latest_bar_times:
             self.last_completed_bar_time = max(latest_bar_times).isoformat()
-            self._log_watchlist_market_snapshot(symbol_market_data)
+            self._log_watchlist_market_snapshot(symbol_market_data, now)
 
         self._reconcile_open_trades()
 
@@ -1774,6 +2032,14 @@ class PaperTradingEngine:
                     2,
                 )
                 correlation_to_open_positions = self._correlation_to_open_positions(symbol, market_data["1d"])
+                live_data_status = self._live_data_snapshot_for_symbol(symbol, now, allow_rest_fallback=True)
+                protection_decision = evaluate_trade_protections(
+                    symbol=symbol,
+                    trade_log=list(self.state.trade_log),
+                    now=now,
+                    settings=self._protection_settings(),
+                )
+                entry_guard_reasons = tuple(protection_decision.reasons) + tuple(live_data_status.get("reasons") or [])
                 risk_decision = evaluate_entry_risk(
                     signal,
                     state=self.state,
@@ -1791,6 +2057,7 @@ class PaperTradingEngine:
                         top_candidate_score=top_candidate_score,
                         correlation_to_open_positions=correlation_to_open_positions,
                         correlation_threshold=config.correlation_threshold,
+                        candidate_decision=str(candidate.get("features", {}).get("atlas_decision") or ""),
                     ),
                     max_position_qty=config.max_position_qty,
                     max_position_notional=config.max_position_notional,
@@ -1800,6 +2067,7 @@ class PaperTradingEngine:
                     one_position_per_symbol=config.one_position_per_symbol,
                     exit_mode=config.exit_mode,
                     allow_fractional_long=config.allow_fractional_long,
+                    protection_reasons=entry_guard_reasons,
                 )
                 self.state.mark_signal_processed(signal_day_key, signal.signal_key)
                 signal_record = self._build_signal_record(symbol, signal, risk_decision)
@@ -1812,6 +2080,8 @@ class PaperTradingEngine:
                         "expectancy_score": opportunity.get("expectancy_score"),
                         "execution_score": opportunity.get("execution_score"),
                         "selection_score": selection_score,
+                        "protection_status": protection_decision.to_dict(),
+                        "live_data_status": live_data_status,
                         "candidate_stage_scores": dict(candidate.get("stage_scores") or {}),
                         "candidate_rank_reason": candidate.get("rank_reason"),
                         "selected": False,
@@ -1835,6 +2105,8 @@ class PaperTradingEngine:
                     approved_qty=risk_decision.approved_qty,
                     approved_notional=risk_decision.approved_notional,
                     reasons=list(risk_decision.reasons),
+                    protection_locks=list(protection_decision.locks),
+                    live_data_status=live_data_status,
                     rank=candidate.get("rank"),
                     score=candidate.get("score"),
                     selection_score=selection_score,
@@ -2087,6 +2359,8 @@ class PaperTradingEngine:
             "paused_new_entries": self.runtime_flags["paused_new_entries"],
             "market_open": self.market_open,
             "data_fresh": self.data_fresh,
+            "market_data_feed": self.alpaca_config.feed if self.alpaca_config else self.effective_config().alpaca_feed,
+            "market_stream": self._market_stream_status(),
             "last_heartbeat": self.last_heartbeat_at,
             "last_cycle_at": self.last_cycle_at,
             "latest_completed_bar_time": self.last_completed_bar_time,
@@ -2143,6 +2417,7 @@ class PaperTradingEngine:
             "cooldown_active": cooldown_active,
             "cooldown_until": cooldown_until,
             "cooldowns": cooldowns,
+            "protection_status": self._protection_status_snapshot(),
             "max_daily_loss": self.effective_config().max_daily_loss,
             "max_trades_per_day": self.effective_config().max_trades_per_day,
             "paused_new_entries": self.runtime_flags["paused_new_entries"],
@@ -2152,14 +2427,19 @@ class PaperTradingEngine:
         }
 
     def _health_snapshot(self) -> dict[str, Any]:
+        stream_status = self._market_stream_status()
+        stream_connected = bool(stream_status.get("connected") and stream_status.get("authenticated"))
         return {
             "paper_only": True,
             "demo_mode": self.base_config.demo_mode,
             "auth_ok": self.auth_ok,
             "broker_connected": self.broker_connected,
-            "market_data_connected": self.data_fresh or self.base_config.demo_mode,
+            "market_data_connected": self.data_fresh or stream_connected or self.base_config.demo_mode,
             "market_open": self.market_open,
             "data_fresh": self.data_fresh,
+            "market_data_feed": self.alpaca_config.feed if self.alpaca_config else self.effective_config().alpaca_feed,
+            "market_stream": stream_status,
+            "live_quote_max_age_seconds": self.effective_config().live_quote_max_age_seconds,
             "last_heartbeat": self.last_heartbeat_at,
             "latest_completed_bar_time": self.last_completed_bar_time,
             "reconciliation_ok": self.reconciliation_ok,
@@ -2198,6 +2478,12 @@ class PaperTradingEngine:
             "correlation_threshold": config.correlation_threshold,
             "max_daily_loss": config.max_daily_loss,
             "max_trades_per_day": config.max_trades_per_day,
+            "protection_loss_lookback_trades": config.protection_loss_lookback_trades,
+            "protection_loss_limit": config.protection_loss_limit,
+            "protection_loss_lock_minutes": config.protection_loss_lock_minutes,
+            "protection_max_intraday_drawdown": config.protection_max_intraday_drawdown,
+            "protection_symbol_loss_limit": config.protection_symbol_loss_limit,
+            "protection_symbol_lock_minutes": config.protection_symbol_lock_minutes,
             "one_position_per_symbol": config.one_position_per_symbol,
             "cooldown_minutes": config.cooldown_minutes,
             "flatten_at": config.flatten_at,
@@ -2211,6 +2497,10 @@ class PaperTradingEngine:
             "require_displacement": config.strategy_config.require_displacement,
             "dry_run": config.dry_run,
             "demo_mode": config.demo_mode,
+            "alpaca_feed": config.alpaca_feed,
+            "market_stream_enabled": config.market_stream_enabled,
+            "market_stream_min_cycle_seconds": config.market_stream_min_cycle_seconds,
+            "live_quote_max_age_seconds": config.live_quote_max_age_seconds,
             "runtime_overrides_active": self._runtime_overrides_active(),
             "runtime_override_keys": self._runtime_override_keys(),
             "database_path": str(config.database_path),
@@ -2305,6 +2595,18 @@ class PaperTradingEngine:
             "manual_trading_enabled": can_manual_trade,
             "manual_trading_reason": manual_reason,
             "manual_trade_warning": self._manual_position_warning(symbol, position),
+            "market_data": {
+                "symbol": symbol,
+                "feed": "demo",
+                "source": "demo",
+                "fresh": True,
+                "reasons": [],
+                "latest_quote_timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
+                "latest_trade_timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
+                "quote_age_seconds": 0,
+                "trade_age_seconds": 0,
+                "max_age_seconds": 0,
+            },
             "quote": {
                 "last_price": latest_price,
                 "bid": round(latest_price - 0.03, 2),

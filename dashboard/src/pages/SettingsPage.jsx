@@ -21,16 +21,29 @@ const ADVANCED_SETTINGS = [
   ["min_gap_atr", "Minimum gap ATR", "Minimum fair value gap size relative to ATR."],
 ];
 
+const PROTECTION_SETTINGS = [
+  ["protection_loss_lookback_trades", "Loss guard lookback", "How many recent closed trades the global loss guard reviews."],
+  ["protection_loss_limit", "Global loss limit", "Pause new entries after this many losing trades inside the lookback."],
+  ["protection_loss_lock_minutes", "Global lock minutes", "How long the bot waits after the latest loss guard trigger."],
+  ["protection_max_intraday_drawdown", "Intraday drawdown guard", "Pause new entries if closed-trade paper PnL falls this far from today's peak."],
+  ["protection_symbol_loss_limit", "Symbol loss limit", "Temporarily lock one symbol after this many recent losing trades."],
+  ["protection_symbol_lock_minutes", "Symbol lock minutes", "How long an underperforming symbol stays locked."],
+];
+
 export default function SettingsPage() {
-  const { config, operatorMode, sendCommand, commandPending } = useDashboard();
+  const { config, overview, operatorMode, sendCommand, commandPending } = useDashboard();
   const [formState, setFormState] = useState({});
+  const dryRunActive = Boolean(config?.dry_run);
+  const runnerRunning = Boolean(overview?.runner_status?.running);
+  const dataFeed = (overview?.health?.market_data_feed || config?.alpaca_feed || "iex").toUpperCase();
+  const streamStatus = overview?.health?.market_stream || overview?.runner_status?.market_stream || {};
 
   useEffect(() => {
     if (!config) {
       return;
     }
     const next = {};
-    [...BASIC_SETTINGS, ...ADVANCED_SETTINGS].forEach(([key]) => {
+    [...BASIC_SETTINGS, ...ADVANCED_SETTINGS, ...PROTECTION_SETTINGS].forEach(([key]) => {
       next[key] = config[key] ?? "";
     });
     setFormState(next);
@@ -49,6 +62,29 @@ export default function SettingsPage() {
             <p className="muted">Plain-English settings for how the paper bot should behave.</p>
           </div>
         </div>
+
+        <div className={`dry-run-callout settings-dry-run ${dryRunActive ? "is-on" : "is-off"}`}>
+          <strong>Dry run is {dryRunActive ? "ON" : "OFF"}</strong>
+          <span>
+            {dryRunActive
+              ? "The runner may scan and manage the watchlist, but it will not submit Alpaca paper orders."
+              : "The runner can submit Alpaca paper orders after a setup passes signal, buying-power, and risk checks."}
+          </span>
+        </div>
+
+        <div className="settings-status-row">
+          <div className="info-card tone-paper">
+            <span>Market data feed</span>
+            <strong>{dataFeed}</strong>
+          </div>
+          <div className={`info-card ${streamStatus.connected ? "tone-positive" : "tone-warn"}`}>
+            <span>Market stream</span>
+            <strong>{streamStatus.connected ? "Connected" : "REST fallback"}</strong>
+          </div>
+        </div>
+        <p className="helper-text settings-action-note">
+          Change `LIVE_PAPER_ALPACA_FEED` to `sip` only if your Alpaca account has SIP entitlement, then restart the backend.
+        </p>
 
         <div className="settings-grid user-settings-grid">
           {BASIC_SETTINGS.map(([key, label, helper]) => (
@@ -70,18 +106,35 @@ export default function SettingsPage() {
             Apply Runtime Config
           </ConfirmActionButton>
           <ConfirmActionButton
-            disabled={!operatorMode || commandPending}
-            confirmText="Toggle dry-run mode? This is only allowed while the runner is stopped."
+            disabled={!operatorMode || commandPending || runnerRunning || !config}
+            confirmText={
+              dryRunActive
+                ? "Turn dry run OFF? The runner may submit Alpaca paper orders after valid signals and risk checks. This is only allowed while the runner is stopped."
+                : "Turn dry run ON? The runner will scan only and will not submit paper orders. This is only allowed while the runner is stopped."
+            }
             onConfirm={() => sendCommand("set_dry_run", { dry_run: !config?.dry_run }, { confirm: true })}
           >
-            Toggle Dry Run
+            {dryRunActive ? "Turn Dry Run Off" : "Turn Dry Run On"}
           </ConfirmActionButton>
         </div>
+        {runnerRunning && (
+          <p className="helper-text settings-action-note">Stop the runner before changing dry run mode.</p>
+        )}
 
         <details className="advanced-details">
           <summary>Advanced settings</summary>
           <div className="settings-grid user-settings-grid advanced-settings-grid">
             {ADVANCED_SETTINGS.map(([key, label, helper]) => (
+              <label key={key}>
+                <span>{label}</span>
+                <input value={formState[key] ?? ""} onChange={(event) => updateField(key, event.target.value)} />
+                <small className="helper-text">{helper}</small>
+              </label>
+            ))}
+          </div>
+          <h3 className="settings-subhead">Risk protections</h3>
+          <div className="settings-grid user-settings-grid advanced-settings-grid">
+            {PROTECTION_SETTINGS.map(([key, label, helper]) => (
               <label key={key}>
                 <span>{label}</span>
                 <input value={formState[key] ?? ""} onChange={(event) => updateField(key, event.target.value)} />
@@ -104,6 +157,12 @@ function normalizePayload(formState) {
     max_daily_loss: Number(formState.max_daily_loss),
     max_trades_per_day: Number(formState.max_trades_per_day),
     cooldown_minutes: Number(formState.cooldown_minutes),
+    protection_loss_lookback_trades: Number(formState.protection_loss_lookback_trades),
+    protection_loss_limit: Number(formState.protection_loss_limit),
+    protection_loss_lock_minutes: Number(formState.protection_loss_lock_minutes),
+    protection_max_intraday_drawdown: Number(formState.protection_max_intraday_drawdown),
+    protection_symbol_loss_limit: Number(formState.protection_symbol_loss_limit),
+    protection_symbol_lock_minutes: Number(formState.protection_symbol_lock_minutes),
     flatten_at: String(formState.flatten_at),
     exit_mode: String(formState.exit_mode),
     risk_per_trade: Number(formState.risk_per_trade),

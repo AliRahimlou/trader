@@ -5,27 +5,27 @@ import { useDashboard } from "../state/DashboardContext";
 
 const NAV_ITEMS = [
   ["Home", "/"],
-  ["Scanner", "/scanner"],
-  ["Trade", "/trade"],
+  ["Market Picks", "/scanner"],
+  ["Manual Trade", "/trade"],
   ["Positions", "/positions"],
   ["Activity", "/activity"],
-  ["Bot", "/bot"],
+  ["Auto Bot", "/bot"],
   ["Settings", "/settings"],
 ];
 
 const PAGE_META = {
   "/": {
-    eyebrow: "Overview",
-    title: "Your paper portfolio",
-    description: "Cash, exposure, watchlist, and automation health in one place.",
+    eyebrow: "Start",
+    title: "Bot launchpad",
+    description: "Choose how the paper bot should trade, cap the dollars per trade, and start monitoring.",
   },
   "/scanner": {
-    eyebrow: "Scanner",
-    title: "Ranked opportunity board",
+    eyebrow: "Market picks",
+    title: "Ranked market board",
     description: "See what the bot should care about next and why each symbol is moving up or down the board.",
   },
   "/trade": {
-    eyebrow: "Trade",
+    eyebrow: "Manual trade",
     title: "Manual trade ticket",
     description: "Open a symbol, review context, and place paper-only discretionary orders without losing runner visibility.",
   },
@@ -56,6 +56,7 @@ export default function AppShell({ children }) {
   const {
     health,
     overview,
+    config,
     streamConnected,
     error,
     operatorMode,
@@ -66,6 +67,8 @@ export default function AppShell({ children }) {
   } =
     useDashboard();
   const startupState = overview?.runner_status?.startup_state || "idle";
+  const dryRunActive = Boolean(overview?.runner_status?.dry_run ?? config?.dry_run);
+  const dataFeed = (health?.market_data_feed || overview?.runner_status?.market_data_feed || config?.alpaca_feed || "iex").toUpperCase();
   const runnerState = startupState === "starting"
     ? "starting"
     : startupState === "failed"
@@ -89,8 +92,10 @@ export default function AppShell({ children }) {
 
           <div className="sidebar-status">
             <StatusPill label="Mode" value={overview?.runner_status?.mode === "paper" ? "paper only" : overview?.runner_status?.mode || "paper"} tone="paper" />
+            <StatusPill label="Dry run" value={dryRunActive ? "on" : "off"} tone={dryRunActive ? "warn" : "ok"} />
             <StatusPill label="Stream" value={streamConnected ? "connected" : "reconnecting"} tone={streamConnected ? "ok" : "warn"} />
             <StatusPill label="Market" value={health?.market_open ? "open" : "closed"} tone={health?.market_open ? "ok" : "neutral"} />
+            <StatusPill label="Feed" value={dataFeed} tone={dataFeed === "SIP" ? "ok" : "paper"} />
             <StatusPill label="Data" value={health?.data_fresh ? "fresh" : "delayed"} tone={health?.data_fresh ? "ok" : "warn"} />
           </div>
 
@@ -134,6 +139,11 @@ export default function AppShell({ children }) {
               label="Runner"
               value={runnerState}
               tone={runnerTone}
+            />
+            <StatusPill
+              label="Dry run"
+              value={dryRunActive ? "ON - no orders" : "OFF - paper orders"}
+              tone={dryRunActive ? "warn" : "ok"}
             />
             <StatusPill label="Startup" value={startupState} tone={startupTone} />
             <StatusPill

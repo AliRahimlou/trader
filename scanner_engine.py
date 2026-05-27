@@ -13,6 +13,7 @@ from alpaca_api import (
     period_to_start,
 )
 from live_scheduler import parse_hhmm, validate_latest_bar
+from market_intelligence import assess_market_regime, build_candidate_review, build_strategy_edge_profiles
 from market_data_cache import MarketContextCache
 from opportunity_scoring import (
     build_context_stage,
@@ -350,6 +351,7 @@ class ScannerEngine:
                 asset={"tradable": True, "fractionable": True, "shortable": True},
             )
             ranked.append(candidate)
+        market_intelligence = self._apply_market_intelligence(ranked, trade_log=[])
         ranked.sort(key=lambda item: (-item.score, item.symbol))
         for index, candidate in enumerate(ranked, start=1):
             candidate.rank = index
@@ -366,7 +368,7 @@ class ScannerEngine:
             scanned_count=len(ranked),
             watchlist_size=self.config.watchlist_size,
             hold_buffer=self.config.watchlist_hold_buffer,
-            health={"healthy": True, "demo_mode": True, "failures": 0},
+            health={"healthy": True, "demo_mode": True, "failures": 0, "market_intelligence": market_intelligence},
         )
         return ScanResult(
             last_scan_at=now.isoformat(),
@@ -375,7 +377,7 @@ class ScannerEngine:
             scanned_count=len(ranked),
             ranked_symbols=ranked,
             watchlist_state=watchlist_state,
-            health={"healthy": True, "demo_mode": True, "failures": 0},
+            health={"healthy": True, "demo_mode": True, "failures": 0, "market_intelligence": market_intelligence},
         )
 
     def _refresh_real(
@@ -398,6 +400,12 @@ class ScannerEngine:
             for position in latest_positions
             if position.get("symbol")
         }
+        active_trade_symbols = {
+            str(symbol or "").upper()
+            for symbol in getattr(state, "active_trades", {})
+            if symbol
+        }
+        self._correlation_reference_symbols = sorted(set(positions_by_symbol) | active_trade_symbols)
         calibration = build_live_calibration(list(getattr(state, "trade_log", [])))
         snapshot_symbols = self._snapshot_symbols_for_refresh(
             universe_members,
@@ -545,6 +553,7 @@ class ScannerEngine:
                 candidate.notes.append(str(exc))
             self._finalize_candidate_ranking(candidate, correlation_to_open_positions=correlation_to_open_positions)
 
+        market_intelligence = self._apply_market_intelligence(candidates, trade_log=list(getattr(state, "trade_log", [])))
         candidates.sort(
             key=lambda item: (
                 -item.score,
@@ -575,6 +584,7 @@ class ScannerEngine:
             "disabled_symbols": disabled_symbols,
             "stage_counts": stage_counts,
             "top_symbol": candidates[0].symbol if candidates else None,
+            "market_intelligence": market_intelligence,
         }
         watchlist_state = self.watchlist_manager.build(
             candidates,
@@ -793,6 +803,39 @@ class ScannerEngine:
         recent_net = abs(float(recent_window.iloc[-1] - recent_window.iloc[0])) if len(recent_window) >= 2 else 0.0
         candidate.features["recent_trend_efficiency"] = round((recent_net / recent_distance * 100.0), 2) if recent_distance > 0 else 0.0
 
+    def _correlation_to_open_positions(self, symbol: str, candidate_daily_df: pd.DataFrame) -> float | None:
+        open_symbols = [
+            open_symbol
+            for open_symbol in getattr(self, "_correlation_reference_symbols", [])
+            if open_symbol and open_symbol != symbol.upper()
+        ]
+        if not open_symbols or candidate_daily_df.empty or "close" not in candidate_daily_df:
+            return None
+
+        candidate_returns = candidate_daily_df["close"].pct_change().dropna().tail(20)
+        if len(candidate_returns) < 10:
+            return None
+
+        correlations: list[float] = []
+        for open_symbol in open_symbols:
+            try:
+                open_data = self.ensure_symbol_market_data(open_symbol, pd.Timestamp.now(tz="UTC"))["1d"]
+            except Exception:
+                continue
+            if open_data.empty or "close" not in open_data:
+                continue
+            open_returns = open_data["close"].pct_change().dropna().tail(20)
+            aligned = pd.concat([candidate_returns, open_returns], axis=1, join="inner").dropna()
+            if len(aligned) < 10:
+                continue
+            correlation = aligned.iloc[:, 0].corr(aligned.iloc[:, 1])
+            if correlation == correlation:
+                correlations.append(abs(float(correlation)))
+
+        if not correlations:
+            return None
+        return max(correlations)
+
     def _finalize_candidate_ranking(
         self,
         candidate: RankedSymbol,
@@ -862,6 +905,58 @@ class ScannerEngine:
         if candidate.best_signal is not None:
             candidate.features["best_signal_selection_score"] = float(candidate.best_signal.get("selection_score") or 0.0)
         candidate.notes = self._dedupe_strings([note for note in candidate.notes if note])
+
+    def _apply_market_intelligence(
+        self,
+        candidates: list[RankedSymbol],
+        *,
+        trade_log: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        market_regime = assess_market_regime(candidates)
+        strategy_edges = build_strategy_edge_profiles(trade_log)
+        review_scores: list[float] = []
+
+        for candidate in candidates:
+            review = build_candidate_review(
+                candidate,
+                market_regime=market_regime,
+                strategy_edges=strategy_edges,
+            )
+            review_score = float(review.get("score") or 0.0)
+            review_scores.append(review_score)
+            base_score = float(candidate.score or 0.0)
+            candidate.stage_scores["atlas_review"] = round(review_score, 2)
+            candidate.stage_components["atlas_review"] = dict(review.get("components") or {})
+            candidate.features["market_regime"] = market_regime.get("label")
+            candidate.features["market_regime_score"] = market_regime.get("score")
+            candidate.features["atlas_review_score"] = round(review_score, 2)
+            candidate.features["atlas_decision"] = review.get("decision")
+            candidate.features["atlas_risk_flags"] = list(review.get("risk_flags") or [])
+            candidate.features["strategy_edge_weight"] = (
+                dict(review.get("strategy_profile") or {}).get("weight")
+                if review.get("strategy_profile")
+                else None
+            )
+            candidate.features["pre_atlas_score"] = round(base_score, 2)
+            candidate.score = round((base_score * 0.82) + (review_score * 0.18), 2)
+
+            if review.get("decision") == "block":
+                candidate.near_miss_reasons.append("atlas_cro_block")
+            elif review.get("decision") == "caution":
+                candidate.near_miss_reasons.append("atlas_review_soft_cap")
+            if review.get("summary"):
+                candidate.notes.append(str(review["summary"]))
+            candidate.notes = self._dedupe_strings(candidate.notes)
+            candidate.near_miss_reasons = self._dedupe_strings(candidate.near_miss_reasons)
+
+        market_regime["strategy_edges"] = strategy_edges
+        market_regime["candidate_review"] = {
+            "average_score": round(sum(review_scores) / len(review_scores), 2) if review_scores else 0.0,
+            "blocked_count": sum(1 for candidate in candidates if candidate.features.get("atlas_decision") == "block"),
+            "caution_count": sum(1 for candidate in candidates if candidate.features.get("atlas_decision") == "caution"),
+            "approved_count": sum(1 for candidate in candidates if candidate.features.get("atlas_decision") == "approve"),
+        }
+        return market_regime
 
     def _portfolio_notes(self, portfolio_fit: dict[str, Any]) -> list[str]:
         reasons = list(portfolio_fit.get("reasons") or [])

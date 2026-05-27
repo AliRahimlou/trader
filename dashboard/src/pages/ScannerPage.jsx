@@ -49,6 +49,10 @@ export default function ScannerPage() {
   const bestCandidateTone = bestCandidate ? candidateStatusTone(bestCandidate, activeWatchlist, bestWatchlistEntry) : "neutral";
   const heroDrivers = bestCandidate ? sortedScoreComponents(bestCandidate.score_components).slice(0, 3) : [];
   const stageCounts = scannerStatus?.health?.stage_counts || {};
+  const marketIntelligence = scannerStatus?.health?.market_intelligence || {};
+  const marketStats = marketIntelligence?.stats || {};
+  const strategyEdges = marketIntelligence?.strategy_edges || {};
+  const candidateReview = marketIntelligence?.candidate_review || {};
   const scannerFallback = Boolean(scannerStatus?.health?.fallback);
   const scannerWarning = scannerFallback
     ? scannerStatus?.health?.last_error || "Using the last successful scanner snapshot while the data feed cools down."
@@ -125,6 +129,8 @@ export default function ScannerPage() {
             <InfoCard label="Live setups" value={String(stageCounts.live_signal_symbols || 0)} tone={stageCounts.live_signal_symbols ? "positive" : "neutral"} />
             <InfoCard label="Eligible now" value={String(eligibleCount)} tone="positive" />
             <InfoCard label="Excluded now" value={String(excludedCount)} tone={excludedCount ? "warn" : "neutral"} />
+            <InfoCard label="Market regime" value={formatRegimeLabel(marketIntelligence.label)} tone={marketTone(marketIntelligence)} />
+            <InfoCard label="ATLAS review" value={candidateReview.average_score != null ? formatNumber(candidateReview.average_score || 0, 1) : "n/a"} />
           </div>
           {bestCandidate && (
             <div className="scanner-hero-summary-card">
@@ -169,6 +175,53 @@ export default function ScannerPage() {
               <p className="muted">{scannerWarning}</p>
             </div>
           )}
+        </div>
+      </section>
+
+      <section className="panel panel-span-2">
+        <div className="section-head">
+          <div>
+            <h2>ATLAS market intelligence</h2>
+            <p className="muted">Regime, strategy edge, and risk-officer review generated from the current scanner board and paper outcomes.</p>
+          </div>
+          <div className="chip-row">
+            <span className={`status-chip status-chip-${marketTone(marketIntelligence)}`}>{formatRegimeLabel(marketIntelligence.label)}</span>
+            <span className="change-pill neutral">{formatReasonLabel(marketIntelligence.risk_level || "unknown")} risk</span>
+          </div>
+        </div>
+        <div className="atlas-grid">
+          <div className="atlas-panel">
+            <div className="position-summary-grid">
+              <InfoCard label="Regime score" value={marketIntelligence.score != null ? formatNumber(marketIntelligence.score || 0, 1) : "n/a"} compact />
+              <InfoCard label="Bias" value={formatReasonLabel(marketIntelligence.directional_bias || "neutral")} compact />
+              <InfoCard label="Risk multiplier" value={marketIntelligence.risk_multiplier != null ? `${formatNumber(marketIntelligence.risk_multiplier || 0, 2)}x` : "n/a"} compact />
+              <InfoCard label="Reviewed" value={String(marketStats.eligible_count || 0)} compact />
+            </div>
+            <div className="atlas-evidence-list">
+              {(marketIntelligence.evidence || []).slice(0, 3).map((item) => (
+                <p className="muted scanner-note-copy" key={item}>{item}</p>
+              ))}
+            </div>
+          </div>
+          <div className="atlas-panel">
+            <div className="position-summary-grid">
+              <InfoCard label="Approved" value={String(candidateReview.approved_count || 0)} compact tone="positive" />
+              <InfoCard label="Caution" value={String(candidateReview.caution_count || 0)} compact tone={candidateReview.caution_count ? "warn" : "neutral"} />
+              <InfoCard label="Blocked" value={String(candidateReview.blocked_count || 0)} compact tone={candidateReview.blocked_count ? "negative" : "neutral"} />
+              <InfoCard label="Long breadth" value={marketStats.long_bias_share != null ? `${formatNumber((marketStats.long_bias_share || 0) * 100, 0)}%` : "n/a"} compact />
+            </div>
+            <div className="chip-row">
+              {Object.values(strategyEdges).length ? (
+                Object.values(strategyEdges).map((profile) => (
+                  <span className="change-pill neutral" key={profile.strategy_id}>
+                    {formatComponentLabel(profile.strategy_id)} {formatNumber(profile.weight || 0, 2)}x
+                  </span>
+                ))
+              ) : (
+                <span className="change-pill neutral">No closed paper trades yet</span>
+              )}
+            </div>
+          </div>
         </div>
       </section>
 
@@ -390,6 +443,8 @@ export default function ScannerPage() {
                   <InfoCard label="Session return" value={formatPercent(selectedCandidate.features?.intraday_return_pct)} />
                   <InfoCard label="Relative volume" value={formatNumber(selectedCandidate.features?.relative_volume || 0, 2)} />
                   <InfoCard label="Spread" value={selectedCandidate.features?.spread_bps != null ? `${formatNumber(selectedCandidate.features?.spread_bps || 0, 1)} bps` : "n/a"} />
+                  <InfoCard label="ATLAS review" value={selectedCandidate.features?.atlas_review_score != null ? formatNumber(selectedCandidate.features.atlas_review_score || 0, 1) : "n/a"} />
+                  <InfoCard label="ATLAS decision" value={formatReasonLabel(selectedCandidate.features?.atlas_decision || "watch")} />
                 </div>
 
                 <div className="section-head scanner-subsection-head">
@@ -464,6 +519,22 @@ export default function ScannerPage() {
                       </div>
                     ) : null}
                     {selectedCandidate.notes?.length ? <p className="muted scanner-note-copy">{selectedCandidate.notes.join(" · ")}</p> : null}
+                  </div>
+
+                  <div className="card-like scanner-note-card">
+                    <h3>ATLAS review</h3>
+                    <p className="muted">{selectedCandidate.features?.market_regime ? `${formatRegimeLabel(selectedCandidate.features.market_regime)} regime with review score ${formatNumber(selectedCandidate.features?.atlas_review_score || 0, 1)}.` : "No ATLAS review has been published for this symbol yet."}</p>
+                    {selectedCandidate.features?.atlas_risk_flags?.length ? (
+                      <div className="chip-row">
+                        {selectedCandidate.features.atlas_risk_flags.map((reason) => (
+                          <span className="status-chip status-chip-negative" key={reason}>{formatReasonLabel(reason)}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="chip-row">
+                        <span className="status-chip status-chip-positive">No ATLAS risk flags</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -639,6 +710,30 @@ function candidateStatusTone(candidate, activeWatchlist, watchlistEntry) {
   return "neutral";
 }
 
+function formatRegimeLabel(value) {
+  const labels = {
+    mixed: "Mixed",
+    risk_off: "Risk off",
+    risk_on: "Risk on",
+    transitional: "Transitional",
+    unknown: "Unknown",
+  };
+  return labels[value] || formatReasonLabel(value || "unknown");
+}
+
+function marketTone(marketIntelligence = {}) {
+  if (marketIntelligence.risk_level === "high" || marketIntelligence.label === "risk_off") {
+    return "negative";
+  }
+  if (marketIntelligence.label === "risk_on") {
+    return "positive";
+  }
+  if (marketIntelligence.label === "transitional") {
+    return "info";
+  }
+  return "neutral";
+}
+
 function sortedScoreComponents(scoreComponents = {}) {
   return Object.entries(scoreComponents).sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0));
 }
@@ -718,6 +813,8 @@ function formatComponentLabel(value) {
     expectancy: "Expectancy",
     freshness: "Freshness",
     gap: "Gap",
+    atlas_review: "ATLAS review",
+    cro_review: "CRO review",
     intraday_return_pct: "Session return",
     liquidity: "Liquidity",
     momentum: "Momentum",
@@ -746,8 +843,12 @@ function formatReasonLabel(reason) {
     above_max_price: "Above max price",
     asset_not_tradable: "Asset not tradable",
     awaiting_live_strategy_trigger: "Awaiting live trigger",
+    approve: "Approve",
+    atlas_cro_block: "ATLAS CRO block",
+    atlas_review_soft_cap: "ATLAS caution",
     below_min_average_volume: "Below minimum average volume",
     below_min_price: "Below minimum price",
+    caution: "Caution",
     correlated_with_open_positions: "Too correlated with open positions",
     disabled_override: "Disabled by operator",
     dropped_from_watchlist: "Dropped from watchlist",
@@ -756,14 +857,35 @@ function formatReasonLabel(reason) {
     missing_price: "Missing price",
     missing_session_bars: "Missing session bars",
     open_position: "Open position",
+    execution_risk: "Execution risk",
+    high: "High",
+    high_regime_risk: "High regime risk",
+    low_expectancy: "Low expectancy",
+    low_strategy_edge: "Low strategy edge",
+    mixed: "Mixed",
+    moderate: "Moderate",
+    neutral: "Neutral",
+    noisy_signal: "Noisy signal",
+    normal: "Normal",
+    overextended_move: "Overextended move",
     portfolio_at_capacity: "Portfolio at capacity",
     portfolio_fit_soft_cap: "Portfolio fit is soft-capped",
+    portfolio_fit_risk: "Portfolio fit risk",
+    poor_risk_reward: "Poor risk/reward",
     pinned_symbol: "Pinned symbol",
+    regime_mismatch: "Regime mismatch",
+    risk_off: "Risk off",
+    risk_on: "Risk on",
     symbol_already_held: "Already held",
     spread_too_wide: "Spread too wide",
     top_ranked: "Top ranked",
+    transitional: "Transitional",
+    unknown: "Unknown",
     retained_buffer: "Retained in hold buffer",
+    watch: "Watch",
     weak_higher_timeframe_context: "Weak higher timeframe context",
+    weak_context: "Weak context",
+    wide_spread: "Wide spread",
   };
   if (labels[reason]) {
     return labels[reason];

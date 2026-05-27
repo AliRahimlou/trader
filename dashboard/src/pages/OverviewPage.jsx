@@ -1,10 +1,22 @@
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { botStateLabel, formatCurrency, formatPercent, formatSignedCurrency, pnlTone } from "../formatters";
+import { formatCurrency, formatPercent, formatSignedCurrency, pnlTone } from "../formatters";
 import { useDashboard } from "../state/DashboardContext";
 
 export default function OverviewPage() {
-  const { overview, events, scannerStatus, watchlist } = useDashboard();
+  const {
+    overview,
+    events,
+    scannerStatus,
+    scannerRanked,
+    watchlist,
+    config,
+    operatorMode,
+    sendCommand,
+    commandPending,
+    refreshAll,
+    diagnostics,
+  } = useDashboard();
   const account = overview?.account || {};
   const positions = overview?.positions || [];
   const strategyStatus = overview?.strategy_status || {};
@@ -19,26 +31,56 @@ export default function OverviewPage() {
   const totalPnlPercent = lastEquity ? (totalPnl / lastEquity) * 100.0 : 0.0;
   const recentActivity = events.slice(-6).reverse();
   const activePositionCount = positions.length;
+  const dryRunActive = Boolean(overview?.runner_status?.dry_run ?? config?.dry_run);
+  const marketSnapshot = diagnostics?.market_snapshot || {};
+  const marketStream = overview?.runner_status?.market_stream || overview?.health?.market_stream || {};
+  const dataFeed = (overview?.health?.market_data_feed || overview?.runner_status?.market_data_feed || config?.alpaca_feed || marketSnapshot.feed || "iex").toUpperCase();
+  const latestQuoteTime = latestTimestamp(marketSnapshot.latest_quote_times);
+  const liveDataAge = marketSnapshot.max_live_data_age_seconds;
+  const launchSymbols = useMemo(
+    () => Array.from(new Set([
+      ...(scannerRanked || []).slice(0, 8).map((candidate) => candidate.symbol),
+      ...activeWatchlist,
+      overview?.runner_status?.symbol,
+      "SPY",
+      "QQQ",
+    ].filter(Boolean))).slice(0, 12),
+    [activeWatchlist, overview?.runner_status?.symbol, scannerRanked],
+  );
 
   return (
     <div className="app-grid">
-      <section className="hero-card hero-portfolio panel-span-2">
+      <section className="hero-card bot-launch-hero panel-span-2">
         <div>
-          <p className="eyebrow">Portfolio</p>
-          <h1>{formatCurrency(portfolioValue)}</h1>
-          <p className={`hero-copy tone-${pnlTone(totalPnl)}`}>{formatSignedCurrency(totalPnl)} today · {formatPercent(totalPnlPercent)}</p>
+          <p className="eyebrow">Bot launchpad</p>
+          <h1>{botState(strategyStatus, overview)}</h1>
+          <p className="hero-copy">{statusReason(overview)}</p>
+          <div className={`dry-run-callout ${dryRunActive ? "is-on" : "is-off"}`}>
+            <strong>Dry run is {dryRunActive ? "ON" : "OFF"}</strong>
+            <span>
+              {dryRunActive
+                ? "The bot can scan, rank, and log decisions, but it will not submit paper orders."
+                : "The bot may submit Alpaca paper orders after a valid setup passes every risk check."}
+            </span>
+          </div>
           <div className="quick-action-row">
-            <Link to="/trade" className="primary-link-button">Invest money</Link>
+            <Link to="/scanner" className="ghost-link-button">Review picks</Link>
             <Link to="/positions" className="ghost-link-button">View positions</Link>
-            <Link to="/bot" className="ghost-link-button">Bot status</Link>
+            <Link to="/bot" className="ghost-link-button">Advanced controls</Link>
           </div>
         </div>
-        <div className="hero-side-grid">
-          <InfoTile label="Cash" value={formatCurrency(account.cash)} />
-          <InfoTile label="Buying power" value={formatCurrency(account.buying_power)} />
-          <InfoTile label="Watchlist" value={String(activeWatchlist.length)} />
-          <InfoTile label="Bot state" value={botStateLabel({ status_label: botState(strategyStatus, overview) })} />
-        </div>
+        <BotLaunchPanel
+          activeWatchlist={activeWatchlist}
+          commandPending={commandPending}
+          config={config}
+          launchSymbols={launchSymbols}
+          operatorMode={operatorMode}
+          overview={overview}
+          refreshAll={refreshAll}
+          scannerStatus={scannerStatus}
+          sendCommand={sendCommand}
+          watchlist={watchlist}
+        />
       </section>
 
       <section className="panel">
@@ -55,6 +97,10 @@ export default function OverviewPage() {
           <InfoTile label="Today PnL" value={formatCurrency(strategyStatus.daily_realized_pnl)} tone={pnlTone(strategyStatus.daily_realized_pnl)} />
           <InfoTile label="Total PnL" value={formatSignedCurrency(totalPnl)} tone={pnlTone(totalPnl)} />
           <InfoTile label="Trades today" value={String(strategyStatus.daily_trade_count || 0)} />
+          <InfoTile label="Bot max per trade" value={formatCurrency(config?.max_position_notional)} />
+          <InfoTile label="Order mode" value={dryRunActive ? "Dry run ON" : "Paper orders ON"} tone={dryRunActive ? "warn" : "positive"} />
+          <InfoTile label="Data feed" value={dataFeed} tone={dataFeed === "SIP" ? "positive" : "paper"} />
+          <InfoTile label="Live data age" value={liveDataAge == null ? "n/a" : `${Number(liveDataAge).toFixed(1)}s`} tone={overview?.health?.data_fresh ? "positive" : "warn"} />
         </div>
       </section>
 
@@ -71,6 +117,9 @@ export default function OverviewPage() {
         </div>
         <dl className="plain-detail-list">
           <Detail label="Open positions" value={String(activePositionCount)} />
+          <Detail label="Dry run" value={dryRunActive ? "ON - scans only, no paper orders" : "OFF - paper orders can submit"} />
+          <Detail label="Market stream" value={marketStream.connected ? `Connected (${dataFeed})` : `REST fallback (${dataFeed})`} />
+          <Detail label="Last quote" value={latestQuoteTime || "n/a"} />
           <Detail label="Active watchlist" value={activeWatchlist.length ? activeWatchlist.join(", ") : "none"} />
           <Detail label="Universe scanned" value={universeCount ? `${scannedCount} of ${universeCount}` : "n/a"} />
           <Detail label="Last completed bar" value={overview?.runner_status?.latest_completed_bar_time || "n/a"} />
@@ -168,6 +217,155 @@ export default function OverviewPage() {
   );
 }
 
+function BotLaunchPanel({
+  activeWatchlist,
+  commandPending,
+  config,
+  launchSymbols,
+  operatorMode,
+  overview,
+  refreshAll,
+  scannerStatus,
+  sendCommand,
+  watchlist,
+}) {
+  const [mode, setMode] = useState(() => window.localStorage.getItem("paper-bot-launch-mode") || "auto");
+  const [symbol, setSymbol] = useState(launchSymbols[0] || "SPY");
+  const [amount, setAmount] = useState(String(Number(config?.max_position_notional || 500)));
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const runnerStatus = overview?.runner_status || {};
+  const dryRunActive = Boolean(runnerStatus.dry_run ?? config?.dry_run);
+  const amountNumber = Number(amount) || 0;
+  const pinnedSymbols = scannerStatus?.pinned_symbols || watchlist?.pinned_symbols || [];
+
+  useEffect(() => {
+    if (!launchSymbols.includes(symbol) && launchSymbols[0]) {
+      setSymbol(launchSymbols[0]);
+    }
+  }, [launchSymbols, symbol]);
+
+  useEffect(() => {
+    if (config?.max_position_notional != null) {
+      setAmount(String(Number(config.max_position_notional)));
+    }
+  }, [config?.max_position_notional]);
+
+  useEffect(() => {
+    window.localStorage.setItem("paper-bot-launch-mode", mode);
+  }, [mode]);
+
+  const launchBot = async () => {
+    setStatus("");
+    setError("");
+    if (amountNumber <= 0) {
+      setError("Enter a dollar amount above zero.");
+      return;
+    }
+    try {
+      const riskBudget = Math.max(10, Math.min(amountNumber, Math.round(amountNumber * 0.05)));
+      await sendCommand(
+        "apply_config",
+        {
+          max_position_notional: amountNumber,
+          max_capital_per_symbol: amountNumber,
+          max_concurrent_positions: mode === "focus" ? 1 : Number(config?.max_concurrent_positions || 3),
+          watchlist_size: mode === "focus" ? 1 : Math.max(Number(config?.watchlist_size || 10), 5),
+          risk_per_trade: riskBudget,
+        },
+        { confirm: true },
+      );
+
+      if (mode === "focus") {
+        await sendCommand("pin_symbol", { symbol, pinned: true });
+        await sendCommand("set_symbol_enabled", { symbol, enabled: true });
+      } else {
+        for (const pinnedSymbol of pinnedSymbols) {
+          await sendCommand("pin_symbol", { symbol: pinnedSymbol, pinned: false });
+        }
+      }
+
+      await sendCommand("refresh_scanner");
+      if (!runnerStatus.running) {
+        await sendCommand("start_runner", {}, { confirm: true });
+      } else if (runnerStatus.paused_new_entries) {
+        await sendCommand("resume_entries");
+      }
+      await refreshAll();
+      setStatus(mode === "focus" ? `${symbol} is armed. The bot will enter only when a strategy signal passes risk checks.` : "The bot is scanning the ranked market board.");
+    } catch (requestError) {
+      setError(requestError.message || String(requestError));
+    }
+  };
+
+  return (
+    <div className="bot-launch-card">
+      <div className="segmented-control">
+        <button type="button" className={mode === "auto" ? "segmented-active" : ""} onClick={() => setMode("auto")}>
+          Bot picks
+        </button>
+        <button type="button" className={mode === "focus" ? "segmented-active" : ""} onClick={() => setMode("focus")}>
+          Pick stock
+        </button>
+      </div>
+
+      {mode === "focus" ? (
+        <label>
+          <span>Stock</span>
+          <input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} placeholder="SPY" />
+        </label>
+      ) : (
+        <div className="bot-launch-picks">
+          <span>Current watchlist</span>
+          <strong>{activeWatchlist.length ? activeWatchlist.slice(0, 6).join(", ") : "Scanner will choose"}</strong>
+        </div>
+      )}
+
+      <label>
+        <span>Max dollars per bot trade</span>
+        <input value={amount} inputMode="decimal" onChange={(event) => setAmount(event.target.value)} placeholder="500" />
+      </label>
+
+      <div className="chip-row">
+        {[100, 500, 1000, 2500].map((value) => (
+          <button key={value} type="button" className="chip" onClick={() => setAmount(String(value))}>
+            {formatCurrency(value, { maximumFractionDigits: 0 })}
+          </button>
+        ))}
+      </div>
+
+      {mode === "focus" && (
+        <div className="chip-row">
+          {launchSymbols.map((candidateSymbol) => (
+            <button key={candidateSymbol} type="button" className={`chip ${candidateSymbol === symbol ? "chip-active" : ""}`} onClick={() => setSymbol(candidateSymbol)}>
+              {candidateSymbol}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className={`dry-run-callout compact ${dryRunActive ? "is-on" : "is-off"}`}>
+        <strong>Dry run is {dryRunActive ? "ON" : "OFF"}</strong>
+        <span>
+          {dryRunActive
+            ? "Start/update will scan and monitor only. No paper orders will be sent."
+            : "Start/update can send Alpaca paper orders after signal and risk checks pass."}
+        </span>
+      </div>
+
+      {status && <div className="inline-banner success">{status}</div>}
+      {error && <div className="inline-banner error">{error}</div>}
+
+      <button type="button" className="primary-button bot-launch-button" disabled={!operatorMode || commandPending || amountNumber <= 0} onClick={launchBot}>
+        {runnerStatus.running ? "Update bot setup" : "Start bot"}
+      </button>
+      <p className="muted bot-launch-note">
+        Paper trading only. Dry run controls whether paper orders are actually submitted.
+      </p>
+    </div>
+  );
+}
+
 function botState(strategyStatus, overview) {
   if (overview?.runner_status?.startup_state === "starting") {
     return "Starting up";
@@ -215,3 +413,12 @@ function Detail({ label, value }) {
   );
 }
 
+function latestTimestamp(valuesBySymbol) {
+  if (!valuesBySymbol || typeof valuesBySymbol !== "object") {
+    return null;
+  }
+  return Object.values(valuesBySymbol)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || null;
+}

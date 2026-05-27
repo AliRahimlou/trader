@@ -83,6 +83,7 @@ export default function TradePage() {
   const account = tradeContext?.account || {};
   const position = tradeContext?.position || null;
   const quote = tradeContext?.quote || {};
+  const marketData = tradeContext?.market_data || {};
   const canSubmit = tradeContext?.manual_trading_enabled;
   const amountNumber = Number(amount) || 0;
   const quickAmounts = useMemo(() => {
@@ -223,8 +224,10 @@ export default function TradePage() {
           <TicketMetric label="Estimated shares" value={formatNumber(amountNumber / Math.max(Number(quote.last_price || 0), 0.0001), 6)} />
           <TicketMetric label="Buying power" value={formatCurrency(account.buying_power)} />
           <TicketMetric label="Current position" value={position ? formatNumber(position.qty, 6) : "No position"} />
+          <TicketMetric label="Data age" value={marketData.max_age_seconds == null ? "n/a" : `${Number(marketData.max_age_seconds).toFixed(1)}s`} />
         </div>
 
+        {marketData.fresh === false && <div className="inline-banner error">Latest Alpaca quote/trade data is stale or missing. Orders are blocked until it refreshes.</div>}
         {tradeContext?.manual_trading_reason && <div className="inline-banner warn">{tradeContext.manual_trading_reason}</div>}
         {tradeContext?.manual_trade_warning && <div className="inline-banner warn">{tradeContext.manual_trade_warning}</div>}
         {message && <div className="inline-banner success">{message}</div>}

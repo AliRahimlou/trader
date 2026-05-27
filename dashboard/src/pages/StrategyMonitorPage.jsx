@@ -7,6 +7,7 @@ export default function StrategyMonitorPage() {
   const { overview, strategyStatus, scannerStatus, watchlist, operatorMode, sendCommand, commandPending, diagnostics } = useDashboard();
   const signals = strategyStatus?.latest_signals || [];
   const runnerStatus = overview?.runner_status || {};
+  const protectionStatus = strategyStatus?.protection_status || {};
   const watchlistEntries = watchlist?.entries || [];
   const activeWatchlist = watchlist?.active_symbols || [];
   const disabledSymbols = scannerStatus?.disabled_symbols || scannerStatus?.health?.disabled_symbols || [];
@@ -32,6 +33,7 @@ export default function StrategyMonitorPage() {
           <InfoTile label="Last heartbeat" value={runnerStatus.last_heartbeat || "n/a"} />
           <InfoTile label="Data freshness" value={runnerStatus.data_fresh ? "Fresh" : "Delayed"} tone={runnerStatus.data_fresh ? "positive" : "warn"} />
           <InfoTile label="Watchlist" value={String(activeWatchlist.length)} />
+          <InfoTile label="Protections" value={protectionStatus.active ? "Active" : "Clear"} tone={protectionStatus.active ? "warn" : "positive"} />
           <InfoTile label="Next scan" value={scannerStatus?.next_scan_at || "n/a"} />
         </div>
       </section>
@@ -92,6 +94,8 @@ export default function StrategyMonitorPage() {
         <dl className="plain-detail-list">
           <Detail label="Cooldown active" value={strategyStatus?.cooldown_active ? "Yes" : "No"} />
           <Detail label="Cooldown until" value={strategyStatus?.cooldown_until || "n/a"} />
+          <Detail label="Protection guard" value={protectionStatus.active ? "Blocking new entries" : "Clear"} />
+          <Detail label="Protection reasons" value={(protectionStatus.reasons || []).join(", ") || "none"} />
           <Detail label="Trades today" value={strategyStatus?.daily_trade_count ?? 0} />
           <Detail label="Daily realized PnL" value={strategyStatus?.daily_realized_pnl ?? 0} />
           <Detail label="Daily loss limit" value={strategyStatus?.max_daily_loss ?? "n/a"} />

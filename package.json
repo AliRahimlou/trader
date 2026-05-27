@@ -7,7 +7,11 @@
     "start:demo": "./scripts/run_demo_stack.sh",
     "backend": "./scripts/run_backend.sh",
     "backend:demo": "./scripts/run_backend.sh --demo",
+    "backend:new": "uvicorn backend.app.main:app --host 127.0.0.1 --port 8100",
     "frontend": "./scripts/run_frontend.sh",
+    "frontend:new": "npm --prefix ./frontend run dev",
+    "build:new": "npm --prefix ./frontend run build",
+    "test:backend": "pytest backend/app/tests",
     "build": "npm --prefix ./dashboard run build",
     "verify": "npm --prefix ./dashboard run verify"
   }

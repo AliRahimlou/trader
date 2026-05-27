@@ -93,6 +93,12 @@ class PaperTradingConfig:
     max_capital_per_symbol: float
     max_daily_loss: float
     max_trades_per_day: int
+    protection_loss_lookback_trades: int
+    protection_loss_limit: int
+    protection_loss_lock_minutes: int
+    protection_max_intraday_drawdown: float
+    protection_symbol_loss_limit: int
+    protection_symbol_lock_minutes: int
     correlation_threshold: float
     one_position_per_symbol: bool
     cooldown_minutes: int
@@ -112,6 +118,9 @@ class PaperTradingConfig:
     smoke_test_notional: float
     keep_state_days: int
     alpaca_feed: str | None
+    market_stream_enabled: bool
+    market_stream_min_cycle_seconds: float
+    live_quote_max_age_seconds: int
     demo_mode: bool
     scanner_weight_liquidity: float
     scanner_weight_volatility: float
@@ -305,6 +314,36 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=int(_env("LIVE_PAPER_MAX_TRADES_PER_DAY", "2")),
     )
     parser.add_argument(
+        "--protection-loss-lookback-trades",
+        type=int,
+        default=int(_env("LIVE_PAPER_PROTECTION_LOSS_LOOKBACK_TRADES", "6")),
+    )
+    parser.add_argument(
+        "--protection-loss-limit",
+        type=int,
+        default=int(_env("LIVE_PAPER_PROTECTION_LOSS_LIMIT", "3")),
+    )
+    parser.add_argument(
+        "--protection-loss-lock-minutes",
+        type=int,
+        default=int(_env("LIVE_PAPER_PROTECTION_LOSS_LOCK_MINUTES", "30")),
+    )
+    parser.add_argument(
+        "--protection-max-intraday-drawdown",
+        type=float,
+        default=float(_env("LIVE_PAPER_PROTECTION_MAX_INTRADAY_DRAWDOWN", "150")),
+    )
+    parser.add_argument(
+        "--protection-symbol-loss-limit",
+        type=int,
+        default=int(_env("LIVE_PAPER_PROTECTION_SYMBOL_LOSS_LIMIT", "2")),
+    )
+    parser.add_argument(
+        "--protection-symbol-lock-minutes",
+        type=int,
+        default=int(_env("LIVE_PAPER_PROTECTION_SYMBOL_LOCK_MINUTES", "60")),
+    )
+    parser.add_argument(
         "--disable-one-position-per-symbol",
         action="store_true",
         default=not _env_bool("LIVE_PAPER_ONE_POSITION_PER_SYMBOL", True),
@@ -359,8 +398,23 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--alpaca-feed",
-        choices=("iex", "sip", "boats", "overnight"),
+        choices=("iex", "sip", "delayed_sip", "boats", "overnight"),
         default=_env("LIVE_PAPER_ALPACA_FEED", ""),
+    )
+    parser.add_argument(
+        "--market-stream-enabled",
+        type=_bool_arg,
+        default=_env_bool("LIVE_PAPER_MARKET_STREAM_ENABLED", True),
+    )
+    parser.add_argument(
+        "--market-stream-min-cycle-seconds",
+        type=float,
+        default=float(_env("LIVE_PAPER_MARKET_STREAM_MIN_CYCLE_SECONDS", "2")),
+    )
+    parser.add_argument(
+        "--live-quote-max-age-seconds",
+        type=int,
+        default=int(_env("LIVE_PAPER_LIVE_QUOTE_MAX_AGE_SECONDS", "30")),
     )
     parser.add_argument(
         "--scanner-weight-liquidity",
@@ -448,6 +502,12 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
         max_capital_per_symbol=args.max_capital_per_symbol,
         max_daily_loss=args.max_daily_loss,
         max_trades_per_day=args.max_trades_per_day,
+        protection_loss_lookback_trades=args.protection_loss_lookback_trades,
+        protection_loss_limit=args.protection_loss_limit,
+        protection_loss_lock_minutes=args.protection_loss_lock_minutes,
+        protection_max_intraday_drawdown=args.protection_max_intraday_drawdown,
+        protection_symbol_loss_limit=args.protection_symbol_loss_limit,
+        protection_symbol_lock_minutes=args.protection_symbol_lock_minutes,
         correlation_threshold=args.correlation_threshold,
         one_position_per_symbol=not args.disable_one_position_per_symbol,
         cooldown_minutes=args.cooldown_minutes,
@@ -475,6 +535,9 @@ def config_from_args(args: argparse.Namespace) -> PaperTradingConfig:
         smoke_test_notional=args.smoke_test_notional,
         keep_state_days=args.keep_state_days,
         alpaca_feed=args.alpaca_feed or None,
+        market_stream_enabled=bool(args.market_stream_enabled),
+        market_stream_min_cycle_seconds=args.market_stream_min_cycle_seconds,
+        live_quote_max_age_seconds=args.live_quote_max_age_seconds,
         demo_mode=args.demo_mode,
         scanner_weight_liquidity=args.scanner_weight_liquidity,
         scanner_weight_volatility=args.scanner_weight_volatility,
