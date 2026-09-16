@@ -10,6 +10,8 @@ See [execution behavior and remaining limits](docs/live-execution.md).
 
 Open [Pivot on AllSpark](https://media.mytap.net/pivot/) using the existing login. AllSpark runs independently of the laptop. The [hosting guide](docs/allspark-hosting.md) explains remote updates: commit to GitHub `main`, let the release build pass, and turn Live money Off with no open positions/orders so the updater can install it. Update status appears in the app footer. Credentials and runtime databases stay on the server.
 
+See the [deployment verification](docs/allspark-deployment-audit.md) for the installed runtime, migration and test evidence.
+
 ## Primary flow
 
 Premark Nasdaq areas (previous-day extremes and repeated four-hour levels) → observe a break/retest or sweep → confirm the technology leaders at supply/demand → confirm the actual VIX at its own area → evaluate the documented trade plan and current broker checks.
