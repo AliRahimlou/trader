@@ -1,0 +1,36 @@
+name: pivot-video
+services:
+  app:
+    image: "${PIVOT_IMAGE:?Set PIVOT_IMAGE to a tested release image}"
+    container_name: pivot-video
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    stop_grace_period: 20s
+    ports:
+      - "127.0.0.1:18011:8011"
+    environment:
+      PUBLIC_ORIGIN: https://media.mytap.net
+      URL_PREFIX: /pivot
+      RUNTIME_NAME: AllSpark
+      PIVOT_REVISION: "${PIVOT_REVISION:?Set PIVOT_REVISION to the full commit SHA}"
+    volumes:
+      - "${PIVOT_ROOT:-/home/allspark/pivot-trader}/config/video.env:/app/.env:ro"
+      - "${PIVOT_ROOT:-/home/allspark/pivot-trader}/data:/app/runtime"
+    networks:
+      private:
+        aliases: [pivot-web]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+networks:
+  private:
+    external: true
+    name: pivot-trader-private

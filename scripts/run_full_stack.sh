@@ -1,18 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
-
-. .venv/bin/activate
-.venv/bin/python backend_server.py --reload &
-BACKEND_PID=$!
-
-cleanup() {
-  kill "$BACKEND_PID" >/dev/null 2>&1 || true
-}
-
-trap cleanup EXIT INT TERM
-
-cd "$ROOT_DIR/dashboard"
-npm run dev -- --host 127.0.0.1
+cd "$(dirname "$0")/.."
+./scripts/run_backend.sh &
+backend_pid=$!
+trap 'kill "$backend_pid" 2>/dev/null || true' EXIT INT TERM
+./scripts/run_frontend.sh

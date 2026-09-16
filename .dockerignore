@@ -1,4 +1,13 @@
 .git
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+*.pem
+*.key
+deploy/private
 .venv
 node_modules
 dashboard/node_modules

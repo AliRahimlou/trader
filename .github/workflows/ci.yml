@@ -1,0 +1,20 @@
+name: Test hosted Pivot release
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: pivot-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tested-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test Python, test browser models, build UI, and assemble runtime
+        run: docker build --pull --progress=plain --build-arg PIVOT_REVISION="$GITHUB_SHA" -f deploy/Dockerfile.runtime -t pivot-ci:"$GITHUB_SHA" .

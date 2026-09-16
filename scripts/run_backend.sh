@@ -1,8 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
-
-. .venv/bin/activate
-exec .venv/bin/python backend_server.py --reload "$@"
+cd "$(dirname "$0")/.."
+exec .venv/bin/python backend_server.py --host 127.0.0.1 --port 8011 "$@"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new Pivot release every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=15s
+Unit=pivot-update.service
+
+[Install]
+WantedBy=timers.target

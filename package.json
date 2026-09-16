@@ -1,18 +1,1 @@
-{
-  "name": "trader-root",
-  "private": true,
-  "version": "0.1.0",
-  "scripts": {
-    "start": "./scripts/run_full_stack.sh",
-    "start:demo": "./scripts/run_demo_stack.sh",
-    "backend": "./scripts/run_backend.sh",
-    "backend:demo": "./scripts/run_backend.sh --demo",
-    "backend:new": "uvicorn backend.app.main:app --host 127.0.0.1 --port 8100",
-    "frontend": "./scripts/run_frontend.sh",
-    "frontend:new": "npm --prefix ./frontend run dev",
-    "build:new": "npm --prefix ./frontend run build",
-    "test:backend": "pytest backend/app/tests",
-    "build": "npm --prefix ./dashboard run build",
-    "verify": "npm --prefix ./dashboard run verify"
-  }
-}
+{"name":"pivot-video-app","private":true,"version":"2.0.0","scripts":{"start":"./scripts/run_full_stack.sh","backend":"./scripts/run_backend.sh","frontend":"./scripts/run_frontend.sh","build":"npm --prefix dashboard run build","test":".venv/bin/python -m pytest pivot/tests deploy/tests -q && node --test pivot/web/model.test.mjs"}}
