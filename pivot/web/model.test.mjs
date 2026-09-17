@@ -82,6 +82,21 @@ test('queued candidate never replaces the installed version label',()=>{
   assert.match(status.detail,/abcdef0 queued · not installed/);
   assert.doesNotMatch(status.detail,/latest/i);
 });
+test('routine update states preserve installed identity without asking for Live Off',()=>{
+  for(const state of ['waiting_off','bootstrap_required','waiting_entry','blocked_exposure','built','building','deploying','recovery_required']) {
+    const status=releaseStatus({...releaseSnapshot,deployment:{...releaseSnapshot.deployment,state,candidate_revision:candidateRevision}},now);
+    assert.equal(status.label,'Installed v2.1.0 · 452bce2');
+    assert.equal(status.current,false);
+    assert.doesNotMatch(status.detail,/turn Live money off/i);
+    if(state==='recovery_required') {
+      assert.equal(status.queued,false);
+      assert.match(status.detail,/New entries remain paused/);
+    } else assert.equal(status.tone,'pending');
+  }
+  const recovery=releaseStatus({...releaseSnapshot,deployment:{...releaseSnapshot.deployment,state:'recovery_required'}},now);
+  assert.equal(recovery.current,false);
+  assert.match(recovery.detail,/recovery needs attention/);
+});
 test('stale future or malformed update check cannot claim latest',()=>{
   for(const checked_at of [new Date(now-600001).toISOString(),new Date(now+1).toISOString(),'bad','2026-09-17T12:00:00',null]) {
     const status=releaseStatus({...releaseSnapshot,deployment:{...releaseSnapshot.deployment,checked_at}},now);

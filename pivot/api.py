@@ -13,6 +13,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .version import APP_VERSION
+from .deployment import EntryGate, PROTOCOL, deployment_readiness
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,10 @@ UPDATE_MESSAGES = {
     'checking': 'Checking GitHub for an update.',
     'building': 'Preparing an update.',
     'built': 'Update prepared; installation is pending.',
-    'waiting_off': 'Update waiting: turn Live money Off to install.',
+    'waiting_off': 'Update queued: the installed updater needs a one-time upgrade.',
+    'bootstrap_required': 'Update queued: the installed updater needs a one-time upgrade.',
+    'waiting_entry': 'Update queued: waiting for the current entry check to finish.',
+    'recovery_required': 'Update recovery needs attention. New entries remain paused.',
     'blocked_exposure': 'Update waiting: the account must be current with no open positions or orders.',
     'deploying': 'Installing an update.',
     'current': 'Running the latest checked version.',
@@ -120,7 +124,7 @@ def deployment_status(path, now=None):
             if isinstance(revision, str) and re.fullmatch(r'[a-f0-9]{40}', revision):
                 result[key] = revision
         # A tested image build can take twenty minutes; the updater's service
-        # timeout is twenty-five. Ordinary checks happen every five minutes.
+        # timeout is twenty-five. The new timer retries thirty seconds after a run.
         if age > (1800 if payload['state'] in ('building', 'deploying') else 600):
             result.update(state='overdue', message='Update checks are overdue; the running version may be behind GitHub.')
         return result
@@ -132,8 +136,13 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     hosting = hosting or Hosting()
     if service.executor is not None:
         service.executor.revision = hosting.revision
+        if deployment_lock is not None:
+            service.executor.entry_gate = EntryGate(deployment_lock)
     def decorate_snapshot(payload):
         result = {**payload, 'hosting': hosting.describe(), 'revision': hosting.revision, 'app_version': APP_VERSION}
+        entry_gate = getattr(service.executor, 'entry_gate', None) if service.executor is not None else None
+        if entry_gate is not None:
+            result['deployment_gate'] = entry_gate.status()
         if hosting.public_origin:
             result['deployment'] = deployment_status(deployment_status_path)
         return result
@@ -176,8 +185,15 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
 
     @app.get('/api/health')
     def health():
-        return {'ok': True, 'version': 'video-execution-v3', 'live_enabled': service.executor.enabled() if service.executor else False,
-                'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION}
+        result = {'ok': True, 'version': 'video-execution-v3', 'live_enabled': service.executor.enabled() if service.executor else False,
+                  'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION}
+        if service.executor is not None and service.executor.entry_gate is not None:
+            result['deployment_protocol'] = PROTOCOL
+        return result
+
+    @app.get('/api/deployment-readiness')
+    def readiness():
+        return deployment_readiness(service.executor, service.store, hosting.revision)
 
     @app.get('/api/snapshot')
     def snapshot():

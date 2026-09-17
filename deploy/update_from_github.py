@@ -3,7 +3,9 @@
 
 This process never submits orders or changes live-money permission. Installation
 of the first container and migration of its private runtime are deliberate setup
-steps. Later releases wait until Live money is Off and the fresh account is flat.
+steps. Gate-capable releases preserve saved permission while pausing only new
+entries during a verified flat-account switch. Legacy Live-On workers cannot
+bootstrap this protocol through a GitHub push alone.
 """
 from __future__ import annotations
 
@@ -23,12 +25,15 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from uuid import uuid4
 
 REPOSITORY = 'https://github.com/AliRahimlou/trader.git'
 SHA = re.compile(r'[a-f0-9]{40}\Z')
 IMAGE = re.compile(r'pivot-video:([a-f0-9]{40})\Z')
 CONTAINER = 'pivot-video'
 STATUS_KEYS = {'state', 'reason', 'active_revision', 'candidate_revision', 'checked_at', 'deployed_at'}
+TOKEN = re.compile(r'[a-f0-9]{64}\Z')
+HOLD_ID = re.compile(r'[a-f0-9]{32}\Z')
 
 
 class UpdateError(RuntimeError):
@@ -59,9 +64,18 @@ def atomic_write(path, data):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def write_status(root, **values):
@@ -71,6 +85,15 @@ def write_status(root, **values):
     atomic_write(root / 'data' / 'pivot-v2' / 'deployment-status.json',
                  (json.dumps(status, indent=2, sort_keys=True) + '\n').encode())
     print(f"Pivot update: {status.get('state', 'unknown')} — {status.get('reason', '')}", flush=True)
+
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('Repeated record field')
+        value[key] = item
+    return value
 
 
 def read_record(path):
@@ -83,7 +106,7 @@ def read_record(path):
             raw = stream.read(4097)
         if len(raw) > 4096:
             return {}
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=unique_object)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -121,7 +144,8 @@ def locked(path, *, blocking=False):
 
 
 def read_local(path):
-    connection = http.client.HTTPConnection('127.0.0.1', 18011, timeout=5)
+    connection = http.client.HTTPConnection('127.0.0.1', 18011,
+                                            timeout=60 if path == '/api/deployment-readiness' else 5)
     try:
         connection.request('GET', path, headers={'Accept': 'application/json'})
         response = connection.getresponse()
@@ -139,7 +163,7 @@ def read_local(path):
 
 
 def ready_to_replace(health, snapshot, now):
-    """Fail closed on missing fields, stale account state or any trading activity."""
+    """Legacy-Off bootstrap only; this check never permits a legacy Live-On swap."""
     if health.get('ok') is not True or health.get('legacy_loaded') is not False:
         return False, 'The current app has not passed its health check'
     if health.get('live_enabled') is not False or snapshot.get('live_enabled') is not False:
@@ -162,6 +186,83 @@ def ready_to_replace(health, snapshot, now):
     if not isinstance(execution, dict) or 'trade' not in execution or execution['trade'] is not None:
         return False, 'Waiting for the current trade lifecycle to finish'
     return True, 'Live money is Off and the fresh account has no positions or orders'
+
+
+def hold_path(root):
+    return root / 'data' / 'pivot-v2' / 'entry-hold.json'
+
+
+def aware(value):
+    at = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError('Timezone required')
+    return at.astimezone(timezone.utc)
+
+
+def valid_hold(value):
+    try:
+        required = {'version', 'id', 'previous_revision', 'candidate_revision', 'created_at', 'legacy_bootstrap'}
+        optional = {'permission_token', 'saved_live_enabled'}
+        return (isinstance(value, dict) and required <= value.keys() and not value.keys() - required - optional
+                and value.get('version') == 'entry-hold-v1'
+                and isinstance(value.get('id'), str) and bool(HOLD_ID.fullmatch(value['id']))
+                and all(isinstance(value.get(k), str) and SHA.fullmatch(value[k])
+                        for k in ('previous_revision', 'candidate_revision'))
+                and isinstance(value['created_at'], str)
+                and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)', value['created_at']) is not None
+                and aware(value['created_at']) <= utcnow()
+                and (value.get('permission_token') is None or
+                     isinstance(value['permission_token'], str) and bool(TOKEN.fullmatch(value['permission_token'])))
+                and ('saved_live_enabled' not in value or type(value['saved_live_enabled']) is bool)
+                and type(value.get('legacy_bootstrap')) is bool)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
+def save_hold(root, hold):
+    atomic_write(hold_path(root), (json.dumps(hold, sort_keys=True) + '\n').encode())
+
+
+def clear_hold(root, hold):
+    # Never remove a malformed, replaced, or somebody else's recovery barrier.
+    if read_record(hold_path(root)) != hold or not valid_hold(hold):
+        raise UpdateError('Entry hold changed unexpectedly; recovery verification is required')
+    hold_path(root).unlink()
+    sync_directory(hold_path(root).parent)
+
+
+def readiness_allowed(value, revision, hold, locked_at, now, *, permission_token=None, require_off=False):
+    """Fresh, post-lock broker evidence plus acknowledgement of our durable hold."""
+    if (value.get('ok') is not True or value.get('revision') != revision
+            or value.get('deployment_protocol') != 'entry-gate-v1'):
+        return False, 'The runtime has not verified this revision and entry-gate protocol'
+    gate = value.get('gate')
+    if (not isinstance(gate, dict) or gate.get('configured') is not True or gate.get('locked') is not True
+            or gate.get('error') or gate.get('hold_present') is not True
+            or gate.get('hold_valid') is not True or gate.get('hold_id') != hold['id']):
+        return False, 'The runtime has not acknowledged the exclusive entry gate and hold'
+    try:
+        started, checked = aware(value['read_started_at']), aware(value['checked_at'])
+        if not locked_at <= started <= checked <= now or (now - started).total_seconds() > 60:
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False, 'Waiting for fresh broker reads started after the entry gate was acquired'
+    if value.get('account_ready') is not True or value.get('account_identity_matches') is not True:
+        return False, 'Waiting for a verified account and matching saved account identity'
+    if (any(type(value.get(k)) is not int or value[k] < 0 for k in ('positions_count', 'orders_count'))
+            or type(value.get('active_trade')) is not bool):
+        return False, 'Position, order and trade lifecycle state could not be verified'
+    if value['positions_count'] or value['orders_count'] or value['active_trade']:
+        return False, 'Waiting for all positions, orders and saved trade lifecycles to finish'
+    token = value.get('permission_token')
+    if (not isinstance(token, str) or not TOKEN.fullmatch(token)
+            or any(type(value.get(k)) is not bool for k in ('saved_live_enabled', 'live_enabled', 'review_required'))):
+        return False, 'Saved owner permission could not be verified'
+    if permission_token is not None and token != permission_token:
+        return False, 'Saved owner permission changed during the update; recovery verification is required'
+    if require_off and (value['saved_live_enabled'] or value['live_enabled'] or value['review_required']):
+        return False, 'Legacy bootstrap requires saved Live money permission to remain Off'
+    return True, 'Entry admissions are held, broker state is fresh and flat, and owner permission is verified'
 
 
 def fetch_revision(root):
@@ -249,19 +350,30 @@ def compose_up(root, image):
          '--force-recreate', '--no-deps', 'app'], env=environment, timeout=120, output=False)
 
 
-def wait_healthy(revision, *, timeout=120, sleep=time.sleep, monotonic=time.monotonic):
+def wait_healthy(revision, *, hold, locked_at, permission_token=None, legacy_off=False,
+                 timeout=120, sleep=time.sleep, monotonic=time.monotonic):
     deadline = monotonic() + timeout
     while monotonic() < deadline:
         try:
             health = read_local('/api/health')
-            snapshot = read_local('/api/snapshot')
-            allowed, _ = ready_to_replace(health, snapshot, utcnow())
-            if allowed and health.get('revision') == revision and snapshot.get('revision') == revision:
-                return
+            if health.get('ok') is not True or health.get('legacy_loaded') is not False or health.get('revision') != revision:
+                raise UpdateError('Replacement health identity is not verified')
+            if health.get('deployment_protocol') == 'entry-gate-v1':
+                readiness = read_local('/api/deployment-readiness')
+                allowed, _ = readiness_allowed(readiness, revision, hold, locked_at, utcnow(),
+                                               permission_token=permission_token,
+                                               require_off=hold.get('legacy_bootstrap') is True)
+                if allowed:
+                    return readiness
+            elif legacy_off:
+                snapshot = read_local('/api/snapshot')
+                allowed, _ = ready_to_replace(health, snapshot, utcnow())
+                if allowed and snapshot.get('revision') == revision:
+                    return None
         except UpdateError:
             pass
         sleep(3)
-    raise UpdateError('The replacement did not pass revision, account and live-Off health checks')
+    raise UpdateError('The replacement did not pass gated revision, fresh account and permission checks')
 
 
 def refresh_installed_updater(root, release):
@@ -276,10 +388,65 @@ def refresh_installed_updater(root, release):
         raise UpdateError('The app is updated but the installed updater could not be refreshed') from None
 
 
+def refresh_installed_timer(root, release):
+    source = release / 'deploy' / 'pivot-update.timer'
+    installed = Path.home() / '.config' / 'systemd' / 'user' / 'pivot-update.timer'
+    try:
+        if not installed.is_file():
+            raise UpdateError('The tested app is ready but its installed update timer requires host setup')
+        data = source.read_bytes()
+        if len(data) > 4096 or b'Unit=pivot-update.service' not in data:
+            raise UpdateError('The selected update timer is invalid')
+        atomic_write(installed, data)
+        run(['systemctl', '--user', 'daemon-reload'])
+        run(['systemctl', '--user', 'restart', 'pivot-update.timer'])
+    except OSError:
+        raise UpdateError('The tested app is ready but the update timer could not be refreshed') from None
+
+
+def recover_hold(root):
+    """Resolve a crash barrier before GitHub checks or the already-current shortcut."""
+    path = hold_path(root)
+    if not os.path.lexists(path):
+        return False
+    with locked(root / 'data' / 'pivot-v2' / 'deployment.lock'):
+        locked_at = utcnow()
+        hold = read_record(path)
+        image = current_image()
+        revision = IMAGE.fullmatch(image).group(1) if image and IMAGE.fullmatch(image) else None
+        token = hold.get('permission_token')
+        legacy_off = (hold.get('legacy_bootstrap') is True and hold.get('saved_live_enabled') is False
+                      and revision == hold.get('previous_revision'))
+        if (not valid_hold(hold) or revision not in (hold.get('previous_revision'), hold.get('candidate_revision'))
+                or (not isinstance(token, str) or not TOKEN.fullmatch(token)) and not legacy_off):
+            write_status(root, state='recovery_required', reason='An unresolved entry hold requires verified host recovery; new entries remain paused',
+                         active_revision=revision, candidate_revision=hold.get('candidate_revision') if valid_hold(hold) else None)
+            raise UpdateError('Unresolved entry hold could not be matched to a verified running release and saved permission')
+        try:
+            wait_healthy(revision, hold=hold, locked_at=locked_at,
+                         permission_token=token, legacy_off=legacy_off)
+            if revision == hold['candidate_revision']:
+                release = release_directory(root, revision)
+                refresh_installed_updater(root, release)
+                refresh_installed_timer(root, release)
+            clear_hold(root, hold)
+        except UpdateError:
+            write_status(root, state='recovery_required', reason='Entry hold remains in place because crash recovery has not passed verification',
+                         active_revision=revision, candidate_revision=hold['candidate_revision'])
+            raise
+        write_status(root, state='updated' if revision == hold['candidate_revision'] else 'built',
+                     reason='Recovered a verified release; saved owner permission is unchanged',
+                     active_revision=revision,
+                     candidate_revision=None if revision == hold['candidate_revision'] else hold['candidate_revision'])
+        return revision == hold['candidate_revision']
+
+
 def update(root, *, build_only=False):
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     with locked(root / 'config' / 'update.lock'):
+        if not build_only and recover_hold(root):
+            return
         old_status = prior_status(root)
         write_status(root, state='checking', reason='Checking GitHub for a new release',
                      active_revision=old_status.get('active_revision'), candidate_revision=old_status.get('candidate_revision'))
@@ -309,41 +476,93 @@ def update(root, *, build_only=False):
             write_status(root, state='built', reason='Tested image ready; initial host installation is required' if previous is None else 'Tested image ready; deployment was not requested',
                          active_revision=previous_revision, candidate_revision=revision)
             return
-        with locked(root / 'data' / 'pivot-v2' / 'deployment.lock'):
-            health, snapshot = read_local('/api/health'), read_local('/api/snapshot')
-            allowed, reason = ready_to_replace(health, snapshot, utcnow())
-            if not allowed:
-                write_status(root, state='waiting_off' if health.get('live_enabled') is not False or snapshot.get('live_enabled') is not False or snapshot.get('review_required') is not False else 'blocked_exposure', reason=reason, active_revision=previous_revision, candidate_revision=revision)
-                return
-            if health.get('revision') != previous_revision or snapshot.get('revision') != previous_revision:
-                raise UpdateError('Current container and API revisions disagree; automatic replacement is paused')
-            write_status(root, state='deploying', reason='Installing a tested release with Live money Off',
-                         active_revision=previous_revision, candidate_revision=revision)
-            try:
-                compose_up(root, image)
-                wait_healthy(revision)
-            except UpdateError:
-                rejection_saved = True
-                try:
-                    reject_revision(root, revision)
-                except OSError:
-                    # Still restore the previous runtime if the disk is full.
-                    rejection_saved = False
-                try:
-                    compose_up(root, previous)
-                    wait_healthy(previous_revision)
-                except UpdateError:
-                    write_status(root, state='error', reason='The replacement and rollback health checks failed; host attention is required',
-                                 active_revision=previous_revision, candidate_revision=revision)
-                    raise UpdateError('The replacement and rollback could not be verified') from None
-                write_status(root, state='rolled_back', reason='The new release failed health checks; the previous release is running',
+        try:
+            with locked(root / 'data' / 'pivot-v2' / 'deployment.lock'):
+                locked_at = utcnow()
+                health = read_local('/api/health')
+                if health.get('revision') != previous_revision:
+                    raise UpdateError('Current container and API revisions disagree; automatic replacement is paused')
+                if health.get('ok') is not True or health.get('legacy_loaded') is not False:
+                    raise UpdateError('Current app health is not verified; automatic replacement is paused')
+                legacy = health.get('deployment_protocol') != 'entry-gate-v1'
+                if legacy:
+                    snapshot = read_local('/api/snapshot')
+                    if snapshot.get('revision') != previous_revision:
+                        raise UpdateError('Current container and API revisions disagree; automatic replacement is paused')
+                    allowed, reason = ready_to_replace(health, snapshot, utcnow())
+                    if not allowed:
+                        live_or_unknown = (health.get('live_enabled') is not False or snapshot.get('live_enabled') is not False
+                                           or snapshot.get('review_required') is not False)
+                        write_status(root, state='bootstrap_required' if live_or_unknown else 'blocked_exposure',
+                                     reason='Legacy Live-On runtime requires a one-time host bootstrap for the entry gate' if live_or_unknown else reason,
+                                     active_revision=previous_revision, candidate_revision=revision)
+                        return
+                hold = {'version': 'entry-hold-v1', 'id': uuid4().hex, 'previous_revision': previous_revision,
+                        'candidate_revision': revision, 'created_at': utcnow().isoformat(),
+                        'permission_token': None, 'legacy_bootstrap': legacy}
+                if legacy:
+                    hold['saved_live_enabled'] = False
+                if os.path.lexists(hold_path(root)):
+                    raise UpdateError('An entry hold already exists; crash recovery must complete first')
+                save_hold(root, hold)
+                if not legacy:
+                    try:
+                        readiness = read_local('/api/deployment-readiness')
+                        allowed, reason = readiness_allowed(readiness, previous_revision, hold, locked_at, utcnow())
+                    except UpdateError:
+                        # Nothing has been replaced; release only our own hold.
+                        clear_hold(root, hold)
+                        raise
+                    if not allowed:
+                        clear_hold(root, hold)
+                        write_status(root, state='blocked_exposure', reason=reason,
+                                     active_revision=previous_revision, candidate_revision=revision)
+                        return
+                    hold.update(permission_token=readiness['permission_token'], saved_live_enabled=readiness['saved_live_enabled'])
+                    save_hold(root, hold)
+                write_status(root, state='deploying', reason='Installing a tested release with new entries held and owner permission unchanged',
                              active_revision=previous_revision, candidate_revision=revision)
-                if not rejection_saved:
-                    raise UpdateError('The previous release is restored but the failed-release record could not be saved')
+                try:
+                    compose_up(root, image)
+                    verified = wait_healthy(revision, hold=hold, locked_at=locked_at,
+                                            permission_token=hold['permission_token'])
+                    if legacy:
+                        # The old Off-only runtime cannot expose a permission
+                        # token. The candidate must prove saved permission is
+                        # still Off, then bind its token before releasing hold.
+                        hold['permission_token'] = verified['permission_token']
+                        save_hold(root, hold)
+                except UpdateError:
+                    rejection_saved = True
+                    try:
+                        reject_revision(root, revision)
+                    except OSError:
+                        rejection_saved = False
+                    try:
+                        compose_up(root, previous)
+                        wait_healthy(previous_revision, hold=hold, locked_at=locked_at,
+                                     permission_token=hold['permission_token'], legacy_off=legacy)
+                    except UpdateError:
+                        write_status(root, state='recovery_required', reason='Replacement and rollback verification failed; entry hold remains in place',
+                                     active_revision=previous_revision, candidate_revision=revision)
+                        raise UpdateError('The replacement and rollback could not be verified; entry hold is retained') from None
+                    if not rejection_saved:
+                        raise UpdateError('Previous release restored but failed-release record could not be saved; entry hold is retained')
+                    clear_hold(root, hold)
+                    write_status(root, state='rolled_back', reason='The replacement failed checks; verified previous release restored with owner permission unchanged',
+                                 active_revision=previous_revision, candidate_revision=revision)
+                    return
+                refresh_installed_updater(root, release)
+                refresh_installed_timer(root, release)
+                clear_hold(root, hold)
+                write_status(root, state='updated', reason='The new release is verified; saved owner permission is unchanged',
+                             active_revision=revision, candidate_revision=None, deployed_at=utcnow().isoformat())
+        except UpdateError as exc:
+            if str(exc) == 'Another update or live-money change is in progress':
+                write_status(root, state='waiting_entry', reason='Waiting for the in-flight entry admission to finish before installing',
+                             active_revision=previous_revision, candidate_revision=revision)
                 return
-            refresh_installed_updater(root, release)
-            write_status(root, state='updated', reason='The new GitHub release is healthy; Live money remains Off',
-                         active_revision=revision, candidate_revision=None, deployed_at=utcnow().isoformat())
+            raise
 
 
 def main():
@@ -355,7 +574,7 @@ def main():
         update(args.root, build_only=args.build_only)
     except UpdateError as exc:
         failure = prior_status(args.root)
-        failure.update(state='error', reason=str(exc))
+        failure.update(state='recovery_required' if os.path.lexists(hold_path(args.root)) else 'error', reason=str(exc))
         write_status(args.root, **failure)
         raise SystemExit(1) from None
 
