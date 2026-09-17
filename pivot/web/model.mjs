@@ -55,6 +55,7 @@ export function appStatus(snapshot, now=Date.now()) {
 }
 export function strategyViews(snapshot, now=Date.now()) {
   const current=age(snapshot?.analysis_at,now)<=90;
+  const marketClosed=snapshot?.clock?.is_open===false && age(snapshot.account_at,now)<=60 && !snapshot.account_error;
   const methods=snapshot?.setup?.strategies;
   if (!Array.isArray(methods) || !methods.length) return [{id:'waiting',label:'Nasdaq methods',state:'Waiting for analysis',
     detail:'Waiting for the first complete analysis of both entry methods.',checks:[],current:false,selected:false}];
@@ -62,8 +63,8 @@ export function strategyViews(snapshot, now=Date.now()) {
     const checks=Array.isArray(method.checks)?method.checks:[];
     const blocked=checks.find(check=>check.passed!==true);
     const qualified=method.state==='SETUP_READY' && checks.length>0 && !blocked;
-    const state=!current?'Analysis out of date':qualified?'Setup found':String(method.state || 'WATCHING').replaceAll('_',' ').toLowerCase();
-    const detail=!current?'Waiting for a current analysis. Saved observations cannot authorize an entry.':
+    const state=marketClosed?'Market closed':!current?'Analysis out of date':qualified?'Setup found':String(method.state || 'WATCHING').replaceAll('_',' ').toLowerCase();
+    const detail=marketClosed?'Waiting for the next regular session and fresh completed candles. Saved history remains available under Data connections.':!current?'Waiting for a current analysis. Saved observations cannot authorize an entry.':
       qualified?'The strategy checks pass. Fresh broker checks and your Live money permission are still required.':
       blocked?.name==='Premarked levels'?(method.id==='prior_day_sweep'?'Waiting for verified previous-day high and low.':'Waiting for repeated historical touches or crossings to establish an area.'):
       blocked?.name==='Magnificent Seven at their zones'?'Waiting for at least four technology leaders to agree, with none opposing.':
@@ -72,14 +73,17 @@ export function strategyViews(snapshot, now=Date.now()) {
     const levels=(Array.isArray(method.levels)?method.levels:[]).filter(z=>[z.low,z.high].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)&&z.low<=z.high);
     const distance=z=>Math.max(z.low-reference,reference-z.high,0);
     const area=typeof reference==='number' && Number.isFinite(reference)?levels.sort((a,b)=>distance(a)-distance(b)||a.low-b.low)[0]:null;
-    return {...method,checks,state,detail,current,area:current?area:null,qualified:current&&qualified,selected:snapshot.setup.strategy_id===method.id};
+    return {...method,checks,state,detail,current,area:current?area:null,qualified:current&&!marketClosed&&qualified,selected:snapshot.setup.strategy_id===method.id};
   });
 }
 export function leaderOverview(snapshot, now=Date.now()) {
+  const names=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','TSLA'];
+  if (snapshot?.clock?.is_open===false && age(snapshot.account_at,now)<=60 && !snapshot.account_error)
+    return {current:false,detail:'Market closed · five-minute signals resume with the next regular session.',
+      rows:names.map(symbol=>({symbol,vote:null,label:'Closed',reason:'Market closed; saved candle history is available under Data connections.'}))};
   const trace=snapshot?.decision_trace;
   if (!trace || trace.current_at_snapshot!==true || age(trace.captured_at,now)>90 || snapshot.diagnostic_error)
     return {current:false,detail:'Waiting for current saved leader observations.',rows:[]};
-  const names=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','TSLA'];
   const rows=names.map(symbol=>{
     const observation=trace.leaders?.[symbol] || {};
     const vote=['long','short'].includes(observation.vote)?observation.vote:null;
