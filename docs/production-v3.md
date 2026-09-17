@@ -32,7 +32,7 @@ Alpaca supports fractional DAY orders but not fractional short sales, per its [f
 
 ## Observability and release controls
 
-The homepage shows both methods and their separate blockers, current leader direction, positions/orders and the installed version. Decision history records genuine five-minute inputs, each method's event identity/lifetime, confirmation evidence and first failed condition. Five-minute checkpoints preserve missing or stalled input evidence. The separate execution journal records admission failures, attempts and recovery. Historical records never authorize an order.
+The homepage shows both methods and their separate blockers, current leader direction, positions/orders and the installed version. Decision history records genuine five-minute inputs, each method's event identity/lifetime, confirmation evidence and first failed condition. Five-minute checkpoints preserve missing or stalled input evidence. Every ready area and method is retained for the executor; it skips previously consumed events and checks the next unconsumed candidate. A failed broker preflight does not hop to another trade. Execution logs distinguish the leading analysis from the candidate actually checked. The separate execution journal records admission failures, attempts and recovery. Historical records never authorize an order.
 
 The updater obtains tested releases from GitHub without requiring the laptop or local Wi-Fi. It pauses new entries during a broker-verified flat-account switch and preserves durable account history, settings and saved permission. Unknown exposure or failed verification retains the entry hold or rolls back under the existing protocol.
 
@@ -43,3 +43,16 @@ This release changes strategy rules, so it has a new execution policy identifier
 Release verification covers native data fetching/coverage, no-lookahead areas, both independent methods, event expiry and deduplication, input freshness, analyzer-to-simulated-broker execution, order/stop recovery, durable histories, UI models and the actual Linux container build. Production verification checks the installed revision, authenticated page, saved amount, worker freshness, data frames and logging.
 
 Synthetic broker tests establish software behavior under their fixtures. They do not prove actual live fills, creator-identical signals, unseen data-provider behavior or profitable returns. The retained historical evidence establishes no profitable edge. Subsequent evaluation must report missing data, skipped entries and costs instead of treating every wait as a defect or retuning rules after each loss.
+
+### Recorded-market validation
+
+The frozen analyzer at `04c6df92db693ef8f815cb2b72856fa33d2e062d` was evaluated at 468 five-minute checkpoints across September 9, 10, 11, 14, 15 and 16, 2026. All 468 had complete required stock and actual-VIX history; zero checkpoints were treated as unknown for missing history. Areas, prices and reactions were cut off at each simulated checkpoint. Input hashes, module hashes and provenance are retained in the private validation report; its SHA-256 is `39d8db891ea58bbae9d8491937cec083edf172fbb8cbfc15527cba8bc958191d`.
+
+| Method | Checkpoints passing candle rules | Distinct selected events |
+| --- | ---: | ---: |
+| Four-hour break/retest | 1 | 1 |
+| Previous-day sweep | 9 | 4 |
+
+Four of the ten method-checkpoints were long-direction confirmations, spanning two prior-day events. Several events were observed repeatedly or changed confirmation direction; these are not ten independent trades. At $5 the short-direction examples cannot enter QQQ short positions. Even the long confirmations still require buying power, current price/quote, fresh VIX entry verification and all other broker checks.
+
+This was a pre-known retrospective sample, not untouched validation or an estimate of returns. Provider corrections may have arrived later; simulated receipt times do not establish live data availability. The replay measured each method's leading candidate in the frozen analyzer. The subsequent release fix retains all ready candidates so consumed events cannot hide other opportunities; its execution behavior is covered by separate simulated-broker regression tests. This report is not an exhaustive count of every simultaneous area or a simulation of brokerage fills.
