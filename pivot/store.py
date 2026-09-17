@@ -1,11 +1,13 @@
 """Versioned settings and append-only audit events, isolated from legacy databases."""
 import json
 import sqlite3
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULTS = {'sizing_mode': 'target', 'target_dollars': '25.00'}
 DECISION_TRACE_RETENTION = 24000  # >=60 regular sessions even at one changed state per minute.
+EXECUTION_CHECK_RETENTION = 24000
 
 
 class Store:
@@ -25,6 +27,13 @@ class Store:
                              'UNIQUE(checkpoint_at,fingerprint));'
                              'CREATE INDEX IF NOT EXISTS decision_trace_recency '
                              'ON decision_traces(last_observed_at DESC,id DESC);')
+            db.executescript('CREATE TABLE IF NOT EXISTS execution_checks ('
+                             'id INTEGER PRIMARY KEY, checkpoint_at TEXT NOT NULL, fingerprint TEXT NOT NULL,'
+                             'first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,'
+                             'observation_count INTEGER NOT NULL, body TEXT NOT NULL,'
+                             'UNIQUE(checkpoint_at,fingerprint));'
+                             'CREATE INDEX IF NOT EXISTS execution_check_recency '
+                             'ON execution_checks(last_observed_at DESC,id DESC);')
             db.execute('INSERT OR IGNORE INTO control VALUES(1, ?)', (json.dumps({'enabled': False, 'policy': None}),))
             db.execute('INSERT OR IGNORE INTO settings VALUES(1, ?)', (json.dumps(DEFAULTS),))
 
@@ -85,6 +94,57 @@ class Store:
                              (trace['checkpoint_at'], key)).fetchone()
             db.execute('DELETE FROM decision_traces WHERE id IN (SELECT id FROM decision_traces '
                        'ORDER BY last_observed_at DESC,id DESC LIMIT -1 OFFSET ?)', (DECISION_TRACE_RETENTION,))
+        return self._decision_row(row)
+
+    def latest_execution_check(self):
+        with self.connect() as db:
+            row = db.execute('SELECT id,first_observed_at,last_observed_at,observation_count,body '
+                             'FROM execution_checks ORDER BY last_observed_at DESC,id DESC LIMIT 1').fetchone()
+        return self._decision_row(row)
+
+    def execution_history(self, limit=50, before_id=None):
+        """Historical observations only; reading these cannot authorize an order."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('Execution limit must be between 1 and 100')
+        if before_id is not None and (type(before_id) is not int or not 1 <= before_id <= 2**63 - 1):
+            raise ValueError('Execution cursor must be a positive signed 64-bit integer')
+        where = ' WHERE id < ?' if before_id is not None else ''
+        params = ([before_id] if before_id is not None else []) + [limit + 1]
+        with self.connect() as db:
+            rows = db.execute('SELECT id,first_observed_at,last_observed_at,observation_count,body '
+                              'FROM execution_checks' + where + ' ORDER BY id DESC LIMIT ?', params).fetchall()
+        entries = [self._decision_row(row) for row in rows[:limit]]
+        return {'entries': entries, 'next_before_id': entries[-1]['id'] if len(rows) > limit else None,
+                'order': 'descending insertion ID; repeated evidence updates its existing row',
+                'historical_only': True}
+
+    def record_execution_check(self, record):
+        """Separate bounded diagnostics; callers isolate any failure from execution."""
+        if record.get('version') != 'execution-check-v1':
+            raise ValueError('Unsupported execution check version')
+        body = json.dumps(record, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        if len(body.encode()) > 16384:
+            raise ValueError('Execution check exceeds storage limit')
+        # A refreshed analysis/worker clock alone is not a new execution state.
+        # The latest body preserves correlation times; first/last/count retain
+        # the observed duration of an otherwise identical checkpoint state.
+        evidence = {key: value for key, value in record.items() if key not in ('captured_at', 'analysis_at')}
+        key = sha256(json.dumps(evidence, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        at = record['captured_at']
+        with self.connect() as db:
+            # Diagnostics must not hold up position management behind a busy
+            # ledger. A short wait fails into the executor's logging error flag.
+            db.execute('PRAGMA busy_timeout=50')
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT INTO execution_checks(checkpoint_at,fingerprint,first_observed_at,last_observed_at,observation_count,body) '
+                       'VALUES(?,?,?,?,1,?) ON CONFLICT(checkpoint_at,fingerprint) DO UPDATE SET '
+                       'last_observed_at=excluded.last_observed_at,observation_count=observation_count+1,body=excluded.body',
+                       (record['checkpoint_at'], key, at, at, body))
+            row = db.execute('SELECT id,first_observed_at,last_observed_at,observation_count,body '
+                             'FROM execution_checks WHERE checkpoint_at=? AND fingerprint=?',
+                             (record['checkpoint_at'], key)).fetchone()
+            db.execute('DELETE FROM execution_checks WHERE id IN (SELECT id FROM execution_checks '
+                       'ORDER BY last_observed_at DESC,id DESC LIMIT -1 OFFSET ?)', (EXECUTION_CHECK_RETENTION,))
         return self._decision_row(row)
 
     def save(self, settings):

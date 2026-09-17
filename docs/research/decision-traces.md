@@ -1,6 +1,6 @@
 # Persisted decision evidence
 
-The research branch adds observational traces to each completed analysis refresh. This is software instrumentation; it does not change signal conditions, saved settings, permissions, orders or deployment.
+The hosted app records observational traces at each completed analysis refresh. This is software instrumentation; it does not change signal conditions, saved settings, permissions, orders or deployment.
 
 ## Remote review
 
@@ -39,4 +39,4 @@ The focused offline tests cover source result equality before/after tracing, rea
 /Users/alirahimlou/myapps/trader/.venv/bin/python -m pytest pivot/tests/test_decision_diagnostics.py
 ```
 
-The production release must still be reviewed and authorized separately; this task did not deploy it.
+Signal tracing was deployed in the September 17 release. Execution-check history is a separate addition described in [execution diagnostics](execution-diagnostics.md); it must be verified against the installed version.

@@ -130,6 +130,8 @@ def deployment_status(path, now=None):
 
 def create_app(service, background=True, hosting=None, deployment_lock=None, deployment_status_path=None):
     hosting = hosting or Hosting()
+    if service.executor is not None:
+        service.executor.revision = hosting.revision
     def decorate_snapshot(payload):
         result = {**payload, 'hosting': hosting.describe(), 'revision': hosting.revision, 'app_version': APP_VERSION}
         if hosting.public_origin:
@@ -185,6 +187,13 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     def decisions(limit: int = 50, before_id: int | None = None):
         try:
             return service.store.decision_history(limit, before_id)
+        except ValueError as exc:
+            raise HTTPException(422, detail=str(exc)) from None
+
+    @app.get('/api/execution-checks')
+    def execution_checks(limit: int = 50, before_id: int | None = None):
+        try:
+            return service.store.execution_history(limit, before_id)
         except ValueError as exc:
             raise HTTPException(422, detail=str(exc)) from None
 
