@@ -46,3 +46,16 @@ test('nearest watched area uses real QQQ observations and vanishes with stale an
   assert.equal(strategyViews(s,now+91000)[0].area,null);
   s.observations=[];assert.equal(strategyViews(s,now)[0].area,null);
 });
+test('verified market closure distinguishes saved history from fresh entry signals',()=>{
+  const s={...snapshot(),clock:{is_open:false},account_at:at};
+  const rows=strategyViews(s,now);
+  assert.ok(rows.every(row=>row.state==='Market closed'&&!row.qualified));
+  assert.ok(rows.every(row=>row.detail.includes('Saved history')));
+  assert.ok(leaderOverview(s,now).rows.every(row=>row.label==='Closed'&&row.vote===null));
+  // An old or failed account/clock observation must not invent a closed session.
+  s.account_at=new Date(now-61000).toISOString();
+  assert.equal(strategyViews(s,now)[1].state,'Setup found');
+  assert.equal(leaderOverview(s,now).rows.length,0);
+  s.account_at=at;s.account_error='refresh failed';
+  assert.equal(strategyViews(s,now)[1].state,'Setup found');
+});
