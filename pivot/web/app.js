@@ -1,4 +1,4 @@
-import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus} from './model.mjs';
+import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus} from './model.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -14,8 +14,11 @@ function formChanged() {
 function render() {
   const s=snapshot; if(!s)return;
   $('runtime-status').textContent=s.hosting?.message || 'Checking where the app is running…';
-  $('deployment-status').hidden=s.hosting?.mode!=='hosted';
-  $('deployment-status').textContent=`${s.revision?`Version ${s.revision.slice(0,7)} · `:''}${s.deployment?.message || 'Checking update status…'}`;
+  const release=releaseStatus(s);
+  $('installed-version').textContent=release.label;
+  $('installed-version').title=release.revision || '';
+  $('deployment-status').textContent=release.detail;
+  document.querySelector('.release-badge').dataset.state=release.tone;
   const stale=age(s.account_at)>60 || !!s.account_error;
   $('balance').textContent=money(s.account?.equity);
   $('account-mode').textContent=s.account ? `${s.account.mode} account · ${s.live_enabled?'execution on':'execution off'}` : '';
@@ -82,7 +85,7 @@ function render() {
 async function refresh() {
   if(fetching||saving||toggling)return; fetching=true; const version=generation;
   try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;render();}}
-  catch { $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>'; }
+  catch { $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown'; }
   finally{fetching=false;}
 }
 async function changeLive(enabled) {

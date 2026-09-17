@@ -42,6 +42,55 @@ export function appStatus(snapshot, now=Date.now()) {
     (vixStatus(snapshot.data_health?.vix,now).label==='Candles ready'?'Live money on · watching for a setup':'Live money on · waiting for VIX'):'Watching the primary Nasdaq flow';
   return {title,text:snapshot.execution?.message || 'Live money is off. Analysis continues.'};
 }
+export function releaseStatus(snapshot, now=Date.now()) {
+  const revisionOf=value=>typeof value==='string' && /^[a-f0-9]{40}$/.test(value)?value:null;
+  const version=snapshot?.app_version;
+  const validVersion=typeof version==='string' && version.length<=64 && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version);
+  const revision=revisionOf(snapshot?.revision);
+  const deployment=snapshot?.deployment || {};
+  const state=typeof deployment.state==='string'?deployment.state:'';
+  const candidate=revisionOf(deployment.candidate_revision);
+  const candidateRevision=candidate && candidate!==revision?candidate:null;
+  const local=snapshot?.hosting?.mode==='local';
+  const label=local?`Local preview${validVersion?` · v${version}`:''}${revision?` · ${revision.slice(0,7)}`:''}`:
+    revision?(validVersion?`Installed v${version} · ${revision.slice(0,7)}`:`Version ${revision.slice(0,7)}`):
+    validVersion?`Version ${version} · revision unavailable`:'Version unavailable';
+  const result={label,detail:'Installed version could not be verified.',tone:'unknown',revision,candidateRevision,current:false,queued:false};
+  if(local) return {...result,detail:'Running on this machine.',candidateRevision:null};
+  if(!revision) return result;
+
+  const checked=typeof deployment.checked_at==='string' && /T.*(?:Z|[+-]\d{2}:\d{2})$/.test(deployment.checked_at)?Date.parse(deployment.checked_at):NaN;
+  const elapsed=now-checked;
+  const fresh=Number.isFinite(now) && Number.isFinite(elapsed) && elapsed>=0 && elapsed<=600000;
+  const activeRevision=revisionOf(deployment.active_revision);
+  const pending=candidateRevision?.slice(0,7);
+  if(!fresh) return {...result,detail:`${pending?`Last reported update ${pending} is not installed. `:''}${Number.isFinite(elapsed) && elapsed>=0?'Update check is out of date.':'Update check time is unavailable or invalid.'}`};
+  if(activeRevision!==revision) return {...result,detail:`${pending?`Update ${pending} is not installed. `:''}Update status does not match the running version; verification is needed.`};
+  if(pending) {
+    const details={
+      waiting_off:`Update ${pending} queued · not installed. Turn Live money off to install.`,
+      blocked_exposure:`Update ${pending} queued · not installed. Waiting for positions and orders to finish.`,
+      built:`Update ${pending} prepared · not installed.`,
+      building:`Preparing update ${pending} · not installed.`,
+      deploying:`Installing update ${pending} · still running ${revision.slice(0,7)}.`,
+      rolled_back:`Update ${pending} was not installed successfully; the previous version was restored.`,
+      error:`Update ${pending} is not installed; update checks need attention.`,
+    };
+    return {...result,detail:Object.hasOwn(details,state)?details[state]:`Update ${pending} is not installed; update status needs verification.`,
+      tone:['waiting_off','blocked_exposure','built','building','deploying'].includes(state)?'pending':'unknown',
+      queued:['waiting_off','blocked_exposure','built'].includes(state)};
+  }
+  if(state==='current') return {...result,detail:'Latest checked release.',tone:'current',current:true};
+  const details={
+    updated:'Update installed; awaiting the next version check.',
+    checking:'Checking for an update.',
+    building:'Preparing an update; installed version shown.',
+    deploying:'Update installation in progress; installed version shown.',
+    rolled_back:'Previous version restored after an unsuccessful update.',
+    error:'Update checks need attention; installed version shown.',
+  };
+  return {...result,detail:Object.hasOwn(details,state)?details[state]:'Update status is unconfirmed; installed version shown.'};
+}
 export function settingsError(settings, snapshot, now=Date.now()) {
   const value=Number(settings.target_dollars);
   if (!Number.isFinite(value) || value<1 || value>1e12 || Math.abs(value*100-Math.round(value*100))>0.0001) return 'Enter at least $1, with up to two decimal places.';

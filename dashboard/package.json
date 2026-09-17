@@ -1,1 +1,14 @@
-{"name":"pivot-video-dashboard","private":true,"version":"2.0.0","type":"module","scripts":{"dev":"vite","build":"vite build","test:models":"node --test ../pivot/web/model.test.mjs"},"devDependencies":{"vite":"^7.1.10"}}
+{
+  "name": "pivot-video-dashboard",
+  "private": true,
+  "version": "2.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test:models": "node --test ../pivot/web/model.test.mjs"
+  },
+  "devDependencies": {
+    "vite": "^7.1.10"
+  }
+}

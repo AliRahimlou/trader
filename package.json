@@ -1,1 +1,12 @@
-{"name":"pivot-video-app","private":true,"version":"2.0.0","scripts":{"start":"./scripts/run_full_stack.sh","backend":"./scripts/run_backend.sh","frontend":"./scripts/run_frontend.sh","build":"npm --prefix dashboard run build","test":".venv/bin/python -m pytest pivot/tests deploy/tests research/tests -q && node --test pivot/web/model.test.mjs"}}
+{
+  "name": "pivot-video-app",
+  "private": true,
+  "version": "2.1.0",
+  "scripts": {
+    "start": "./scripts/run_full_stack.sh",
+    "backend": "./scripts/run_backend.sh",
+    "frontend": "./scripts/run_frontend.sh",
+    "build": "npm --prefix dashboard run build",
+    "test": ".venv/bin/python -m pytest pivot/tests deploy/tests research/tests -q && node --test pivot/web/model.test.mjs"
+  }
+}
