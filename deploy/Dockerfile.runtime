@@ -14,8 +14,9 @@ COPY deploy/requirements.lock /tmp/requirements.lock
 RUN python -m venv /opt/venv && pip install --no-cache-dir -r /tmp/requirements.lock
 COPY pivot ./pivot/
 COPY deploy ./deploy/
+COPY research ./research/
 COPY backend_server.py ./
-RUN python -m pytest pivot/tests deploy/tests -q
+RUN python -m pytest pivot/tests deploy/tests research/tests -q
 
 FROM python:3.12-slim-bookworm AS runtime
 ARG PIVOT_REVISION

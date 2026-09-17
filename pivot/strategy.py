@@ -4,10 +4,34 @@ Closed-bar geometry is an explicit interpretation; broker admission is checked s
 No score, FVG, first-clip tape/VWAP rule, or ETF volatility fallback is imported.
 """
 from datetime import timedelta
+from dataclasses import dataclass
+from math import isfinite
 from zoneinfo import ZoneInfo
 from .models import Zone, MAG7
 
 ET = ZoneInfo('America/New_York')
+
+
+@dataclass(frozen=True)
+class AnalysisPolicy:
+    """Explicit research parameters. The running app uses unchanged defaults."""
+    zone_tolerance: float = 0.001
+    persistence_bars: int = 1
+    minimum_leaders: int = 4
+    maximum_opposition: int = 0
+
+    def __post_init__(self):
+        if (isinstance(self.zone_tolerance, bool) or not isinstance(self.zone_tolerance, (float, int))
+                or not isfinite(self.zone_tolerance)
+                or any(isinstance(v, bool) or not isinstance(v, int)
+                       for v in (self.persistence_bars, self.minimum_leaders, self.maximum_opposition))):
+            raise ValueError('Invalid analysis policy')
+        if not (0 < self.zone_tolerance <= 0.01 and self.persistence_bars in (1, 2, 3)
+                and 1 <= self.minimum_leaders <= 7 and 0 <= self.maximum_opposition < self.minimum_leaders):
+            raise ValueError('Invalid analysis policy')
+
+
+BASELINE_POLICY = AnalysisPolicy()
 
 
 def closed(market, minutes, now):
@@ -99,19 +123,67 @@ def pivot_event(bars, levels):
     return None
 
 
-def leader_confirmation(leaders, direction, now):
-    votes = {}
+def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
+    """Point-in-time votes with evidence, including rejected and expired reactions.
+
+    Persistent votes belong to one completed Nasdaq event and session. The most
+    recent reaction replaces an older one; a close through its opposite zone
+    boundary invalidates it. A zone is reconstructed at the reaction's start,
+    so later confirming pivots cannot justify an earlier vote.
+    """
+    rows = {}
     for symbol in MAG7:
         market = leaders.get(symbol)
         if market is None or not fresh(market, now, 15):
-            return False, f'{symbol}: current 15-minute data missing'
+            rows[symbol] = {'vote': None, 'reason': 'current 15-minute data missing', 'zones': []}
+            continue
         bars = closed(market, 15, now)
-        levels = zones(closed(market, 240, now), bars[-1].end - timedelta(minutes=15))
-        votes[symbol] = next((d for zone in levels if (d := reaction(bars[-2], bars[-1], zone))), None) if len(bars) >= 2 else None
+        four_hour = closed(market, 240, now)
+        levels = zones(four_hour, bars[-1].end - timedelta(minutes=15), policy.zone_tolerance)
+        row = {'vote': None, 'reason': 'no zone reaction' if levels else 'no eligible zones',
+               'latest_bar_at': bars[-1].end.isoformat(), 'reaction_at': None, 'age_minutes': None,
+               'latest_close': bars[-1].close,
+               'zones': [{'low': z.low, 'high': z.high, 'established_at': z.established_at.isoformat(),
+                          'touches': z.touches, 'touched_by_latest_bar': bars[-1].low <= z.high and bars[-1].high >= z.low} for z in levels]}
+        rows[symbol] = row
+        if len(bars) < 2:
+            continue
+        if policy.persistence_bars > 1 and setup_at is None:
+            row['reason'] = 'no active Nasdaq event; persistent votes are not accumulated'
+            continue
+        for idx in range(len(bars)-1, max(0, len(bars)-policy.persistence_bars-1), -1):
+            current, previous = bars[idx], bars[idx-1]
+            if policy.persistence_bars > 1 and (current.end.astimezone(ET).date() != now.astimezone(ET).date()
+                    or current.end < setup_at):
+                continue
+            # A missing candle cannot lengthen the declared persistence window.
+            age = (bars[-1].end-current.end).total_seconds()/60
+            if age > 15*(policy.persistence_bars-1):
+                continue
+            known = levels if idx == len(bars)-1 else zones(four_hour, current.end-timedelta(minutes=15), policy.zone_tolerance)
+            found = next(((d, z) for z in known if (d := reaction(previous, current, z))), None)
+            if found is None:
+                continue
+            vote, zone = found
+            row.update(reaction_at=current.end.isoformat(), age_minutes=age,
+                       reaction_zone={'low':zone.low,'high':zone.high,'established_at':zone.established_at.isoformat()})
+            invalidated = any(b.close < zone.low if vote == 'long' else b.close > zone.high for b in bars[idx+1:])
+            row.update(vote=None if invalidated else vote,
+                       reason='invalidated by subsequent close through zone' if invalidated else 'current reaction' if age == 0 else 'persistent reaction')
+            break
+    return rows
+
+
+def leader_confirmation(leaders, direction, now, policy=BASELINE_POLICY, setup_at=None):
+    rows = leader_diagnostics(leaders, now, policy, setup_at)
+    for symbol, row in rows.items():
+        if row['reason'] == 'current 15-minute data missing':
+            return False, f'{symbol}: current 15-minute data missing'
+    votes = {symbol: row['vote'] for symbol, row in rows.items()}
     opposite = 'short' if direction == 'long' else 'long'
     matches = sum(v == direction for v in votes.values())
     # Distinct companies; GOOG is not counted a second time. Contradictory rejection denies entry.
-    okay = matches >= 4 and opposite not in votes.values()
+    okay = matches >= policy.minimum_leaders and sum(v == opposite for v in votes.values()) <= policy.maximum_opposition
     detail = ', '.join(f'{s}: {d or "no zone reaction"}' for s, d in votes.items())
     return okay, detail
 
@@ -147,7 +219,7 @@ def vix_candles_fresh(vix, now):
 
 
 
-def analyze(market, leaders, vix, now):
+def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     """One Nasdaq method from V2/V3. No V1 tape/VWAP or unrelated indicators.
 
     Rules not specified numerically by the videos are versioned interpretations,
@@ -167,7 +239,7 @@ def analyze(market, leaders, vix, now):
     bars=closed(market,60,now)
     # Premarked before the start of the potential event, not constructed around its outcome.
     before=bars[-1].end-timedelta(minutes=120)
-    levels=zones(closed(market,240,now),before)
+    levels=zones(closed(market,240,now),before,policy.zone_tolerance)
     previous=prior_day_zones(market,now)
     result['levels']=[{'low':z.low,'high':z.high,'source':z.source,'established_at':z.established_at.isoformat()} for z in levels+previous]
     if not check('Premarked levels',levels or previous,'Repeated 4-hour levels and previous-day extremes are marked before the event'):
@@ -193,7 +265,7 @@ def analyze(market, leaders, vix, now):
     _,zone,kind,bar=event
     result.update(state='CONFIRMING',event=kind,event_at=bar.end.isoformat(),entry=bar.close)
     check('Nasdaq level event',True,kind+' · '+zone.source)
-    confirmations={direction:leader_confirmation(leaders,direction,now) for direction in ('long','short')}
+    confirmations={direction:leader_confirmation(leaders,direction,now,policy,bar.end) for direction in ('long','short')}
     direction=next((d for d,(okay,_) in confirmations.items() if okay),None)
     if not check('Magnificent Seven at their zones',direction, confirmations[direction][1] if direction else confirmations['long'][1]):
         return result

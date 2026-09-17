@@ -1,0 +1,80 @@
+{
+  "checked_at": "2026-09-17T16:06:02.210758+00:00",
+  "branch": "codex/research-validation-20260917",
+  "deployed_baseline_revision": "facc507ae2761a76916031994bcf9f956f9369fe",
+  "preregistered_plan_commit": "c5894bdee6508cde8876a215304fa2f7326ef557",
+  "python_tests": {
+    "command": "/Users/alirahimlou/myapps/trader/.venv/bin/python -m pytest -o addopts='' -q",
+    "passed": 687,
+    "failed": 0,
+    "elapsed_seconds": 1.81
+  },
+  "interface_tests": {
+    "command": "node --test pivot/web/model.test.mjs",
+    "passed": 9,
+    "failed": 0
+  },
+  "dashboard_build": {
+    "command": "npm --prefix dashboard run build",
+    "status": "PASS",
+    "vite_version": "7.3.6"
+  },
+  "container_build": {
+    "status": "NOT RUN",
+    "reason": "Docker daemon unavailable; CI image build remains required before release."
+  },
+  "analyzer_baseline_parity": {
+    "baseline_revision": "facc507ae2761a76916031994bcf9f956f9369fe",
+    "baseline_strategy_sha256": "a584014552a9527c0a85c7aaa37f4803584b4b35a047df4b3b494aad892d267e",
+    "dataset_sha256": "d30adb813a1aa60ac4585fcfd30edacd7aca578ee6fe550d144418d5988ff9f1",
+    "checkpoints": 494,
+    "difference_count": 0,
+    "differences": []
+  },
+  "deterministic_repeat": {
+    "status": "PASS",
+    "compared_artifacts": 53,
+    "byte_differences": 0,
+    "results_sha256": "d2e3696086b5d118c90aea43485ba1b3eb52899ebdee1b95978177d30e234cd1",
+    "decisions_sha256": "124dabae344b5b97bbf74787fc77e19d1a21fb0f0a5e1ffebbe32f43abc9c633",
+    "manifest_sha256": "b949048224f8e8cbf9475082cb4cd7128f87b259f9c3e4e79c1104318252e9d2",
+    "first_run": "runtime/research/run-reviewed-v1",
+    "repeat_run": "runtime/research/run-reviewed-repeat"
+  },
+  "broker_paper_lifecycle": "NOT RUN",
+  "broker_live_lifecycle": "NOT DEMONSTRATED",
+  "new_broker_orders_sent": 0,
+  "live_settings_changed": false,
+  "pushed_or_deployed": false,
+  "evidence_scope": "Offline software validation and historical research only; not proof of broker acceptance or trading profitability.",
+  "independent_focused_review": {
+    "status": "PASS",
+    "tests_passed": 222,
+    "scope": "Execution, replay and diagnostics; report numbers compared with retained artifacts",
+    "material_blockers": 0
+  },
+  "final_read_only_hosted_observation": {
+    "observed_at": "2026-09-17T16:07:03.495198+00:00",
+    "revision": "facc507ae2761a76916031994bcf9f956f9369fe",
+    "settings": {
+      "sizing_mode": "target",
+      "target_dollars": "25.00"
+    },
+    "live_enabled": true,
+    "execution_available": true,
+    "execution_keys": [
+      "message",
+      "at",
+      "trade"
+    ],
+    "positions": 0,
+    "orders": 0,
+    "account_error_present": false,
+    "data_error_count": 0,
+    "analysis_at": "2026-09-17T16:06:30.549789+00:00",
+    "feed_labels": {
+      "stocks": "alpaca_iex",
+      "vix": "current"
+    }
+  }
+}
