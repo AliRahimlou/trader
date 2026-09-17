@@ -1,0 +1,49 @@
+{
+  "version": "pivot-today-gates-20260917-v1",
+  "purpose": "Explain the observed September 17 inactivity using the unchanged production Nasdaq and leader gates, and an explicitly separate five-minute leader diagnostic. This is not a profitability study, parameter selection, deployment, or authorization to trade.",
+  "freeze_rule": "This plan must be committed by the parent before collecting current-day data or generating audit results.",
+  "session_date": "2026-09-17",
+  "session_timezone": "America/New_York",
+  "session_open": "2026-09-17T09:30:00-04:00",
+  "bar_cutoff": "2026-09-17T12:15:00-04:00",
+  "bar_cutoff_utc": "2026-09-17T16:15:00+00:00",
+  "decision_clock": "Every five-minute bar boundary from 09:35 through 12:15 Eastern, evaluated exactly at that boundary with end-stamped closed bars only. These are reconstruction clocks, not evidence of actual receipt times. Quarter-hour boundaries are labeled separately.",
+  "instruments": ["QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA"],
+  "data": {
+    "base": "Reuse the existing immutable dataset-v1 fifteen-minute equity history through September 16.",
+    "history_start": "Midnight New York time sixty calendar days before September 17, matching production rolling-window construction.",
+    "equity_collection": "Alpaca IEX split-adjusted historical equity candles using the existing ReadOnlySession GET-only calendar and stock-bars allowlist. Fetch missing fifteen-minute history only if necessary, current-day fifteen-minute history, and current-day five-minute history through the fixed cutoff.",
+    "credentials": "Read only the existing original private environment file into memory. Never save or print credentials, account identifiers, or request headers.",
+    "calendar": "Use the authenticated exchange calendar and preserve session opens/closes, including early closes. Do not fill missing candles.",
+    "vix": "Unavailable for today's audit unless the parent explicitly supplies a validated actual-index cache. No VIX API requests, ETF proxies, synthetic values, or prior-session values represented as current. Report unavailable VIX as unknown."
+  },
+  "baseline": {
+    "analyzer": "Unchanged pivot.strategy.analyze and default AnalysisPolicy.",
+    "leader_frame_minutes": 15,
+    "zone_frame_minutes": 240,
+    "zone_tolerance": 0.001,
+    "minimum_matching_companies": 4,
+    "maximum_opposing_companies": 0,
+    "persistence_bars": 1
+  },
+  "five_minute_diagnostic": {
+    "leader_frame_minutes": 5,
+    "zone_frame_minutes": 240,
+    "zone_tolerance": 0.001,
+    "minimum_matching_companies": 4,
+    "maximum_opposing_companies": 0,
+    "persistence_bars": 1,
+    "method": "Call the existing zones and reaction functions directly on genuinely five-minute bars. Reconstruct four-hour zones before the current five-minute candle starts. Never relabel five-minute bars as fifteen-minute data or substitute this diagnostic into the production analyzer.",
+    "first_bar": "A five-minute reaction requires two actual five-minute bars from the current session; the first current-session candle is insufficient and is reported explicitly."
+  },
+  "outputs": [
+    "Immutable sanitized current-day equity dataset, provenance, SHA-256 hashes, and per-symbol/frame coverage.",
+    "Every-checkpoint Nasdaq event/state/levels and production gate outcomes with actual VIX explicitly unknown.",
+    "Per-company latest actual bar, four-hour zones, current reaction vote, distance to nearest zone, and missing-data reasons for both genuine five-minute and production fifteen-minute frames.",
+    "Frame comparison counts across all checkpoints and separately at quarter-hour boundaries, with a chronological explanation of observed inactivity.",
+    "Explicit limitations: IEX-only trades, retrospectively fetched split-adjusted history, assumed observation clocks, no historical NBBO/arrival evidence, no current VIX evidence, no execution or profit claims."
+  ],
+  "exclusions": ["No strategy tuning or selection", "No backtest returns or trade simulation", "No broker clients or order endpoints", "No runtime configuration changes", "No deployment", "No production ledger writes", "No VIX refreshes"],
+  "output_directory": "runtime/research/today-20260917/",
+  "validation": ["Network-free tests for strict cutoff and no future bars", "Five-minute bars retain their true frame", "Default fifteen-minute votes match production leader diagnostics", "Same four-hour zone construction and reaction functions", "Calendar and missing-coverage checks", "Read-only collection path restriction"]
+}
