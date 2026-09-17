@@ -16,6 +16,8 @@ AllSpark runs the worker independently of the laptop, with automatic container r
 
 The v2.2.0 user systemd timer checks thirty seconds after each completed run, with up to five seconds of jitter. Builds and tests take additional time. User lingering keeps this timer available after logout and reboot. Updates are serialized. An exclusive deployment lock prevents new entry submissions and Live activation during the switch. A durable hold keeps entries paused if the updater or host restarts; position management continues. Recovery verifies the running image and permission before removing that hold.
 
+Version 2.2.1 also reconciles the timer when the worker already matches the selected GitHub revision. This handles a legacy updater that installed the new worker and updater but retained its old five-minute timer. A saved digest records a successful timer reload and restart; partial failures retry, while normal checks leave the timer untouched.
+
 ### One-time upgrade from the old updater
 
 The installed v2.1.0 updater only refreshes itself after a completed rollout, and the v2.1.0 worker does not implement the entry-admission gate. Pushing v2.2.0 to GitHub alone cannot bootstrap that worker while Live is On. It requires a one-time host commissioning step with administrative access, or the legacy Off-and-flat rollout path. After both worker and updater are upgraded and verified, routine releases no longer require the owner to turn Live Off. Do not report a queued GitHub release as installed or remove the legacy gate without first replacing its missing entry-admission protection.

@@ -13,6 +13,7 @@ from pivot.deployment import EntryGate
 SPEC = importlib.util.spec_from_file_location('pivot_updater', Path(__file__).parents[1] / 'update_from_github.py')
 updater = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(updater)
+REAL_TIMER_REFRESH = updater.refresh_installed_timer
 NOW = datetime(2026, 9, 16, 21, tzinfo=timezone.utc)
 OLD, NEW = 'a' * 40, 'b' * 40
 PERMISSION = 'c' * 64
@@ -583,7 +584,8 @@ def test_clear_hold_never_removes_replaced_or_symlinked_barrier(tmp_path, monkey
     assert updater.hold_path(tmp_path).is_symlink()
 
 
-def test_timer_refreshed_only_from_verified_release_in_offline_fake_home(tmp_path, monkeypatch):
+@pytest.fixture
+def timer_installation(tmp_path, monkeypatch):
     release = tmp_path / 'release'
     (release / 'deploy').mkdir(parents=True)
     data = (Path(__file__).parents[1] / 'pivot-update.timer').read_bytes()
@@ -594,10 +596,120 @@ def test_timer_refreshed_only_from_verified_release_in_offline_fake_home(tmp_pat
     monkeypatch.setattr(updater.Path, 'home', lambda: tmp_path)
     commands = []
     monkeypatch.setattr(updater, 'run', lambda args: commands.append(args))
+    return tmp_path, release, installed, data, commands
+
+
+def test_timer_refreshed_only_from_verified_release_in_offline_fake_home(timer_installation):
+    tmp_path, release, installed, data, commands = timer_installation
     updater.refresh_installed_timer(tmp_path, release)
     assert installed.read_bytes() == data
     assert b'OnUnitInactiveSec=30s' in data
     assert commands == [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'restart', 'pivot-update.timer']]
+    marker = updater.read_record(tmp_path / 'config' / 'update-timer.json')
+    assert marker == {'version': 'update-timer-v1', 'sha256': updater.sha256(data).hexdigest()}
+    updater.refresh_installed_timer(tmp_path, release)
+    assert len(commands) == 2
+
+
+@pytest.mark.parametrize('marker', [None, {'version': 'wrong', 'sha256': 'f' * 64},
+                                    {'version': 'update-timer-v1', 'sha256': 'f' * 64}])
+def test_matching_timer_bytes_without_success_marker_still_reload(timer_installation, marker):
+    root, release, installed, data, commands = timer_installation
+    installed.write_bytes(data)
+    path = root / 'config' / 'update-timer.json'
+    if marker is not None:
+        updater.atomic_write(path, json.dumps(marker).encode())
+    updater.refresh_installed_timer(root, release)
+    assert len(commands) == 2
+    assert updater.read_record(path)['sha256'] == updater.sha256(data).hexdigest()
+
+
+def test_changed_timer_file_is_repaired_even_when_success_digest_matches(timer_installation):
+    root, release, installed, data, commands = timer_installation
+    updater.refresh_installed_timer(root, release)
+    installed.write_text('OnUnitInactiveSec=5min\nUnit=pivot-update.service\n')
+    updater.refresh_installed_timer(root, release)
+    assert installed.read_bytes() == data
+    assert len(commands) == 4
+
+
+@pytest.mark.parametrize('failed_command', ['daemon-reload', 'restart'])
+def test_partial_timer_command_failure_remains_retriable(timer_installation, monkeypatch, failed_command):
+    root, release, installed, data, commands = timer_installation
+    marker = root / 'config' / 'update-timer.json'
+    original_marker = {'version': 'update-timer-v1', 'sha256': 'f' * 64}
+    updater.atomic_write(marker, json.dumps(original_marker).encode())
+    def failing(args):
+        commands.append(args)
+        if args[2] == failed_command:
+            raise updater.UpdateError('Timer command failed')
+    monkeypatch.setattr(updater, 'run', failing)
+    with pytest.raises(updater.UpdateError):
+        updater.refresh_installed_timer(root, release)
+    assert installed.read_bytes() == data
+    assert updater.read_record(marker) == original_marker
+    monkeypatch.setattr(updater, 'run', lambda args: commands.append(args))
+    prior_count = len(commands)
+    updater.refresh_installed_timer(root, release)
+    assert len(commands) == prior_count + 2
+    assert updater.read_record(marker)['sha256'] == updater.sha256(data).hexdigest()
+
+
+def test_failure_persisting_timer_success_retries_both_commands(timer_installation, monkeypatch):
+    root, release, installed, data, commands = timer_installation
+    original_write = updater.atomic_write
+    def failing(path, content):
+        if path.name == 'update-timer.json':
+            raise OSError('Mock write failure')
+        return original_write(path, content)
+    monkeypatch.setattr(updater, 'atomic_write', failing)
+    with pytest.raises(updater.UpdateError):
+        updater.refresh_installed_timer(root, release)
+    assert len(commands) == 2
+    assert not (root / 'config' / 'update-timer.json').exists()
+    monkeypatch.setattr(updater, 'atomic_write', original_write)
+    updater.refresh_installed_timer(root, release)
+    assert len(commands) == 4
+
+
+def test_current_release_migrates_legacy_timer_without_container_or_live_changes(pipeline, timer_installation, monkeypatch):
+    root, state = pipeline
+    _, release, installed, data, commands = timer_installation
+    state['revision'] = NEW
+    state['health']['revision'] = NEW
+    state['health']['live_enabled'] = True
+    state['snapshot']['live_enabled'] = True
+    control = root / 'data' / 'pivot-v2' / 'control.json'
+    control.parent.mkdir(parents=True)
+    original_control = b'{"enabled":true,"amount":5}\n'
+    control.write_bytes(original_control)
+    releases = []
+    monkeypatch.setattr(updater, 'release_directory', lambda root, revision: releases.append(revision) or release)
+    monkeypatch.setattr(updater, 'refresh_installed_timer', REAL_TIMER_REFRESH)
+    original_read = updater.read_local
+    def health_only(path):
+        assert path == '/api/health', 'Timer-only reconciliation needs no broker readiness request'
+        return original_read(path)
+    monkeypatch.setattr(updater, 'read_local', health_only)
+    updater.update(root)
+    assert releases == [NEW] and installed.read_bytes() == data
+    assert state['rollouts'] == state['builds'] == state['waits'] == []
+    assert not updater.hold_path(root).exists()
+    assert control.read_bytes() == original_control and state['health']['live_enabled'] is True
+    assert status(root)['state'] == 'current'
+    updater.update(root)
+    assert len(commands) == 2
+    assert control.read_bytes() == original_control
+
+
+def test_unverified_current_release_cannot_reconcile_timer(pipeline, monkeypatch):
+    root, state = pipeline
+    state['revision'] = NEW
+    state['health']['revision'] = NEW
+    state['health']['ok'] = False
+    with pytest.raises(updater.UpdateError, match='health'):
+        updater.update(root)
+    assert state['timers'] == state['rollouts'] == state['builds'] == []
 
 
 def test_refresh_failure_after_candidate_health_keeps_recoverable_hold(pipeline, monkeypatch):
