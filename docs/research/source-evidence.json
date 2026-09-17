@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-09-17",
+  "baseline_commit": "c5894bdee6508cde8876a215304fa2f7326ef557",
+  "method": "Full retained reading transcripts compared with fresh, unaltered decoded frames from the original MP4s. No new audio transcription and no chart prices inferred from blurred pixels.",
+  "sources": [
+    {
+      "id": "v2",
+      "filename": "ScreenRecording_09-14-2026 17-25-23_1.MP4",
+      "sha256": "e91af8d2ef2a6b6570da05f146cc105ba650379771706368244cec79613a17f7",
+      "duration_seconds": 100.138753,
+      "width": 1320,
+      "height": 2868,
+      "sample_seconds": [
+        5,
+        18,
+        26,
+        42,
+        52,
+        68,
+        84,
+        92
+      ],
+      "transcript": "docs/video-transcripts/video-2.srt"
+    },
+    {
+      "id": "v3",
+      "filename": "ScreenRecording_09-14-2026 18-11-24_1.MP4",
+      "sha256": "b6d885efc6a93e90c37012a5cd8f1d854e2e221ba94b4b905bd899d050a879ad",
+      "duration_seconds": 150.359501,
+      "width": 1320,
+      "height": 2868,
+      "sample_seconds": [
+        20,
+        28,
+        34,
+        41,
+        45,
+        48,
+        50,
+        53,
+        63,
+        73,
+        77,
+        82,
+        95,
+        110,
+        115,
+        120,
+        130,
+        143
+      ],
+      "transcript": "docs/video-transcripts/video-3.srt"
+    }
+  ],
+  "examples": [
+    {
+      "id": "manual-levels",
+      "source": "v3",
+      "second": 28,
+      "title": "Repeated touches and crossings around manually marked lines",
+      "classification": "Observed source location example",
+      "observed": "The upper red line intersects repeated highs. Middle red lines cut through candle bodies and wicks at several historical locations. This is the chart shown during the explanation of repeated four-hour touches and breakthroughs (00:18\u201300:42).",
+      "interpretation": "The source accepts discretionary horizontal areas with repeated interaction. An algorithm that only clusters local swing highs/lows is one possible approximation, and it can omit visible crossings that the speaker counts.",
+      "not_observable": "Exact prices, percentage width, clustering distance, lookback, minimum separation, and when each line was originally drawn cannot be reconstructed reliably. The screen is filmed at an angle."
+    },
+    {
+      "id": "hourly-event",
+      "source": "v3",
+      "second": 50,
+      "title": "A break/retest illustration is a candidate location",
+      "classification": "Observed event; entry acceptance unproven",
+      "observed": "The crosshair is near the lower red line and the sharp decline/rebound. Nearby frames 00:48 and 00:53 show the same chart while the transcript describes breaking a level and trading the retest.",
+      "interpretation": "This supports a level-event gate. It does not show a complete submitted trade. The speaker points at historical areas while describing the workflow.",
+      "not_observable": "Which exact candle is the executable retest, whether it had closed at decision time, allowable delay, and the entry/stop/target cannot be identified from this frame."
+    },
+    {
+      "id": "above-is-not-long",
+      "source": "v3",
+      "second": 63,
+      "title": "An upward Nasdaq break can precede a proposed short",
+      "classification": "Explicit conditional direction example",
+      "observed": "Recent candles have risen above the middle red line. The subtitle says the market broke above; the immediately following transcript discusses a possible short if leaders reject supply. The bottom chart status displays UTC and ETH.",
+      "interpretation": "Nasdaq break direction alone does not establish trade direction. The app convention of regular-session-only aggregation is not demonstrated by this displayed ETH setting.",
+      "not_observable": "A filled short, exact futures contract, an execution timestamp, and a universal session setting for all instruments are not established."
+    },
+    {
+      "id": "apple-rejection",
+      "source": "v3",
+      "second": 95,
+      "title": "Apple has a visible decline from the blue area",
+      "classification": "Observed individual leader reaction",
+      "observed": "The Apple chart has a blue horizontal area above an orange area and a large red candle descending from the upper blue area. Its header displays Apple Inc and 5. Many additional daily, weekly and monthly reference lines are visible.",
+      "interpretation": "This is an individual stock supply-rejection example. It is consistent with checking selling pressure before a Nasdaq short. The shown leader candles are five-minute candles.",
+      "not_observable": "All seven votes, the origin and age of the colored areas, whether the latest candle is closed, or a 15-minute same-candle requirement are not visible."
+    },
+    {
+      "id": "nvda-timeframe",
+      "source": "v3",
+      "second": 143,
+      "title": "Nvidia also shows a five-minute view",
+      "classification": "Observed example; universal rule unproven",
+      "observed": "The header reads NVIDIA Corporation \u00b7 5. Candles have interacted twice with a blue upper area and lie below it; an orange lower area and other reference lines are present.",
+      "interpretation": "This independently supports that five-minute stock charts were used in the demonstration. It does not require every future implementation to use five minutes, but contradicts describing fifteen-minute leader bars as an explicit source rule.",
+      "not_observable": "The first company name in the simultaneous spoken list remains ambiguous in the reading transcript; the on-video captions are also imperfect. No exact participation count or expiration is supplied."
+    },
+    {
+      "id": "vix-before-switch",
+      "source": "v3",
+      "second": 110,
+      "title": "VIX is falling while the speaker requests extra confirmation",
+      "classification": "Observed incomplete short confirmation",
+      "observed": "The right chart is the Volatility S&P 500 Index with 5 in the header; a succession of falling candles is visible. The transcript says to move to a higher timeframe, then fifteen minutes.",
+      "interpretation": "The current picture is not proof of the VIX buying from demand required for a short. A proposed short still lacks that demonstrated confirmation. The adjacent dollar index is visible but is never stated as a required gate.",
+      "not_observable": "There is no broker rejection or signal-engine rejection here. Exact VIX pivot construction, synchronization with all leaders, and the eventual reaction are absent."
+    },
+    {
+      "id": "vix-fifteen",
+      "source": "v3",
+      "second": 115,
+      "title": "Fifteen-minute VIX and a missing upward reaction",
+      "classification": "Illustrative rejection of an immediate short; researcher inference",
+      "observed": "The VIX header displays 15. Candles are descending into the lower-right region; the price label is around 20.77. The bottom status displays UTC and Full trading hours. The speaker says to look left for a pivotal area.",
+      "interpretation": "Applying the spoken short filter to this instant would withhold a short until VIX starts buying from a relevant area. This is a conditional explanation, not an observed historical execution decision.",
+      "not_observable": "The exact demand boundary and complete prior history are not visible. A screenshot price is not a reproducible OHLC series. No stop, size, fill or outcome is shown."
+    },
+    {
+      "id": "vix-look-left",
+      "source": "v3",
+      "second": 120,
+      "title": "Looking left shows an earlier VIX upward pivot",
+      "classification": "Observed historical visual analogy",
+      "observed": "The fifteen-minute VIX chart has been moved to earlier candles, including an upward move near the region being discussed. The speaker describes anticipating a pivot at an area where it pivoted before.",
+      "interpretation": "This supports using previous price interaction as location context. It does not prove that the current VIX has already turned or that anticipation alone permits a trade.",
+      "not_observable": "Whether there are two confirmed local extrema within 0.1 percent, whether a subsequent bar has confirmed them, and whether all Nasdaq/leader events occurred simultaneously cannot be established."
+    }
+  ]
+}

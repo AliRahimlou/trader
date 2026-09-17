@@ -8,6 +8,7 @@ from .rulebook import rulebook
 from .strategy import analyze
 from .sizing import decimal
 from .data_health import stock_health, vix_health, quote_health, expire_health
+from .diagnostics import build_decision_trace
 
 
 class Service:
@@ -19,7 +20,12 @@ class Service:
         self.executor = Executor(broker, store) if broker else None
         self.state = {'account':None, 'positions':[], 'orders':[], 'clock':None, 'account_at':None,
                       'analysis_at':None, 'setup':None, 'account_error':None, 'data_errors':[], 'observations':[], 'feeds':{},
-                      'live_enabled':False, 'execution_available':False, 'data_health':None, 'data_valid_until':None, 'quote':None, 'quote_at':None, 'quote_error':None}
+                      'live_enabled':False, 'execution_available':False, 'data_health':None, 'data_valid_until':None, 'quote':None, 'quote_at':None, 'quote_error':None,
+                      'decision_trace':None, 'diagnostic_error':None}
+        try:
+            self.state['decision_trace'] = self.store.latest_decision()
+        except Exception:
+            self.state['diagnostic_error'] = 'Saved decision trace unavailable; current analysis remains separate'
 
     def start(self):
         loops = [('account', self.refresh_account, 15), ('data', self.refresh_analysis, 60)]
@@ -101,6 +107,24 @@ class Service:
             self.state.update(data_health={'stocks':stocks, 'vix':index, 'ready':ready}, data_valid_until=min(deadlines).isoformat() if ready else None, analysis_at=checked_at.isoformat(),setup=analyze(qqq,markets,vix,checked_at) if qqq else None, observations=observations,data_errors=errors,
                 feeds={'stocks':qqq.source if qqq else 'unavailable',
                        'vix':'current' if index['status']=='current' else 'unavailable or delayed'})
+        self._record_decision(markets, vix, checked_at)
+
+    def _record_decision(self, markets, vix, checked_at):
+        """Observational only: failures cannot modify the setup or execution permission."""
+        try:
+            with self.lock:
+                state = deepcopy(self.state)
+            trace = build_decision_trace(state['setup'], markets, vix, checked_at,
+                data_health=state['data_health'], live_permission=self.executor.enabled() if self.executor else False,
+                execution_available=self.executor is not None, broker_clock=state.get('clock'),
+                account_at=state.get('account_at'))
+            saved = self.store.record_decision(trace)
+            with self.lock:
+                self.state.update(decision_trace=saved, diagnostic_error=None)
+        except Exception:
+            with self.lock:
+                self.state['diagnostic_error'] = ('Decision trace could not be saved; latest saved trace may be older '
+                                                  'than current analysis. Trading rules and permission are unchanged.')
 
     def refresh_execution(self):
         with self.lock: state = deepcopy(self.state)
@@ -114,6 +138,21 @@ class Service:
 
     def snapshot(self):
         with self.lock: result=deepcopy(self.state)
+        if result['decision_trace']:
+            trace = result['decision_trace']
+            # A restored or stalled trace describes its original checkpoint, not present readiness.
+            try:
+                captured_at = datetime.fromisoformat(trace['captured_at'])
+                if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+                    raise ValueError('Decision trace timestamp must include timezone')
+                age = (datetime.now(timezone.utc)-captured_at).total_seconds()
+                trace['matches_current_analysis'] = trace['captured_at'] == result['analysis_at']
+                trace['current_at_snapshot'] = bool(trace['matches_current_analysis'] and not result['diagnostic_error'] and 0 <= age <= 90)
+            except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+                if not isinstance(trace, dict):
+                    trace = result['decision_trace'] = {}
+                trace.update(matches_current_analysis=False, current_at_snapshot=False)
+                result['diagnostic_error'] = 'Saved decision trace timestamp is invalid; current analysis remains separate'
         expire_health(result['data_health'], datetime.now(timezone.utc))
         if result['data_health'] and result['data_health']['vix']['status'] != 'current':
             result['feeds']['vix']='unavailable or delayed'

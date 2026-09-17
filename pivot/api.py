@@ -180,6 +180,13 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     def snapshot():
         return decorate_snapshot(service.snapshot())
 
+    @app.get('/api/decisions')
+    def decisions(limit: int = 50, before_id: int | None = None):
+        try:
+            return service.store.decision_history(limit, before_id)
+        except ValueError as exc:
+            raise HTTPException(422, detail=str(exc)) from None
+
     @app.put('/api/settings')
     async def settings(request: Request):
         try:

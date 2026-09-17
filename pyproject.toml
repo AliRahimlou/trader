@@ -1,4 +1,4 @@
 [tool.pytest.ini_options]
-testpaths = ["pivot/tests", "deploy/tests"]
+testpaths = ["pivot/tests", "deploy/tests", "research/tests"]
 pythonpath = ["."]
 addopts = "-q"

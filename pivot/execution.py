@@ -14,6 +14,11 @@ from .policy import POLICY_VERSION
 from .sizing import decimal, purchase_plan
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
+WORKING_PROTECTION = {'new', 'partially_filled'}
+UNAVAILABLE_PROTECTION = {'suspended', 'done_for_day', 'pending_cancel', 'pending_replace', 'calculated'}
+# Proposed release safety policy: a submitted stop must become executable within
+# this interval. This is not a promise about venue latency or a maximum loss.
+PROTECTION_CONFIRM_SECONDS = 30
 CHECKS = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
           'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
 
@@ -116,6 +121,19 @@ class Executor:
                 self._entry(snapshot)
         except (Waiting, FeedError, ValueError) as exc:
             self.message = str(exc)
+            if isinstance(exc, FeedError):
+                # Account/clock/position reads can fail before management reaches
+                # its protection check. Preserve the deadline for a stop already
+                # known to be unconfirmed, using only durable local evidence.
+                saved = self.store.active_trade()
+                op = (saved or {}).get('ops', {}).get('stop')
+                status = ((op or {}).get('last_seen') or {}).get('status')
+                if (saved and saved['stage'] in ('open', 'exiting') and op
+                        and op['state'] == 'attempted' and status not in WORKING_PROTECTION | TERMINAL):
+                    try:
+                        self._check_unknown_protection(saved)
+                    except Waiting as uncertainty:
+                        self.message = str(uncertainty)
         except Exception:
             self.message = 'Execution needs attention: broker state could not be validated. No new order attempted.'
         finally:
@@ -213,6 +231,9 @@ class Executor:
     def _prepare(self, trade, name, payload, persist=True):
         payload = {**payload, 'client_order_id': f'pvt-{trade["id"]}-{name}'}
         trade['ops'][name] = {'state': 'prepared', 'payload': payload}
+        if name == 'stop':
+            trade['ops'][name]['confirmation_deadline'] = (
+                self.now() + timedelta(seconds=PROTECTION_CONFIRM_SECONDS)).isoformat()
         if persist:
             self.store.save_trade(trade)
 
@@ -220,30 +241,46 @@ class Executor:
         op = trade['ops'][name]
         if op['state'] == 'rejected':
             return {'status': 'rejected', 'filled_qty': '0', 'client_order_id': op['payload']['client_order_id']}
-        if op['state'] == 'prepared':
-            # Commit BEFORE POST. A crash or timeout can never produce an automatic second POST.
-            if self.store.claim_operation(trade['id'], name):
-                op['state'] = 'attempted'
-                try:
-                    order = self.broker.submit(op['payload'])
-                except BrokerRejected:
-                    op['state'] = 'rejected'
-                    op['last_seen'] = {'symbol':op['payload']['symbol'],'side':op['payload']['side'],
-                                      'status':'rejected','qty':op['payload'].get('qty'),'filled_qty':'0',
-                                      'client_order_id':op['payload']['client_order_id'],'evidence':'http_rejection'}
-                    self.store.save_trade(trade)
-                    self.store.set_control(False)
-                    self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol']})
-                    return {'status': 'rejected', 'filled_qty': '0'}
+        try:
+            if op['state'] == 'prepared':
+                # Commit BEFORE POST. A crash or timeout can never produce an automatic second POST.
+                if self.store.claim_operation(trade['id'], name):
+                    op['state'] = 'attempted'
+                    try:
+                        order = self.broker.submit(op['payload'])
+                    except BrokerRejected:
+                        op['state'] = 'rejected'
+                        op['last_seen'] = {'symbol':op['payload']['symbol'],'side':op['payload']['side'],
+                                          'status':'rejected','qty':op['payload'].get('qty'),'filled_qty':'0',
+                                          'client_order_id':op['payload']['client_order_id'],'evidence':'http_rejection'}
+                        self.store.save_trade(trade)
+                        self.store.set_control(False)
+                        self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol']})
+                        return {'status': 'rejected', 'filled_qty': '0'}
+                else:
+                    op['state'] = 'attempted'
+                    order = self.broker.lookup(op['payload']['client_order_id'])
             else:
-                op['state'] = 'attempted'
                 order = self.broker.lookup(op['payload']['client_order_id'])
-        else:
-            order = self.broker.lookup(op['payload']['client_order_id'])
+        except FeedError:
+            if name == 'stop':
+                self._check_unknown_protection(trade)
+            raise
         if not order:
+            if name == 'stop':
+                self._check_unknown_protection(trade)
             raise Waiting('Order status is uncertain. Waiting for its broker identifier; no duplicate will be sent.')
         if order.get('client_order_id') != op['payload']['client_order_id'] or order.get('symbol') != 'QQQ' or order.get('side') != op['payload']['side']:
             raise Waiting('Broker order identity mismatch; manual review required')
+        if order.get('status') == 'rejected':
+            # A successful HTTP response can later become a venue rejection.
+            # Pause entries just as for HTTP rejection, but keep the broker's
+            # actual fill evidence so existing exposure can still be managed.
+            if self.store.control().get('enabled') is True:
+                self.store.set_control(False)
+            if (op.get('last_seen') or {}).get('status') != 'rejected':
+                self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol'],
+                                                   'evidence': 'broker_status'})
         evidence = {k:order.get(k) for k in ('id','client_order_id','symbol','side','status','qty','filled_qty','filled_avg_price','updated_at','filled_at')}
         if op.get('last_seen') != evidence:
             op['last_seen'] = evidence
@@ -356,16 +393,21 @@ class Executor:
                     raise Waiting('Position closed; confirming remaining owned orders are canceled')
             self._finish(trade, 'Position closed; waiting for the next video setup')
             return
-        if not opened:
-            raise Waiting('Position still open outside the regular session. DAY protection may expire; keep this Mac running.')
-        if trade['stage'] == 'exiting':
-            self._exit(trade, position)
-            return
-        stop_order = self._order(trade, 'stop') if 'stop' in trade['ops'] else None
+        stop_order = None
+        stop_op = trade['ops'].get('stop')
+        if stop_op and (stop_op['state'] != 'prepared' or (opened and trade['stage'] != 'exiting')):
+            # Looking up an attempted order is safe outside the session, but a
+            # recovered prepared intent must not place a new after-hours stop.
+            stop_order = self._order(trade, 'stop')
         if stop_order and stop_order['status'] == 'replaced':
             self._attention(trade,'Protective order was replaced outside the app. Check QQQ protection in Alpaca now.')
-        if stop_order and stop_order['status'] in TERMINAL:
-            self._start_exit(trade, 'Protective order ended; closing remaining shares')
+        if stop_order and trade['stage'] != 'exiting':
+            failure = self._protection_failure(trade, stop_order)
+            if failure:
+                self._start_protection_exit(trade, failure)
+        if not opened:
+            raise Waiting('Position still open outside the regular session. DAY protection may expire; keep AllSpark running and connected.')
+        if trade['stage'] == 'exiting':
             self._exit(trade, position)
             return
         # On a resumed session, retire any previous day's position rather than reuse its signal.
@@ -389,8 +431,42 @@ class Executor:
             self._exit(trade, position)
         elif not stop_order:
             self._protect(trade, position)
+        elif stop_order['status'] not in WORKING_PROTECTION:
+            self.message = f'Protective order is {stop_order["status"]}; executable protection is not yet confirmed.'
         else:
             self.message = f'Managing QQQ: stop ${stop}, target ${target}. Broker protection: {stop_order["status"]}.'
+
+    def _protection_failure(self, trade, order):
+        status = order['status']
+        if status in WORKING_PROTECTION:
+            return None
+        if status in TERMINAL or status in UNAVAILABLE_PROTECTION:
+            return f'Protective order is {status}; executable protection is unavailable'
+        op = trade['ops']['stop']
+        if not op.get('confirmation_deadline'):
+            # An older durable intent gets a deadline on first observation;
+            # restarting cannot repeatedly grant another grace period.
+            op['confirmation_deadline'] = (
+                self.now() + timedelta(seconds=PROTECTION_CONFIRM_SECONDS)).isoformat()
+            self.store.save_trade(trade)
+        if self.now() >= timestamp(op['confirmation_deadline']):
+            return f'Protective order remained {status} past its confirmation deadline'
+        return None
+
+    def _start_protection_exit(self, trade, reason):
+        if self.store.control().get('enabled') is True:
+            self.store.set_control(False)
+        trade['protection_failure'] = {'at': self.now().isoformat(), 'reason': reason}
+        self._start_exit(trade, reason + '. New entries paused; canceling before closing remaining shares.')
+
+    def _check_unknown_protection(self, trade):
+        failure = self._protection_failure(trade, {'status': 'unconfirmed'})
+        if failure:
+            if not trade.get('protection_failure'):
+                self._start_protection_exit(trade, failure)
+            elif self.store.control().get('enabled') is True:
+                self.store.set_control(False)
+            raise Waiting('Protection status is uncertain past its confirmation deadline. New entries paused; no competing sale will be sent. Check the QQQ position and orders in Alpaca now.')
 
     def _protect(self, trade, position):
         payload = {'symbol': 'QQQ', 'side': 'sell' if trade['direction'] == 'long' else 'buy',
@@ -398,8 +474,9 @@ class Executor:
                    'stop_price': trade['stop'], 'time_in_force': 'day', 'extended_hours': False}
         self._prepare(trade, 'stop', payload)
         order = self._order(trade, 'stop')
-        if order['status'] == 'rejected':
-            self._start_exit(trade, 'Broker rejected protection; closing the filled shares')
+        failure = self._protection_failure(trade, order)
+        if failure:
+            self._start_protection_exit(trade, failure)
             self._exit(trade, position)
         else:
             self.message = 'Protective stop submitted. Waiting for broker confirmation.'
@@ -413,8 +490,14 @@ class Executor:
         if 'stop' in trade['ops'] and trade['ops']['stop']['state'] != 'prepared':
             order = self._order(trade, 'stop')
             if order['status'] not in TERMINAL:
-                self.broker.cancel(order['id'])
-                self.message = 'Waiting for stop cancellation before sending the exit'
+                try:
+                    self.broker.cancel(order['id'])
+                except FeedError:
+                    if trade.get('protection_failure'):
+                        raise Waiting('Protection and stop cancellation are uncertain. New entries remain paused. Check the QQQ position and orders in Alpaca now.') from None
+                    raise
+                self.message = ('Protection is not confirmed; waiting for stop cancellation before any sale. New entries paused. Check QQQ in Alpaca now.'
+                                if trade.get('protection_failure') else 'Waiting for stop cancellation before sending the exit')
                 return
         # Re-read AFTER cancellation: the stop may have filled while cancellation was in flight.
         position = self._position(trade)
