@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from pivot.execution import Executor, Waiting
+from pivot.execution import Executor, Waiting, SIGNAL_FIELDS
 from pivot.feeds import FeedError
 from pivot.store import Store
 from pivot.tests.test_execution import FakeBroker, NOW, enable, ready
@@ -33,7 +33,8 @@ def record(at=NOW, **updates):
 
 def waiting_signal(at=NOW):
     snapshot = ready(at)
-    snapshot['setup']['event_at'] = NOW.isoformat()
+    fixed_event = ready()['setup']
+    snapshot['setup'].update({field: fixed_event[field] for field in SIGNAL_FIELDS})
     snapshot['setup']['state'] = 'CONFIRMING'
     for check in snapshot['setup']['checks']:
         if check['name'] == 'Magnificent Seven at their zones':
@@ -272,13 +273,14 @@ def test_load_failure_and_invalid_revision_are_safe(diagnostic_engine, monkeypat
     assert restored.snapshot()['execution_check']['revision'] is None
 
 
-def test_malformed_signal_that_crashes_evaluation_still_has_sanitized_error_evidence(diagnostic_engine):
+def test_malformed_signal_fails_closed_with_sanitized_waiting_evidence(diagnostic_engine):
     executor, broker, store = diagnostic_engine
     enable(executor)
     snapshot = ready()
     snapshot['setup']['checks'] = [{'name': ['secret invalid key'], 'passed': True}]
     executor.tick(snapshot)
     check = store.latest_execution_check()
-    assert check['outcome'] == 'unexpected_error' and check['exception_kind'] == 'TypeError'
+    assert check['outcome'] == 'waiting' and check['exception_kind'] == 'Waiting'
+    assert check['gate'] == 'signal_checks'
     assert 'secret' not in json.dumps(check)
     assert not broker.sent

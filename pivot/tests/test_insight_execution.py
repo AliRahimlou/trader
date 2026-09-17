@@ -122,7 +122,7 @@ def test_otherwise_blocked_setup_does_not_spend_vix_quote_requests(engine, chang
 def test_previously_handled_event_skips_vix_quote_check(engine):
     executor, broker, store = engine
     snapshot = ready()
-    identity = f'{POLICY_VERSION}|QQQ|{snapshot["setup"]["event_at"]}|long'
+    identity = f'{POLICY_VERSION}|QQQ|{snapshot["setup"]["event_id"]}'
     key = sha256(identity.encode()).hexdigest()[:24]
     trade = {'id': key, 'stage': 'finished'}
     assert store.reserve_trade(trade)

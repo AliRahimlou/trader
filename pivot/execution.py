@@ -8,8 +8,10 @@ from contextlib import nullcontext
 from copy import deepcopy
 from hashlib import sha256
 from math import isfinite
+import json
 import re
 from threading import Lock
+from zoneinfo import ZoneInfo
 from .broker import BrokerRejected
 from .feeds import FeedError
 from .models import timestamp
@@ -24,6 +26,11 @@ UNAVAILABLE_PROTECTION = {'suspended', 'done_for_day', 'pending_cancel', 'pendin
 # Proposed release safety policy: a submitted stop must become executable within
 # this interval. This is not a promise about venue latency or a maximum loss.
 PROTECTION_CONFIRM_SECONDS = 30
+SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v2'
+SIGNAL_METHODS = {'four_hour_retest', 'prior_day_sweep'}
+SIGNAL_FIELDS = ('policy_version', 'strategy_id', 'event_id', 'event_origin_at',
+                 'event_at', 'event_expires_at', 'latest_evidence_at', 'event_zone')
+NEW_YORK = ZoneInfo('America/New_York')
 CHECKS = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
           'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
 SIGNAL_GATES = {'Current Nasdaq observation': 'signal_observation', 'Premarked levels': 'signal_levels',
@@ -63,6 +70,44 @@ def elapsed(at, now):
 
 def data_unexpired(until, now):
     return bool(until and 0 <= (timestamp(until) - now).total_seconds() <= 90)
+
+
+def signal_expiry(setup, now):
+    """Validate the versioned event window, independently of trade direction.
+
+    A later retest may refresh hourly evidence but cannot extend the originating
+    event's lifetime or create a second opportunity after an order attempt.
+    """
+    try:
+        if (not isinstance(setup, dict) or setup.get('policy_version') != SIGNAL_POLICY_VERSION
+                or setup.get('strategy_id') not in SIGNAL_METHODS
+                or not isinstance(setup.get('event_id'), str)
+                or not re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id'])):
+            raise ValueError
+        origin, event, expires, evidence = (
+            timestamp(setup[key]) for key in ('event_origin_at', 'event_at', 'event_expires_at', 'latest_evidence_at'))
+        zone = setup['event_zone']
+        if (not isinstance(zone, dict)
+                or any(isinstance(zone.get(key), bool) or not isinstance(zone.get(key), (int, float))
+                       or not isfinite(zone[key]) for key in ('low', 'high'))
+                or not 0 < zone['low'] <= zone['high']):
+            raise ValueError
+        established = timestamp(zone['established_at'])
+        identity = ['QQQ', setup['strategy_id'], float(zone['low']).hex(), float(zone['high']).hex(),
+                    established.astimezone(timezone.utc).isoformat(), origin.astimezone(timezone.utc).isoformat()]
+        expected_id = 'ev2_' + sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
+        if setup['event_id'] != expected_id:
+            raise ValueError
+        if (established >= origin - timedelta(minutes=60)
+                or not origin <= event <= evidence <= now < expires
+                or expires != origin + timedelta(minutes=180)
+                or not 0 <= (now - evidence).total_seconds() <= 3690
+                or any(at.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()
+                       for at in (origin, event, evidence))):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise Waiting('Waiting for a current setup under the active video rules') from None
+    return expires
 
 
 def session_open(clock, now):
@@ -162,8 +207,13 @@ class Executor:
                 'analysis_at': self._diagnostic_time(snapshot.get('analysis_at')),
                 'signal': {
                     'event_at': self._diagnostic_time(setup.get('event_at')),
+                    'event_origin_at': self._diagnostic_time(setup.get('event_origin_at')),
+                    'event_expires_at': self._diagnostic_time(setup.get('event_expires_at')),
+                    'latest_evidence_at': self._diagnostic_time(setup.get('latest_evidence_at')),
+                    'event_id': setup.get('event_id') if isinstance(setup.get('event_id'), str) and re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id']) else None,
+                    'strategy_id': setup.get('strategy_id') if isinstance(setup.get('strategy_id'), str) and setup['strategy_id'] in SIGNAL_METHODS else None,
                     'event': setup.get('event') if setup.get('event') in ('break and retest', 'sweep and reclaim', 'previous-day level sweep') else None,
-                    'policy_version': setup.get('policy_version') if setup.get('policy_version') == 'nasdaq-video-interpretation-v1' else None,
+                    'policy_version': setup.get('policy_version') if setup.get('policy_version') == SIGNAL_POLICY_VERSION else None,
                     'direction': direction if direction in ('long', 'short') else None,
                     'state': setup.get('state') if setup.get('state') in ('WATCHING', 'AT_LEVEL', 'WAITING_FOR_RETEST', 'CONFIRMING', 'SETUP_READY') else None,
                     'first_failed_gate': first_failed,
@@ -309,18 +359,20 @@ class Executor:
         self._gate('data_expiry')
         if not data_unexpired(snapshot.get('data_valid_until'), now):
             raise Waiting('Live money is on — data verification expired; waiting for a fresh update')
-        setup = snapshot.get('setup') or {}
-        checks = setup.get('checks', [])
+        setup = snapshot.get('setup') if isinstance(snapshot.get('setup'), dict) else {}
+        checks = setup.get('checks') if isinstance(setup.get('checks'), list) else []
         self._gate('signal_checks')
-        if (setup.get('state') != 'SETUP_READY' or {c['name'] for c in checks} != CHECKS
-                or not all(c['passed'] is True for c in checks)):
-            failed = next((c['name'] for c in checks if not c['passed']), 'the complete video setup')
+        if (setup.get('state') != 'SETUP_READY' or len(checks) != len(CHECKS)
+                or not all(isinstance(c, dict) and isinstance(c.get('name'), str) for c in checks)
+                or {c['name'] for c in checks} != CHECKS
+                or not all(c.get('passed') is True for c in checks)):
+            failed = next((c['name'] for c in checks if isinstance(c, dict) and isinstance(c.get('name'), str) and c['name'] in CHECKS
+                           and c.get('passed') is not True), 'the complete video setup')
             self._gate(SIGNAL_GATES.get(failed, 'signal_checks'))
             raise Waiting('Live money is on — waiting for ' + failed.lower())
         self._gate('signal_age_policy')
-        if setup.get('policy_version') != 'nasdaq-video-interpretation-v1' or not 0 <= elapsed(setup['event_at'], now) <= 3690:
-            raise Waiting('Waiting for a current setup under the active video rules')
-        identity = f'{POLICY_VERSION}|QQQ|{setup["event_at"]}|{setup["direction"]}'
+        expires = signal_expiry(setup, now)
+        identity = f'{POLICY_VERSION}|QQQ|{setup["event_id"]}'
         key = sha256(identity.encode()).hexdigest()[:24]
         self._gate('setup_deduplication')
         if self.store.trade_exists(key):
@@ -352,7 +404,7 @@ class Executor:
         quote = self.broker.quote('QQQ')
         self._gate('quote_validation')
         bid, ask = checked_quote(quote, self.now())
-        entry_valid_until = min(timestamp(snapshot['data_valid_until']), timestamp(quote['t'])+timedelta(seconds=15)).isoformat()
+        entry_valid_until = min(timestamp(snapshot['data_valid_until']), timestamp(quote['t'])+timedelta(seconds=15), expires).isoformat()
         direction = setup['direction']
         self._gate('signal_direction')
         if direction not in ('long', 'short'):
@@ -391,9 +443,11 @@ class Executor:
         if not 0 <= elapsed(snapshot['analysis_at'], self.now()) <= 90:
             raise Waiting('Strategy data aged during broker checks; waiting for the next analysis')
         self._gate('final_data_expiry')
+        signal_expiry(setup, self.now())
         if not data_unexpired(entry_valid_until, self.now()):
             raise Waiting('Data verification expired during broker checks; waiting for a fresh update')
-        # One attempt per event/direction, including a rejected or completed attempt.
+        # One attempt per underlying event, including a rejected or completed
+        # attempt. A later retest or changed leader direction cannot re-enter it.
         payload = {'symbol': 'QQQ', 'side': 'buy' if direction == 'long' else 'sell',
                    'type': 'market', 'time_in_force': 'day', 'extended_hours': False}
         if direction == 'long' and asset.get('fractionable') is True:
@@ -401,6 +455,7 @@ class Executor:
         else:
             payload['qty'] = plan['quantity']
         trade = {'id': key, 'stage': 'entering', 'symbol': 'QQQ', 'direction': direction,
+                 'signal': {field: setup[field] for field in SIGNAL_FIELDS},
                  'amount': plan['target_dollars'], 'stop': str(stop), 'target': str(target),
                  'created_at': self.now().isoformat(), 'data_valid_until': entry_valid_until, 'ops': {}, 'exit_number': 0, 'account_ref': account['account_ref']}
         self._prepare(trade, 'entry', payload, persist=False)
@@ -429,6 +484,12 @@ class Executor:
 
     def _prepared_entry_expired(self, trade, clock):
         now = self.now()
+        try:
+            signal_expiry(trade.get('signal') or {}, now)
+        except Waiting:
+            # Only unsent entry intents need the current signal contract. An
+            # already attempted entry or held position still needs management.
+            return True
         return (not self.enabled() or not session_open(clock, now) or closing(clock, now, 600)
                 or elapsed(trade['created_at'], now) > 10 or not data_unexpired(trade.get('data_valid_until'), now))
 
