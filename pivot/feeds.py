@@ -1,5 +1,6 @@
 """Read-only provider adapters. Credentials never enter snapshots or error messages."""
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone, time, date
 from zoneinfo import ZoneInfo
 import os
@@ -11,6 +12,12 @@ import requests
 from .models import Bar, Market, MAG7, timestamp
 
 ET = ZoneInfo('America/New_York')
+LEADER_HISTORY_SESSIONS = 7
+
+
+def leader_history_sessions(sessions):
+    """Actual recent sessions for native five-minute leader history."""
+    return dict(sorted(sessions.items())[-LEADER_HISTORY_SESSIONS:])
 
 
 class FeedError(RuntimeError):
@@ -121,7 +128,7 @@ class ReadOnlyFeeds:
             if token is None or token == '':
                 missing = [symbol for symbol in symbols if not output.get(symbol)]
                 if missing:
-                    raise FeedError('Completed stock history missing: ' + ', '.join(missing))
+                    raise FeedError(f'Completed {minutes}-minute stock history missing: ' + ', '.join(missing))
                 return dict(output)
             if not isinstance(token, str):
                 raise FeedError('Invalid stock pagination token')
@@ -159,40 +166,56 @@ class ReadOnlyFeeds:
             # Start at a session boundary so the earliest historical day is complete.
             start = (now.astimezone(ET) - timedelta(days=60)).replace(hour=0, minute=0, second=0, microsecond=0)
             cache = getattr(self, '_stock_cache', None)
-            full = (not cache or cache['feed'] != self.feed or now < cache['at']
+            full = (not cache or 'leader_bars' not in cache or cache['feed'] != self.feed or now < cache['at']
                     or (now - cache['full_at']).total_seconds() >= 3600)
             if full or cache['at'].astimezone(ET).date() != now.astimezone(ET).date():
                 sessions = self.stock_calendar(start, now)
             else:
                 sessions = self.stock_sessions
-            self.stock_sessions = sessions
             session_days = list(sessions)
+            leader_sessions = leader_history_sessions(sessions)
+            leader_start = next(iter(leader_sessions.values()))['open']
             # Re-read both the previous and current trading session, including corrections.
             overlap_day = session_days[-2] if len(session_days) >= 2 else session_days[0]
             overlap = sessions[overlap_day]['open']
             fetch_start = start if full else overlap
-            fetched = self.stock_bars(symbols, 15, fetch_start, now, sessions=sessions)
-            context = {}
-            for symbol in symbols:
-                retained = [] if full else [bar for bar in cache['bars'][symbol]
-                                            if start <= bar.end - timedelta(minutes=15) < overlap]
-                combined = retained + fetched[symbol]
-                # Validate the merged result before replacing any cached history.
-                if any(a.end >= b.end for a, b in zip(combined, combined[1:])):
-                    raise FeedError('Merged stock history is duplicated or out of order')
-                context[symbol] = combined
+            leader_fetch_start = leader_start if full else max(leader_start, overlap)
+            # Genuine provider five-minute candles are fetched separately; fifteen-minute
+            # candles are never split, relabeled or forward-filled into faster input.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                context_future = pool.submit(self.stock_bars, symbols, 15, fetch_start, now, sessions)
+                leaders_future = pool.submit(self.stock_bars, MAG7, 5, leader_fetch_start, now, leader_sessions)
+                fetched, leader_fetched = context_future.result(), leaders_future.result()
+            context, leader_context = {}, {}
+            for minutes, names, incoming, target, cache_key, earliest in (
+                (15, symbols, fetched, context, 'bars', start),
+                (5, MAG7, leader_fetched, leader_context, 'leader_bars', leader_start),
+            ):
+                for symbol in names:
+                    retained = [] if full else [bar for bar in cache[cache_key][symbol]
+                                                if earliest <= bar.end - timedelta(minutes=minutes) < overlap]
+                    combined = retained + incoming[symbol]
+                    # Both frame histories must validate before either cache is published.
+                    if any(a.end >= b.end for a, b in zip(combined, combined[1:])):
+                        raise FeedError('Merged stock history is duplicated or out of order')
+                    target[symbol] = combined
             previous_days = [day for day in session_days if day < now.astimezone(ET).date().isoformat()]
             previous_session = previous_days[-1] if previous_days else None
             result = {}
             for symbol, bars in context.items():
                 frames = {15: bars, 60: resample(bars, 60, sessions),
                           240: resample(bars, 240, sessions), 1440: daily(bars, sessions)}
+                if symbol in leader_context:
+                    frames[5] = leader_context[symbol]
                 result[symbol] = Market(symbol, frames, f'alpaca_{self.feed}', True, now,
                                         previous_session=previous_session)
             # Only successful, fully validated results replace the cache. A failed refresh
             # raises to the caller; cached data is never relabeled as a successful fetch.
-            self._stock_cache = {'feed': self.feed, 'bars': {s: list(b) for s, b in context.items()}, 'at': now,
-                                 'full_at': now if full else cache['full_at']}
+            self._stock_cache = {'feed': self.feed, 'bars': {s: list(b) for s, b in context.items()},
+                                 'leader_bars': {s: list(b) for s, b in leader_context.items()},
+                                 'at': now, 'full_at': now if full else cache['full_at']}
+            self.stock_sessions = sessions
+            self.stock_leader_sessions = leader_sessions
             self.stock_last_full_at = self._stock_cache['full_at']
             self.stock_refresh_mode = 'full' if full else 'incremental'
             return result

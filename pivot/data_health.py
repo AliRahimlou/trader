@@ -4,8 +4,9 @@ from math import isfinite
 from .models import MAG7, timestamp
 from .strategy import closed, vix_candles_fresh
 from .history_health import frame_gaps
+from .feeds import leader_history_sessions, LEADER_HISTORY_SESSIONS
 
-LABELS = {15: '15-minute', 60: '1-hour', 240: '4-hour', 1440: 'Daily'}
+LABELS = {5: '5-minute', 15: '15-minute', 60: '1-hour', 240: '4-hour', 1440: 'Daily'}
 
 
 def last_expected(sessions, minutes, now):
@@ -26,14 +27,16 @@ def last_expected(sessions, minutes, now):
 
 def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refresh_mode=None, full_at=None):
     instruments = []
+    recent_sessions = leader_history_sessions(sessions)
     for symbol in ('QQQ', *MAG7):
         market = markets.get(symbol)
         frames = []
-        for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else (15, 240)):
+        for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else (5, 15, 240)):
             bars = closed(market, minutes, now) if market else []
             latest = bars[-1].end if bars else None
-            expected = last_expected(sessions, minutes, now)
-            gaps = frame_gaps(bars, sessions, minutes, now)
+            frame_sessions = recent_sessions if minutes == 5 else sessions
+            expected = last_expected(frame_sessions, minutes, now)
+            gaps = frame_gaps(bars, frame_sessions, minutes, now)
             if not bars:
                 status, reason = 'missing', 'No validated completed candles'
             elif expected and latest < expected:
@@ -47,7 +50,10 @@ def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refr
             frames.append({'minutes': minutes, 'label': LABELS[minutes], 'status': status,
                            'reason': reason, 'count': len(bars), 'latest_at': latest.isoformat() if latest else None,
                            'expected_at': expected.isoformat() if expected else None,
-                           'missing_count': gaps['missing_count'], 'first_missing_at': gaps['first_missing_at']})
+                           'missing_count': gaps['missing_count'], 'first_missing_at': gaps['first_missing_at'],
+                           'history_scope': f'Last {LEADER_HISTORY_SESSIONS} trading sessions; native provider candles' if minutes == 5 else '60 calendar days',
+                           'history_session_count': len(frame_sessions),
+                           'history_from': min((timestamp(s['open']) for s in frame_sessions.values()), default=None).isoformat() if frame_sessions else None})
         valid_age = market and 0 <= (now - market.observed_at).total_seconds() <= 90
         okay = bool(market and market.realtime and valid_age and all(f['status'] == 'current' for f in frames))
         instruments.append({'symbol': symbol, 'status': 'current' if okay else 'needs_attention',
@@ -59,7 +65,7 @@ def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refr
             'coverage': 'IEX only; one exchange' if source == 'alpaca_iex' else 'Consolidated US exchanges' if source == 'alpaca_sip' else 'Unavailable',
             'source': source, 'instruments': instruments, 'error': error, 'fetch_seconds': fetch_seconds,
             'refresh_mode': refresh_mode, 'last_full_refresh_at': full_at.isoformat() if full_at else None,
-            'frame_policy': 'Full regular-session hourly and 4-hour buckets only; the short closing bucket is excluded. Daily candles cover the actual full session, including early closes.'}
+            'frame_policy': f'Leader 5-minute candles are native Alpaca data for the last {LEADER_HISTORY_SESSIONS} trading sessions; 15-minute and higher context retains 60 calendar days. Full regular-session hourly and 4-hour buckets only; the short closing bucket is excluded. Daily candles cover the actual full session, including early closes.'}
 
 
 def vix_health(market, now, error=None, details=None):
