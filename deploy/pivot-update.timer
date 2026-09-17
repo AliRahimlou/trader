@@ -1,10 +1,11 @@
 [Unit]
-Description=Check for a new Pivot release every five minutes
+Description=Check for a tested Pivot release every thirty seconds
 
 [Timer]
 OnBootSec=2min
-OnUnitInactiveSec=5min
-RandomizedDelaySec=15s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+RandomizedDelaySec=5s
 Unit=pivot-update.service
 
 [Install]

@@ -34,6 +34,13 @@ export function appStatus(snapshot, now=Date.now()) {
     title:'Review updated live rules',
     text:'The execution rules have changed. Use the Live money switch at the top right to review the updated rules before allowing new entries.',
   };
+  const gate=snapshot.deployment_gate;
+  if(gate?.configured===true && (gate.locked===true || gate.hold_present===true || gate.error)) return {
+    title:snapshot.live_enabled?'Live money on · entries paused for update':'New entries paused for update',
+    text:gate.error?'The app cannot verify its update lock. New entries remain paused; existing positions continue their exits. Your saved Live money setting is unchanged.':
+      gate.hold_present===true && gate.hold_valid!==true?'A saved update hold needs verification. New entries remain paused until it is resolved. Existing positions continue their exits; your saved Live money setting is unchanged.':
+      'An app update is temporarily holding new entries. Existing positions continue their exits; your saved Live money setting is unchanged.',
+  };
   if(snapshot.clock?.is_open===false && age(snapshot.account_at,now)<=60 && !snapshot.account_error) return {
     title:snapshot.live_enabled?'Live money on · market closed':'Market closed · watching account status',
     text:'The regular market session is closed. New entries wait for the next session and fresh strategy checks.',
@@ -84,8 +91,11 @@ export function releaseStatus(snapshot, now=Date.now()) {
   if(activeRevision!==revision) return {...result,detail:`${pending?`Update ${pending} is not installed. `:''}Update status does not match the running version; verification is needed.`};
   if(pending) {
     const details={
-      waiting_off:`Update ${pending} queued · not installed. Turn Live money off to install.`,
-      blocked_exposure:`Update ${pending} queued · not installed. Waiting for positions and orders to finish.`,
+      waiting_off:`Update ${pending} queued · not installed. The installed updater needs a one-time upgrade.`,
+      bootstrap_required:`Update ${pending} queued · not installed. The installed updater needs a one-time upgrade.`,
+      waiting_entry:`Update ${pending} queued · not installed. Waiting for the current entry check to finish.`,
+      blocked_exposure:`Update ${pending} queued · not installed. Waiting for a verified account with no open positions or orders.`,
+      recovery_required:`Update ${pending} needs recovery. New entries remain paused; installation is unconfirmed.`,
       built:`Update ${pending} prepared · not installed.`,
       building:`Preparing update ${pending} · not installed.`,
       deploying:`Installing update ${pending} · still running ${revision.slice(0,7)}.`,
@@ -93,8 +103,8 @@ export function releaseStatus(snapshot, now=Date.now()) {
       error:`Update ${pending} is not installed; update checks need attention.`,
     };
     return {...result,detail:Object.hasOwn(details,state)?details[state]:`Update ${pending} is not installed; update status needs verification.`,
-      tone:['waiting_off','blocked_exposure','built','building','deploying'].includes(state)?'pending':'unknown',
-      queued:['waiting_off','blocked_exposure','built'].includes(state)};
+      tone:['waiting_off','bootstrap_required','waiting_entry','blocked_exposure','built','building','deploying'].includes(state)?'pending':'unknown',
+      queued:['waiting_off','bootstrap_required','waiting_entry','blocked_exposure','built'].includes(state)};
   }
   if(state==='current') return {...result,detail:'Latest checked release.',tone:'current',current:true};
   const details={
@@ -103,6 +113,7 @@ export function releaseStatus(snapshot, now=Date.now()) {
     building:'Preparing an update; installed version shown.',
     deploying:'Update installation in progress; installed version shown.',
     rolled_back:'Previous version restored after an unsuccessful update.',
+    recovery_required:'Update recovery needs attention. New entries remain paused.',
     error:'Update checks need attention; installed version shown.',
   };
   return {...result,detail:Object.hasOwn(details,state)?details[state]:'Update status is unconfirmed; installed version shown.'};

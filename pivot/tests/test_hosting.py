@@ -67,7 +67,7 @@ def test_deployment_revision_is_validated_and_reported_without_other_environment
         for route in ('/api/health', '/api/snapshot'):
             response = client.get(route)
             assert response.json()['revision'] == revision
-            assert response.json()['app_version'] == '2.1.1'
+            assert response.json()['app_version'] == '2.2.0'
             assert 'hidden' not in response.text
     with pytest.raises(ValueError, match='PIVOT_REVISION'):
         Hosting.from_values({'PIVOT_REVISION': 'accidental-secret-not-a-commit'})
@@ -180,18 +180,21 @@ def test_live_enable_holds_shared_lock_until_permission_change_completes(tmp_pat
         fcntl.flock(deployment, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def test_remote_update_status_exposes_only_validated_display_fields(tmp_path):
+@pytest.mark.parametrize('state', ['waiting_off', 'bootstrap_required', 'waiting_entry', 'recovery_required'])
+def test_remote_update_status_exposes_only_validated_display_fields(tmp_path, state):
     now = datetime.now(timezone.utc)
     path = tmp_path / 'deployment-status.json'
-    path.write_text(json.dumps({'state': 'waiting_off', 'checked_at': now.isoformat(),
+    path.write_text(json.dumps({'state': state, 'checked_at': now.isoformat(),
         'active_revision': 'a' * 40, 'candidate_revision': 'b' * 40,
         'reason': 'secret credentials in command output', 'private_key': 'secret-api-key'}))
     with TestClient(create_app(ServiceStub(), background=False,
         hosting=Hosting('https://media.example.com', '/pivot'), deployment_status_path=path)) as client:
         response = client.get('/api/snapshot')
         status = response.json()['deployment']
-        assert status['state'] == 'waiting_off'
-        assert status['message'] == 'Update waiting: turn Live money Off to install.'
+        assert status['state'] == state
+        assert 'turn Live money Off' not in status['message']
+        if state in ('waiting_off', 'bootstrap_required'):
+            assert status['message'] == 'Update queued: the installed updater needs a one-time upgrade.'
         assert status['active_revision'] == 'a' * 40
         assert status['candidate_revision'] == 'b' * 40
         assert 'secret' not in response.text

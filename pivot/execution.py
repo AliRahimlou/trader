@@ -4,6 +4,7 @@ Every broker POST has a durable, unique intent. An uncertain response is looked 
 never blindly retried. This module is also exercised with an offline fake broker.
 """
 from datetime import datetime, timezone, timedelta
+from contextlib import nullcontext
 from copy import deepcopy
 from hashlib import sha256
 from math import isfinite
@@ -15,6 +16,7 @@ from .models import timestamp
 from .policy import POLICY_VERSION
 from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
+from .deployment import DeploymentHold
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
 WORKING_PROTECTION = {'new', 'partially_filled'}
@@ -28,7 +30,7 @@ SIGNAL_GATES = {'Current Nasdaq observation': 'signal_observation', 'Premarked l
                 'Nasdaq level event': 'signal_event', 'Magnificent Seven at their zones': 'signal_leaders',
                 'Actual VIX zone reaction': 'signal_vix', 'Stop and target': 'signal_exits'}
 EXECUTION_GATES = set(SIGNAL_GATES.values()) | {
-    'runtime_state', 'live_permission', 'vix_candles', 'analysis_freshness', 'data_expiry',
+    'runtime_state', 'live_permission', 'deployment_hold', 'vix_candles', 'analysis_freshness', 'data_expiry',
     'signal_checks', 'signal_age_policy', 'setup_deduplication', 'broker_snapshot', 'account_status',
     'account_identity', 'account_mode', 'market_session', 'entry_cutoff', 'existing_exposure',
     'asset_eligibility', 'quote_read', 'quote_validation', 'quote_stale', 'quote_invalid', 'quote_spread',
@@ -94,6 +96,7 @@ class Executor:
         self.broker, self.store = broker, store
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.tick_lock, self.entry_lock = Lock(), Lock()
+        self.entry_gate = None
         self.message = 'Live money is off. Analysis continues.'
         self.last_at = None
         self.revision = revision
@@ -253,11 +256,14 @@ class Executor:
                 self.message = 'Live money is off. Analysis continues.'
             else:
                 outcome = 'entry_planned'
-                self._entry(snapshot)
-        except (Waiting, FeedError, ValueError) as exc:
-            outcome = 'waiting' if isinstance(exc, Waiting) else 'feed_error' if isinstance(exc, FeedError) else 'invalid_data'
-            exception_kind = 'Waiting' if isinstance(exc, Waiting) else 'FeedError' if isinstance(exc, FeedError) else 'ValueError'
-            if isinstance(exc, Waiting) and isinstance(exc.code, str) and exc.code in EXECUTION_GATES:
+                # The updater's exclusive lock cannot begin between broker reads,
+                # durable reservation and the first entry submission.
+                with self.entry_gate.admit() if self.entry_gate else nullcontext():
+                    self._entry(snapshot)
+        except (Waiting, DeploymentHold, FeedError, ValueError) as exc:
+            outcome = 'waiting' if isinstance(exc, (Waiting, DeploymentHold)) else 'feed_error' if isinstance(exc, FeedError) else 'invalid_data'
+            exception_kind = 'Waiting' if isinstance(exc, (Waiting, DeploymentHold)) else 'FeedError' if isinstance(exc, FeedError) else 'ValueError'
+            if isinstance(exc, (Waiting, DeploymentHold)) and isinstance(exc.code, str) and exc.code in EXECUTION_GATES:
                 self._gate(exc.code)
             self.message = str(exc)
             if isinstance(exc, FeedError):
@@ -421,7 +427,26 @@ class Executor:
         if persist:
             self.store.save_trade(trade)
 
+    def _prepared_entry_expired(self, trade, clock):
+        now = self.now()
+        return (not self.enabled() or not session_open(clock, now) or closing(clock, now, 600)
+                or elapsed(trade['created_at'], now) > 10 or not data_unexpired(trade.get('data_valid_until'), now))
+
     def _order(self, trade, name):
+        if name == 'entry' and trade['ops'][name]['state'] == 'prepared':
+            # Recovered durable intents also need admission. Acquire deployment
+            # before entry_lock; live-off keeps its existing entry_lock ordering.
+            with self.entry_gate.admit() if self.entry_gate else nullcontext():
+                with self.entry_lock:
+                    self._gate('broker_snapshot')
+                    clock = self.broker.clock()
+                    if self._prepared_entry_expired(trade, clock):
+                        self._finish(trade, 'Entry expired before submission; no order sent')
+                        return None
+                    return self._order_admitted(trade, name)
+        return self._order_admitted(trade, name)
+
+    def _order_admitted(self, trade, name):
         self._gate('order_reconciliation')
         self._diagnostic_trade = trade
         op = trade['ops'][name]
@@ -558,11 +583,14 @@ class Executor:
         now = self.now()
         opened = session_open(clock, now)
         if trade['stage'] == 'entering':
+            # Expiry is not new exposure and must keep working during a hold.
             with self.entry_lock:
-                if trade['ops']['entry']['state'] == 'prepared' and (not self.enabled() or not opened or closing(clock, now, 600) or elapsed(trade['created_at'], now) > 10 or not data_unexpired(trade.get('data_valid_until'), now)):
+                if trade['ops']['entry']['state'] == 'prepared' and self._prepared_entry_expired(trade, clock):
                     self._finish(trade, 'Entry expired before submission; no order sent')
                     return
-                order = self._order(trade, 'entry')
+            order = self._order(trade, 'entry')
+            if order is None:
+                return
             if order['status']=='replaced':
                 self._attention(trade,'Entry order was replaced outside the app. Check the QQQ position and orders in Alpaca now.')
             if order['status'] not in TERMINAL:
