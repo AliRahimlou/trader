@@ -32,7 +32,7 @@ export function appStatus(snapshot, now=Date.now()) {
   if(trade) return {title:`QQQ · ${trade.stage}`,text:snapshot.execution?.message || 'Managing the open position.'};
   if(snapshot.review_required || snapshot.execution?.review_required) return {
     title:'Review updated live rules',
-    text:'The VIX feed and free-data request limits have changed. Use the Live money switch at the top right to review the updated rules before allowing new entries.',
+    text:'The execution rules have changed. Use the Live money switch at the top right to review the updated rules before allowing new entries.',
   };
   if(snapshot.clock?.is_open===false && age(snapshot.account_at,now)<=60 && !snapshot.account_error) return {
     title:snapshot.live_enabled?'Live money on · market closed':'Market closed · watching account status',
