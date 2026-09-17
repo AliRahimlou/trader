@@ -274,12 +274,16 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     result['direction']=direction
     okay,detail=vix_confirmation(vix,direction,now)
     check('Actual VIX zone reaction',okay,detail)
-    targets=[z.low for z in levels if z.low>bar.close] if direction=='long' else [z.high for z in levels if z.high<bar.close]
+    # Both location sources were already validated and premarked above. A
+    # previous-day sweep must not require an unrelated four-hour target when
+    # an eligible previous-day boundary supplies the next opposing level.
+    target_levels=levels+previous
+    targets=[z.low for z in target_levels if z.low>bar.close] if direction=='long' else [z.high for z in target_levels if z.high<bar.close]
     target=(min(targets) if direction=='long' else max(targets)) if targets else None
     stop=min(zone.low,bar.low)-0.01 if direction=='long' else max(zone.high,bar.high)+0.01
     # This exit policy is an explicit implementation proposal, not specified in V2/V3.
     geometry=target is not None and (stop<bar.close<target if direction=='long' else target<bar.close<stop)
-    check('Stop and target',geometry,'Execution policy: stop beyond event/zone, target next premarked opposing level; the videos omit exit rules')
+    check('Stop and target',geometry,'Execution policy: stop beyond event/zone, target next opposing premarked 4-hour or previous-day level; the videos omit exit rules')
     result.update(stop=round(stop,2),target=round(target,2) if target else None)
     if all(c['passed'] for c in checks):
         result.update(state='SETUP_READY', execution_blocker='Owner permission and current broker checks still required')

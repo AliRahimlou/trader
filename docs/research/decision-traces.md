@@ -2,6 +2,10 @@
 
 The research branch adds observational traces to each completed analysis refresh. This is software instrumentation; it does not change signal conditions, saved settings, permissions, orders or deployment.
 
+## Remote review
+
+The hosted `GET /api/decisions` route returns saved history through the same password-protected Caddy route as the rest of the app. It performs no provider request or broker action. Pages default to 50 entries, accept at most 100, and return `next_before_id` for the next page. Pass that value as `before_id`; entries are ordered by descending insertion ID. Repeated evidence updates its original row, so use each row's observation timestamps rather than treating insertion order or polling count as independent opportunities. `historical_only` is always true; saved permission or freshness never authorizes a current order.
+
 ## What is recorded
 
 `snapshot.decision_trace` contains:

@@ -10,7 +10,7 @@ POLICY = {
         'Actual VIX candles come from InsightSentry Free, refreshed after completed 15-minute periods. A fresh actual-index quote is required before entry; cached quotes are never treated as fresh.',
         'The free data allowance has a durable request limit. Missing candles, delayed data, an exhausted allowance or an unsuccessful quote check blocks new entries. A quote can be attempted once per candle period.',
         'Buy the saved dollar amount. Shorts require whole shares within 1% of that amount, account permission and borrow availability.',
-        'Stop beyond the event/zone; take profit at the next opposing level. One position at a time. Start closing five minutes before market close.',
+        'Stop beyond the event/zone; take profit at the next opposing premarked 4-hour or previous-day level. These exit rules are engineering choices, not specified in the videos. One position at a time. Start closing five minutes before market close.',
         'Broker stop orders are placed after entry fills. Targets and end-of-day exits require the host machine to remain running and connected. Fractional stops expire each day.',
         'Rejected orders pause new entries. Unconfirmed stop protection has a persistent 30-second acceptance deadline; nonworking protection pauses entries and starts cancellation-safe recovery. Unknown cancellation or broker state requires owner review and cannot authorize a competing sale.',
         'Off stops new entries and cancels unfinished entries; existing positions continue their exits. Fills, slippage and profits are not guaranteed.',

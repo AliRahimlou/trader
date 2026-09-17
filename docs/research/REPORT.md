@@ -1,5 +1,7 @@
 # Pivot research result — September 17, 2026
 
+This report records the research completed at `c3e41c3` before the subsequent production-release request. See the [later release and monitoring plan](../production-review-plan.md) and [additional primary-source audit](primary-source-followup-20260917.md) for follow-up work; the results below retain their original code/data provenance.
+
 ## Decision
 
 **Improved software and reproducible diagnostics. No demonstrated trading edge. Do not promote a different strategy to live trading.**

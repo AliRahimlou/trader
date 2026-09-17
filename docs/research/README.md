@@ -1,6 +1,6 @@
 # Research release: reproduce, review, and promote
 
-Start with [the result report](REPORT.md), [primary-source rules](source-rule-map.md), and [execution validation](execution-validation.md). This is an isolated local release candidate. **Nothing here was pushed to the watched GitHub `main` branch or deployed.**
+Start with [the result report](REPORT.md), [primary-source rules](source-rule-map.md), and [execution validation](execution-validation.md). The original research was completed locally at `c3e41c3` without a push or deployment. The owner subsequently requested a $5 production release; see the [production review plan](../production-review-plan.md) for that later scope and the remaining fidelity limitations.
 
 ## Reproduce locally
 
@@ -16,6 +16,8 @@ node --test pivot/web/model.test.mjs
 During this task the existing `/Users/alirahimlou/myapps/trader/.venv/bin/python` supplied the same Python dependencies; the worktree has no copy of live credentials or runtime database. Research tests are included in the default suite and release image test stage. The final runtime image does not contain the research package.
 
 ### Exact replay of the frozen dataset
+
+Use a separate checkout of research commit `c3e41c3` for byte-identical reproduction of the original report. Later release commits correct target selection and add diagnostics; their outputs must be treated as a new run, not relabeled as the old frozen implementation.
 
 ```sh
 .venv/bin/python -m research.verify_baseline \

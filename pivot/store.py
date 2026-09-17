@@ -49,6 +49,22 @@ class Store:
                              'FROM decision_traces ORDER BY last_observed_at DESC,id DESC LIMIT 1').fetchone()
         return self._decision_row(row)
 
+    def decision_history(self, limit=50, before_id=None):
+        """Bounded read-only pages for remote audits; repeated observations keep one ID."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('Decision limit must be between 1 and 100')
+        if before_id is not None and (type(before_id) is not int or not 1 <= before_id <= 2**63 - 1):
+            raise ValueError('Decision cursor must be a positive signed 64-bit integer')
+        where = ' WHERE id < ?' if before_id is not None else ''
+        params = ([before_id] if before_id is not None else []) + [limit + 1]
+        with self.connect() as db:
+            rows = db.execute('SELECT id,first_observed_at,last_observed_at,observation_count,body '
+                              'FROM decision_traces' + where + ' ORDER BY id DESC LIMIT ?', params).fetchall()
+        entries = [self._decision_row(row) for row in rows[:limit]]
+        return {'entries': entries, 'next_before_id': entries[-1]['id'] if len(rows) > limit else None,
+                'order': 'descending insertion ID; repeated evidence updates its existing row',
+                'historical_only': True}
+
     def record_decision(self, trace):
         """One durable row per checkpoint/evidence state; existing ledgers migrate in place."""
         from .diagnostics import VERSION, evidence_fingerprint
