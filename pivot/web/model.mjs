@@ -45,9 +45,48 @@ export function appStatus(snapshot, now=Date.now()) {
     title:snapshot.live_enabled?'Live money on · market closed':'Market closed · watching account status',
     text:'The regular market session is closed. New entries wait for the next session and fresh strategy checks.',
   };
+  if (snapshot.data_health?.stocks && snapshot.data_health.stocks.status!=='current') return {
+    title:'Waiting for complete stock data',
+    text:'One or more required stock candles are missing or out of date. Open Data connections to see the affected input.',
+  };
   const title=age(snapshot.analysis_at,now)>90?'Waiting for a current analysis':snapshot.live_enabled?
-    (vixStatus(snapshot.data_health?.vix,now).label==='Candles ready'?'Live money on · watching for a setup':'Live money on · waiting for VIX'):'Watching the primary Nasdaq flow';
+    (vixStatus(snapshot.data_health?.vix,now).label==='Candles ready'?'Live money on · watching for a setup':'Live money on · waiting for VIX'):'Watching both Nasdaq methods';
   return {title,text:snapshot.execution?.message || 'Live money is off. Analysis continues.'};
+}
+export function strategyViews(snapshot, now=Date.now()) {
+  const current=age(snapshot?.analysis_at,now)<=90;
+  const methods=snapshot?.setup?.strategies;
+  if (!Array.isArray(methods) || !methods.length) return [{id:'waiting',label:'Nasdaq methods',state:'Waiting for analysis',
+    detail:'Waiting for the first complete analysis of both entry methods.',checks:[],current:false,selected:false}];
+  return methods.map(method=>{
+    const checks=Array.isArray(method.checks)?method.checks:[];
+    const blocked=checks.find(check=>check.passed!==true);
+    const qualified=method.state==='SETUP_READY' && checks.length>0 && !blocked;
+    const state=!current?'Analysis out of date':qualified?'Setup found':String(method.state || 'WATCHING').replaceAll('_',' ').toLowerCase();
+    const detail=!current?'Waiting for a current analysis. Saved observations cannot authorize an entry.':
+      qualified?'The strategy checks pass. Fresh broker checks and your Live money permission are still required.':
+      blocked?.name==='Premarked levels'?(method.id==='prior_day_sweep'?'Waiting for verified previous-day high and low.':'Waiting for repeated historical touches or crossings to establish an area.'):
+      blocked?.name==='Magnificent Seven at their zones'?'Waiting for at least four technology leaders to agree, with none opposing.':
+      blocked?.detail || 'Waiting for the next qualifying observation.';
+    const reference=snapshot?.observations?.find(row=>row.symbol==='QQQ')?.price;
+    const levels=(Array.isArray(method.levels)?method.levels:[]).filter(z=>[z.low,z.high].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)&&z.low<=z.high);
+    const distance=z=>Math.max(z.low-reference,reference-z.high,0);
+    const area=typeof reference==='number' && Number.isFinite(reference)?levels.sort((a,b)=>distance(a)-distance(b)||a.low-b.low)[0]:null;
+    return {...method,checks,state,detail,current,area:current?area:null,qualified:current&&qualified,selected:snapshot.setup.strategy_id===method.id};
+  });
+}
+export function leaderOverview(snapshot, now=Date.now()) {
+  const trace=snapshot?.decision_trace;
+  if (!trace || trace.current_at_snapshot!==true || age(trace.captured_at,now)>90 || snapshot.diagnostic_error)
+    return {current:false,detail:'Waiting for current saved leader observations.',rows:[]};
+  const names=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','TSLA'];
+  const rows=names.map(symbol=>{
+    const observation=trace.leaders?.[symbol] || {};
+    const vote=['long','short'].includes(observation.vote)?observation.vote:null;
+    return {symbol,vote,label:vote==='long'?'Up':vote==='short'?'Down':'Waiting',reason:observation.reason || 'Observation missing'};
+  });
+  const up=rows.filter(row=>row.vote==='long').length, down=rows.filter(row=>row.vote==='short').length;
+  return {current:true,rows,detail:`5-minute leaders · ${up} up / ${down} down. Need 4 agreeing and none opposing.`};
 }
 export function loggingStatus(snapshot, now=Date.now()) {
   const signal=snapshot?.decision_trace, execution=snapshot?.execution_check;

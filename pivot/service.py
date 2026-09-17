@@ -88,10 +88,11 @@ class Service:
                 errors.append('VIX: '+vix_error)
         observations=[]
         for symbol,market in markets.items():
-            bars=[b for b in market.bars.get(15,[]) if b.end<=now]
+            minutes=15 if symbol=='QQQ' else 5
+            bars=[b for b in market.bars.get(minutes,[]) if b.end<=now]
             if bars:
                 observations.append({'symbol':symbol,'price':bars[-1].close,'at':bars[-1].end.isoformat(),
-                                     'kind':'15-minute close; observation only'})
+                                     'kind':f'{minutes}-minute close; observation only'})
         checked_at=datetime.now(timezone.utc)
         stocks=stock_health(markets, getattr(self.feeds, 'stock_sessions', {}), checked_at, error=stock_error,
             fetch_seconds=getattr(self.feeds, 'stock_fetch_seconds', None), refresh_mode=getattr(self.feeds, 'stock_refresh_mode', None),
@@ -162,7 +163,7 @@ class Service:
         if self.executor: result.update(self.executor.snapshot())
         result.update(settings=self.store.settings(), rulebook=rulebook(), events=self.store.events(),
                       trade_results=self.store.trade_results(),
-                      execution_policy=POLICY, version='video-execution-v3', runtime='Video strategy · owner-controlled execution', legacy_loaded=False)
+                      execution_policy=POLICY, version='video-execution-v4', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
         return result
 
     def save_settings(self,payload):

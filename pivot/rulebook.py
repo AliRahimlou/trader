@@ -1,7 +1,7 @@
 """Source-backed rule map, not a claim that the clips define an executable algorithm.
 
-The recordings do not establish a cross-video sequence. Groups below organize
-source evidence; they are not two commissioned trading systems.
+The recordings do not establish a cross-video sequence. Both location methods
+are evaluated independently; numerical app choices are in the execution policy.
 """
 
 RULES = [
@@ -15,7 +15,7 @@ RULES = [
     {'id':'v2_levels','group':'nasdaq_sequence','name':'Mark previous-day high and low, then wait for a sweep','source':'V2 00:01–00:24','timeframe':'previous day / higher timeframe','status':'explicit','missing':'The clip calls a break beyond the level a sweep; a close-back-inside is not explicitly required'},
     {'id':'v3_levels','group':'nasdaq_sequence','name':'Premark repeated 4-hour touches or breaks','source':'V3 00:18–00:42','timeframe':'4h','status':'explicit','missing':'Levels are manually drawn; wick/body choice, clustering and zone width are not defined'},
     {'id':'v3_event','group':'nasdaq_sequence','name':'Move to 1 hour; wait for break and retest','source':'V3 00:42–00:58','timeframe':'1h','status':'explicit','missing':'The short-after-break-above example is not a complete continuation/reversal rule'},
-    {'id':'v23_leaders','group':'nasdaq_sequence','name':'Confirm technology leaders at supply/demand; skip conflicting evidence','source':'V2 00:29–01:14; V3 01:08–01:43','timeframe':None,'status':'explicit','missing':'Majority is described; no exact count, weights, all-seven rule, or mandatory AAPL+NVDA gate is given'},
+    {'id':'v23_leaders','group':'nasdaq_sequence','name':'Confirm technology leaders at supply/demand; skip conflicting evidence','source':'V2 00:29–01:14; V3 01:08–01:43, 02:23','timeframe':'5m shown on Apple and Nvidia charts','status':'explicit','missing':'Majority is described; no exact count, zone formula, persistence, weights, all-seven rule, or mandatory AAPL+NVDA gate is given'},
     {'id':'v23_vix','group':'nasdaq_sequence','name':'For a short, VIX rises from demand; reverse for a long','source':'V2 01:16–01:36; V3 01:43–02:27','timeframe':'15m shown in V3','status':'explicit','missing':'Direct VIX required; the 15m view is extra confirmation, not a proved universal timeframe rule'},
 ]
 GROUPS = {
@@ -33,7 +33,7 @@ UNRESOLVED = [
 
 
 def rulebook():
-    return {'version':'video-evidence-2026-09-16-v2', 'architecture_status':'one_primary_nasdaq_flow',
-            'groups':{k:v for k,v in GROUPS.items() if k=='nasdaq_sequence'}, 'rules':[r for r in RULES if r['group']=='nasdaq_sequence'], 'unresolved':UNRESOLVED[1:], 'supplementary_source':'V1 is background only; no tape, 5m or VWAP execution requirements',
+    return {'version':'video-evidence-2026-09-17-v3', 'architecture_status':'two_independent_nasdaq_methods',
+            'groups':{k:v for k,v in GROUPS.items() if k=='nasdaq_sequence'}, 'rules':[r for r in RULES if r['group']=='nasdaq_sequence'], 'unresolved':UNRESOLVED[1:], 'supplementary_source':'V1 is background only; its tape, structure-shift and VWAP rules are not execution requirements',
             'can_enter':False, 'reason':'Source evidence is informational; the executor checks permission, fresh signals and broker state',
             'execution_choices':'See the versioned policy shown when enabling live money'}
