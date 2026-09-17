@@ -1,0 +1,39 @@
+{
+  "version": "2026-09-17-v1",
+  "baseline_revision": "facc507ae2761a76916031994bcf9f956f9369fe",
+  "written_before_candidate_evaluation": true,
+  "prior_information": "September 17 morning inactivity audit and source videos are development information, not untouched evidence.",
+  "budget": {"variants_including_baseline": 8, "adaptive_combinations": 0, "paid_data_dollars": 0, "additional_vix_requests": 0, "maximum_equity_history_days": 90, "live_or_paper_orders": 0},
+  "hypotheses": [
+    "Narrow zones may miss repeated nearby prices. Evaluate tolerance alone without claiming the videos specify a width.",
+    "A reaction followed by continued movement may remain relevant for the same Nasdaq event. Evaluate explicit bounded persistence with invalidation.",
+    "Four votes and zero opposition may filter most opportunities. Measure alternatives separately; do not infer improvement from more signals.",
+    "A signal based on a completed hourly close may be untradeable after a large intervening move. Test a stricter entry-drift cap."
+  ],
+  "variants": [
+    {"id":"baseline","zone_tolerance":0.001,"persistence_bars":1,"minimum_leaders":4,"maximum_opposition":0,"max_entry_drift":0.01},
+    {"id":"zone_20bp","zone_tolerance":0.002,"persistence_bars":1,"minimum_leaders":4,"maximum_opposition":0,"max_entry_drift":0.01},
+    {"id":"zone_30bp","zone_tolerance":0.003,"persistence_bars":1,"minimum_leaders":4,"maximum_opposition":0,"max_entry_drift":0.01},
+    {"id":"persistence_2bars","zone_tolerance":0.001,"persistence_bars":2,"minimum_leaders":4,"maximum_opposition":0,"max_entry_drift":0.01},
+    {"id":"persistence_3bars","zone_tolerance":0.001,"persistence_bars":3,"minimum_leaders":4,"maximum_opposition":0,"max_entry_drift":0.01},
+    {"id":"leaders_3","zone_tolerance":0.001,"persistence_bars":1,"minimum_leaders":3,"maximum_opposition":0,"max_entry_drift":0.01},
+    {"id":"opposition_1","zone_tolerance":0.001,"persistence_bars":1,"minimum_leaders":4,"maximum_opposition":1,"max_entry_drift":0.01},
+    {"id":"entry_drift_50bp","zone_tolerance":0.001,"persistence_bars":1,"minimum_leaders":4,"maximum_opposition":0,"max_entry_drift":0.005}
+  ],
+  "fixed": {"capital":92.05,"purchase_target":25,"allow_short":false,"one_position":true,"equity_feed":"alpaca_iex","decision_publication_delay_seconds":60,"protection_policy":"stop beyond event/zone; target next opposing premarked level","vix_rule":"unchanged actual-index reaction","fractional_precision":6},
+  "execution_scenarios": {
+    "base":{"spread_bps":2,"slippage_bps":2,"fee_per_order":0.01,"latency_seconds":0},
+    "higher_cost":{"spread_bps":4,"slippage_bps":5,"fee_per_order":0.02,"latency_seconds":0},
+    "delay_60s":{"spread_bps":2,"slippage_bps":2,"fee_per_order":0.01,"latency_seconds":60},
+    "partial_fill":{"spread_bps":2,"slippage_bps":2,"fee_per_order":0.01,"entry_fill_fraction":0.5},
+    "rejected_entry":{"spread_bps":2,"slippage_bps":2,"fee_per_order":0.01,"reject_every_n":5},
+    "failed_protection":{"spread_bps":2,"slippage_bps":2,"fee_per_order":0.01,"protection_failure_every_n":5}
+  },
+  "cost_note":"Research assumptions, not observed fills or a broker fee quote. Report data/hosting separately; free current plans do not include unknown electricity costs.",
+  "benchmarks":["cash","QQQ buy-and-hold with $25 initial exposure, remainder cash","one long on first positive completed hourly candle per day, 1% stop/2% target, same $25 and costs"],
+  "splits":{"historical":"chronological 60% development / 40% validation by complete session; expanding walk-forward after first four sessions; close all simulated positions each session so labels do not cross boundaries","untouched_test":"Future full sessions beginning after this plan is frozen. Collect at least 40 sessions and 60 independent opportunities, with no tuning; unavailable during this task.","known_contamination":"Historical source-video and previously inspected market dates cannot be advertised as a final untouched test."},
+  "metrics":["net dollars and return on starting capital","expectancy and day-clustered uncertainty","drawdown","worst day","losing streak","independent setups","time exposure and capital usage","turnover","win rate and average win/loss","regime/period results","without best trade/day"],
+  "promotion":{"minimum_independent_opportunities":60,"minimum_sessions":40,"family_alpha":0.05,"comparisons":7,"required":"positive after-cost expectancy with multiplicity-adjusted lower confidence bound above zero; positive under higher costs and after removing best day; adjacent parameter stability; acceptable approved drawdown; full shadow and paper lifecycle evidence; explicit authorization for any live trial","critical_missing":"No approved per-trade, daily, or total drawdown loss budget. No candidate is eligible for live promotion until reviewed."},
+  "proposed_risk_limits_for_review_only":{"position_dollars":25,"planned_stop_loss_dollars":0.5,"daily_realized_plus_unrealized_loss_dollars":1,"drawdown_pause_dollars":3,"maximum_open_positions":1,"note":"Not approved live controls, not applied to current trader. If a setup's stop implies more risk, skip rather than silently resize. Gaps and failed protection can exceed these amounts."},
+  "selection_rule":"No winner if data, independent samples, positive uncertainty bound, or execution evidence are insufficient. More trades alone never passes. Do not re-tune against validation or future test."
+}
