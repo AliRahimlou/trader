@@ -13,6 +13,7 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+from hashlib import sha256
 import http.client
 import io
 import json
@@ -397,9 +398,18 @@ def refresh_installed_timer(root, release):
         data = source.read_bytes()
         if len(data) > 4096 or b'Unit=pivot-update.service' not in data:
             raise UpdateError('The selected update timer is invalid')
-        atomic_write(installed, data)
+        marker = root / 'config' / 'update-timer.json'
+        verified = {'version': 'update-timer-v1', 'sha256': sha256(data).hexdigest()}
+        installed_matches = installed.read_bytes() == data
+        if installed_matches and read_record(marker) == verified:
+            return
+        if not installed_matches:
+            atomic_write(installed, data)
         run(['systemctl', '--user', 'daemon-reload'])
         run(['systemctl', '--user', 'restart', 'pivot-update.timer'])
+        # A matching unit file alone does not prove systemd loaded it. Commit
+        # only after both commands succeed so interrupted refreshes retry.
+        atomic_write(marker, (json.dumps(verified, sort_keys=True) + '\n').encode())
     except OSError:
         raise UpdateError('The tested app is ready but the update timer could not be refreshed') from None
 
@@ -457,6 +467,10 @@ def update(root, *, build_only=False):
             health = read_local('/api/health')
             if health.get('ok') is not True or health.get('legacy_loaded') is not False or health.get('revision') != revision:
                 raise UpdateError('Installed revision exists but its health check failed')
+            # Legacy updaters copied the new updater but left their old timer.
+            # Reconcile the exact healthy installed release without replacing
+            # its container, holding entries, or changing saved permission.
+            refresh_installed_timer(root, release_directory(root, revision))
             write_status(root, state='current', reason='Running the latest GitHub release', active_revision=revision,
                          candidate_revision=None)
             return
