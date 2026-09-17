@@ -1,8 +1,9 @@
+"""Frozen v1 strategy witnesses. Current production coverage is test_strategy_v2.py."""
 from datetime import datetime,timedelta,timezone
 from dataclasses import replace
 import pytest
 from pivot.models import Bar,Market,Zone,MAG7
-from pivot.strategy import zones,pivot_event,fresh,closed,leader_confirmation,vix_confirmation,analyze
+from research.baseline_v1 import zones,pivot_event,fresh,closed,leader_confirmation,vix_confirmation,analyze
 from pivot.rulebook import rulebook
 
 NOW=datetime(2026,9,16,16,tzinfo=timezone.utc)
@@ -76,7 +77,7 @@ def test_prior_day_sweep_does_not_invent_close_back_requirement():
 
 def test_rulebook_honors_latest_primary_sources_and_does_not_blend_first_clip():
     book=rulebook()
-    assert book['architecture_status']=='one_primary_nasdaq_flow'
+    assert book['architecture_status']=='two_independent_nasdaq_methods'
     assert all(r['group']=='nasdaq_sequence' for r in book['rules'])
     assert not any(r['id'].startswith('v1_') for r in book['rules'])
     assert not book['can_enter']
@@ -102,7 +103,7 @@ def test_primary_sequence_checks_leaders_then_vix_without_granting_broker_permis
     assert not any('VWAP' in c['name'] or 'tape' in c['name'] for c in result['checks'])
 
 def test_older_daily_candle_cannot_masquerade_as_previous_session():
-    from pivot.strategy import prior_day_zones
+    from research.baseline_v1 import prior_day_zones
     market=Market('QQQ',{1440:[bar(NOW-timedelta(days=2),minutes=1440)]},'alpaca_iex',True,NOW,previous_session='2026-09-15')
     assert prior_day_zones(market,NOW)==[]
 

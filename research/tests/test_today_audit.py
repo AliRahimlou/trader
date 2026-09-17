@@ -4,7 +4,7 @@ import pytest
 
 from pivot.feeds import ET
 from pivot.models import Bar, MAG7
-from pivot.strategy import leader_diagnostics
+from research.baseline_v1 import leader_diagnostics
 from research.data import at_time
 from research.today_audit import (CUTOFF, DAY, OPEN, SYMBOLS, checkpoints, confirmation,
                                   coverage, five_minute_leaders, gate_record, summarize_records)

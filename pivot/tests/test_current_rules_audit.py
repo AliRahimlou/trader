@@ -1,4 +1,4 @@
-"""Offline witnesses for the September 17 rule audit, not performance evidence.
+"""Frozen v1 witnesses for the September 17 rule audit, not current-v2 performance evidence.
 
 These expose the interpreter's boundaries and regress the engineering exit
 consistency fix: both classes of premarked levels can supply a target. The
@@ -12,7 +12,7 @@ import pytest
 
 from pivot.models import Bar, MAG7, Market
 from pivot.sizing import purchase_plan
-from pivot.strategy import analyze, leader_confirmation, zones
+from research.baseline_v1 import analyze, leader_confirmation, zones
 
 
 NOW = datetime(2026, 9, 16, 16, tzinfo=timezone.utc)

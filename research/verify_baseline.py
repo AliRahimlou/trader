@@ -1,4 +1,4 @@
-"""Compare the original deployed pure analyzer with unchanged-policy research code."""
+"""Compare the original deployed pure analyzer with the frozen v1 research analyzer."""
 import argparse
 from datetime import timedelta
 from hashlib import sha256
@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 from .data import load, audit, at_time, expected_ends
 from .offline import disconnected
-from pivot.strategy import analyze
+from research.baseline_v1 import analyze
 
 BASELINE='facc507ae2761a76916031994bcf9f956f9369fe'
 

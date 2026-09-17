@@ -1,0 +1,319 @@
+"""Manufactured v2 contract witnesses; no video-equivalence or return claims.
+
+All leader evidence is made from actual five-minute Bar objects at five-minute
+intervals. These fixtures do not relabel fifteen-minute OHLC as smaller bars.
+"""
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from pivot.models import Bar, Market, MAG7, Zone
+from pivot.strategy import (ANALYSIS_VERSION, analyze, interaction_zones,
+                            leader_confirmation, leader_diagnostics, location_events)
+
+NOW = datetime(2026, 9, 16, 16, tzinfo=timezone.utc)
+
+
+def candle(at, opened=100, high=105, low=95, close=100, minutes=5):
+    return Bar(at, minutes, opened, high, low, close)
+
+
+def four_hour_history():
+    ranges = [(105, 95), (110, 94), (105, 95), (106, 90), (105, 95),
+              (110, 94), (105, 95), (106, 90), (105, 95)]
+    return [candle(NOW-timedelta(hours=4*(14-i)), high=h, low=l, minutes=240)
+            for i, (h, l) in enumerate(ranges)]
+
+
+def leader_market(symbol='AAPL', direction='long', at=NOW):
+    ranges = [(105, 95), (110, 94), (105, 95), (106, 90), (105, 95),
+              (110, 94), (105, 95), (106, 90), (105, 95), (106, 94), (105, 95), (106, 94)]
+    history = [candle(at-timedelta(minutes=5*(13-i)), high=h, low=l)
+               for i, (h, l) in enumerate(ranges)]
+    history.append(candle(at-timedelta(minutes=5), high=106, low=94))
+    current = (candle(at, high=105, low=89.9, close=104) if direction == 'long' else
+               candle(at, high=110.1, low=95, close=96) if direction == 'short' else candle(at))
+    return Market(symbol, {5: history+[current], 240: four_hour_history()}, 'alpaca_iex', True, at)
+
+
+def setup_scenario(direction='long', method='prior_day_sweep'):
+    """Return (QQQ market, leader markets, actual-index fixture, now)."""
+    leaders = {symbol: leader_market(symbol, direction) for symbol in MAG7}
+    # VIX retains the pre-v2 fifteen-minute area/reaction interpretation.
+    history = [replace(bar, minutes=15) for bar in four_hour_history()]
+    previous = candle(NOW-timedelta(minutes=15), high=106, low=94, minutes=15)
+    inverse = (candle(NOW, high=110.1, low=95, close=96, minutes=15) if direction == 'long' else
+               candle(NOW, high=105, low=89.9, close=104, minutes=15))
+    vix = Market('I:VIX', {15: history+[previous, inverse]}, 'massive_indices', True, NOW)
+    if method == 'prior_day_sweep':
+        prior = candle(NOW-timedelta(hours=1), high=104, low=96, minutes=60)
+        current = (candle(NOW, 99, 101, 88, 100, 60) if direction == 'long' else
+                   candle(NOW, 101, 112, 99, 100, 60))
+        market = Market('QQQ', {1440: [candle(NOW-timedelta(days=1), high=110, low=90, minutes=1440)],
+                               60: [prior, current], 240: []}, 'alpaca_iex', True, NOW,
+                        previous_session='2026-09-15')
+    elif method == 'four_hour_retest':
+        bars = ([candle(NOW-timedelta(hours=2), 92, 93, 91, 92, 60),
+                 candle(NOW-timedelta(hours=1), 92, 93, 88, 89, 60),
+                 candle(NOW, 89.5, 90, 88, 89, 60)] if direction == 'long' else
+                [candle(NOW-timedelta(hours=2), 108, 109, 107, 108, 60),
+                 candle(NOW-timedelta(hours=1), 108, 112, 107, 111, 60),
+                 candle(NOW, 110.5, 112, 110, 111, 60)])
+        market = Market('QQQ', {240: four_hour_history(), 60: bars}, 'alpaca_iex', True, NOW)
+    else:
+        raise ValueError('Unknown manufactured method')
+    return market, leaders, vix, NOW
+
+
+@pytest.mark.parametrize('direction', ['long', 'short'])
+@pytest.mark.parametrize('method', ['four_hour_retest', 'prior_day_sweep'])
+def test_each_method_accepts_genuine_five_minute_confirmation_without_order_permission(direction, method):
+    market, leaders, vix, now = setup_scenario(direction, method)
+    result = analyze(market, leaders, vix, now)
+    assert result['state'] == 'SETUP_READY'
+    assert result['strategy_id'] == method and result['direction'] == direction
+    assert result['policy_version'] == ANALYSIS_VERSION
+    assert result['can_enter'] is False
+    assert len(result['event_id']) == 68 and result['event_id'].startswith('ev2_')
+    assert all(check['passed'] for check in result['checks'])
+    assert {row['id'] for row in result['strategies']} == {'four_hour_retest', 'prior_day_sweep'}
+    assert all(row['timeframe_minutes'] == 5 for row in result['leader_evidence'].values())
+
+
+def test_crossing_areas_are_premarked_without_future_bars_or_moving_bands():
+    # Monotonic extremes contain repeated body crossings but no local swing.
+    bars = [candle(NOW-timedelta(hours=4*(8-i)), 99, 105+i, 90+i, 101, 240) for i in range(7)]
+    levels = interaction_zones(bars, NOW)
+    assert levels and all(z.touches >= 2 for z in levels)
+    future = candle(NOW+timedelta(hours=4), 100, 200, 1, 150, 240)
+    assert interaction_zones(bars+[future], NOW) == levels
+    prefix = interaction_zones(bars[:3], NOW)
+    assert prefix
+    for zone in prefix:
+        same = next(z for z in levels if (z.low, z.high) == (zone.low, zone.high))
+        assert same.established_at == zone.established_at
+    assert interaction_zones(bars[:2], NOW) == []  # adjacent occupancy is insufficient
+    assert all(left.high < right.low for left, right in zip(levels, levels[1:]))
+
+
+def test_fifteen_minute_prices_cannot_replace_missing_five_minute_leaders():
+    market, leaders, vix, now = setup_scenario()
+    for leader in leaders.values():
+        leader.bars[15] = [candle(now-timedelta(minutes=15), minutes=15),
+                           candle(now, high=105, low=89.9, close=104, minutes=15)]
+        leader.bars.pop(5)
+    result = analyze(market, leaders, vix, now)
+    assert result['state'] == 'CONFIRMING'
+    assert result['checks'][-1]['name'] == 'Magnificent Seven at their zones'
+    assert 'current 5-minute data missing' in result['checks'][-1]['detail']
+
+
+def test_current_rejection_persists_without_latest_zone_touch_and_expires_by_wall_clock():
+    market = leader_market(at=NOW-timedelta(minutes=10))
+    market.observed_at = NOW
+    market.bars[5] += [candle(NOW-timedelta(minutes=5), 105, 105.05, 104.95, 105),
+                       candle(NOW, 106, 106.05, 105.95, 106)]
+    row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    assert row['vote'] == 'long' and row['age_minutes'] == 10
+    assert row['reaction_at'] == (NOW-timedelta(minutes=10)).isoformat()
+    assert row['reason'] == 'persistent reaction'
+    zone = row['reaction_zone']
+    assert market.bars[5][-1].low > zone['high']
+    later = NOW+timedelta(minutes=5)
+    market.observed_at = later
+    expired = leader_diagnostics({'AAPL': market}, later, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    assert expired['vote'] is None
+
+
+def test_persistent_reaction_cannot_cross_a_missing_five_minute_bar():
+    market = leader_market(at=NOW-timedelta(minutes=10))
+    market.observed_at = NOW
+    market.bars[5].append(candle(NOW, 104, 108, 104, 106))
+    row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    assert row['vote'] is None and row['reason'] == 'intervening 5-minute candle missing'
+
+
+def test_later_close_through_area_invalidates_reaction_even_if_price_returns():
+    market = leader_market(at=NOW-timedelta(minutes=10))
+    market.observed_at = NOW
+    market.bars[5] += [candle(NOW-timedelta(minutes=5), 88, 89, 87, 88),
+                       candle(NOW, 106, 106.05, 105.95, 106)]
+    row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    assert row['vote'] is None
+    assert row['reason'] == 'invalidated by subsequent close through zone'
+
+
+def test_leader_evidence_before_event_or_on_prior_session_is_not_carried():
+    market = leader_market(at=NOW-timedelta(minutes=5))
+    market.observed_at = NOW
+    market.bars[5].append(candle(NOW, 106, 106.05, 105.95, 106))
+    row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW)['AAPL']
+    assert row['vote'] is None
+    assert leader_diagnostics({'AAPL': market}, NOW)['AAPL']['observational_only'] is True
+    # Move a manufactured midnight boundary without pretending it is RTH data.
+    old = datetime(2026, 9, 17, 3, 55, tzinfo=timezone.utc)
+    overnight = leader_market(at=old)
+    overnight.observed_at = old+timedelta(minutes=5)
+    overnight.bars[5].append(candle(overnight.observed_at, 106, 106.05, 105.95, 106))
+    assert leader_diagnostics({'AAPL': overnight}, overnight.observed_at)['AAPL']['vote'] is None
+
+
+def event_bars():
+    return [candle(NOW-timedelta(hours=2), 99, 100, 98, 99, 60),
+            candle(NOW-timedelta(hours=1), 99, 103, 98, 102, 60),
+            candle(NOW, 101, 104, 100, 103, 60)]
+
+
+def event_zone():
+    return Zone(99.9, 100.1, NOW-timedelta(days=3), '4h repeated interaction')
+
+
+def test_retests_keep_origin_identity_first_confirmation_and_fixed_expiry():
+    bars, zone = event_bars(), event_zone()
+    first = location_events(bars, [zone], 'four_hour_retest', NOW)[0]
+    later = NOW+timedelta(hours=1)
+    second = location_events(bars+[candle(later, 102, 105, 100, 104, 60)], [zone], 'four_hour_retest', later)[0]
+    assert first['id'] == second['id']
+    assert first['origin'] == second['origin'] == bars[-2]
+    assert first['confirmed'] == second['confirmed'] == bars[-1]
+    assert first['expires_at'] == second['expires_at'] == NOW+timedelta(hours=2)
+    assert second['state'] == 'CONFIRMING'
+    expired = location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(hours=2))[0]
+    assert expired['state'] == 'EXPIRED'
+
+
+def test_unclosed_future_retest_and_late_constructed_area_do_not_qualify():
+    bars, zone = event_bars(), event_zone()
+    before_close = NOW-timedelta(seconds=1)
+    result = location_events(bars, [zone], 'four_hour_retest', before_close)[0]
+    assert result['state'] == 'WAITING_FOR_RETEST' and result['confirmed'] is None
+    late = replace(zone, established_at=bars[-2].end-timedelta(minutes=59))
+    assert location_events(bars, [late], 'four_hour_retest', NOW) == []
+
+
+def test_event_invalidates_on_opposite_close_hourly_gap_and_session_change():
+    bars, zone = event_bars(), event_zone()
+    later = NOW+timedelta(hours=1)
+    invalid = location_events(bars+[candle(later, 99, 100, 97, 98, 60)], [zone], 'four_hour_retest', later)[0]
+    # This new opposite crossing is a new origin, never the old setup revived.
+    assert invalid['id'] != location_events(bars, [zone], 'four_hour_retest', NOW)[0]['id']
+    assert invalid['state'] == 'WAITING_FOR_RETEST'
+    gap_bars = bars[:2]+[candle(later, 102, 105, 100, 104, 60)]
+    gap = location_events(gap_bars, [zone], 'four_hour_retest', later)[0]
+    assert gap['state'] == 'INVALIDATED' and 'missing' in gap['reason']
+    assert location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(days=1)) == []
+
+
+def test_previous_day_sweep_holds_its_origin_and_has_explicit_invalidation():
+    market, _, _, now = setup_scenario('short')
+    zone = Zone(110, 110, now-timedelta(days=1), 'previous-day high')
+    first = location_events(market.bars[60], [zone], 'prior_day_sweep', now)[0]
+    later = now+timedelta(hours=1)
+    following = market.bars[60]+[candle(later, 101, 109, 100, 103, 60)]
+    active = location_events(following, [zone], 'prior_day_sweep', later)[0]
+    assert active['id'] == first['id'] and active['confirmed'] == first['confirmed']
+    broken = market.bars[60]+[candle(later, 100, 101, 96, 98, 60)]
+    assert location_events(broken, [zone], 'prior_day_sweep', later)[0]['state'] == 'INVALIDATED'
+
+
+def test_both_methods_are_reported_even_when_four_hour_method_also_passes():
+    market, leaders, vix, now = setup_scenario('short', 'four_hour_retest')
+    market.bars[1440] = [candle(now-timedelta(days=1), high=109.5, low=90, minutes=1440)]
+    market.previous_session = '2026-09-15'
+    result = analyze(market, leaders, vix, now)
+    branches = {row['id']: row for row in result['strategies']}
+    assert all(row['state'] == 'SETUP_READY' for row in branches.values())
+    assert branches['four_hour_retest']['event_id'] != branches['prior_day_sweep']['event_id']
+    assert result['strategy_id'] in branches
+
+
+def test_a_waiting_four_hour_method_cannot_hide_a_ready_previous_day_sweep():
+    market, leaders, vix, now = setup_scenario('long')
+    market.bars[240] = four_hour_history()
+    result = analyze(market, leaders, vix, now)
+    branches = {row['id']: row for row in result['strategies']}
+    assert branches['four_hour_retest']['state'] != 'SETUP_READY'
+    assert branches['prior_day_sweep']['state'] == 'SETUP_READY'
+    assert result['strategy_id'] == 'prior_day_sweep' and result['state'] == 'SETUP_READY'
+
+
+def test_event_id_is_independent_of_leader_direction_and_future_target_geometry():
+    market, leaders, vix, now = setup_scenario('long')
+    first = analyze(market, leaders, vix, now)
+    # Opposite leader confirmation changes admission direction, not Nasdaq event.
+    leaders = {symbol: leader_market(symbol, 'short') for symbol in MAG7}
+    second = analyze(market, leaders, None, now)
+    assert first['event_id'] == second['event_id']
+    assert first['direction'] == 'long' and second['direction'] == 'short'
+    future = candle(now+timedelta(hours=4), 100, 101, 99, 100, 240)
+    market.bars[240].append(future)
+    assert analyze(market, leaders, None, now)['event_id'] == first['event_id']
+
+
+def test_leader_vote_still_requires_four_companies_and_no_opposition():
+    leaders = {s: leader_market(s, 'long' if i < 4 else None) for i, s in enumerate(MAG7)}
+    assert leader_confirmation(leaders, 'long', NOW)[0]
+    leaders[MAG7[3]] = leader_market(MAG7[3], None)
+    assert not leader_confirmation(leaders, 'long', NOW)[0]
+    leaders[MAG7[3]] = leader_market(MAG7[3], 'long')
+    leaders[MAG7[4]] = leader_market(MAG7[4], 'short')
+    assert not leader_confirmation(leaders, 'long', NOW)[0]
+
+
+def test_conflicting_active_reactions_within_one_company_are_not_arbitrary_neutral_votes():
+    market = leader_market()
+    market.bars[5] = [b for b in market.bars[5] if b.end < NOW-timedelta(minutes=15)]
+    market.bars[5] += [candle(NOW-timedelta(minutes=15), 99, 100, 98, 99),
+                       candle(NOW-timedelta(minutes=10), 99, 101, 89.9, 100),
+                       candle(NOW-timedelta(minutes=5), 106, 107, 105.5, 106),
+                       candle(NOW, 106, 110.2, 102, 103)]
+    row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    assert row['vote'] is None and row['conflicting_reactions']
+    assert row['reason'] == 'conflicting active area reactions'
+    # Six apparent long votes cannot hide contradictory evidence in the seventh.
+    leaders = {symbol: leader_market(symbol) for symbol in MAG7}
+    leaders['AAPL'] = market
+    okay, reason = leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))
+    assert not okay and 'conflicting active area reactions' in reason
+
+
+def test_future_five_minute_area_or_price_cannot_change_earlier_vote():
+    market = leader_market()
+    before = leader_diagnostics({'AAPL': market}, NOW)
+    market.bars[5] += [candle(NOW+timedelta(minutes=5), 105, 200, 1, 199),
+                       candle(NOW+timedelta(minutes=10), 199, 200, 1, 2)]
+    assert leader_diagnostics({'AAPL': market}, NOW) == before
+
+
+def test_same_bar_poll_keeps_evidence_age_stable_until_wall_clock_expiry():
+    market = leader_market()
+    first = leader_diagnostics({'AAPL': market}, NOW)
+    market.observed_at = NOW+timedelta(seconds=30)
+    assert leader_diagnostics({'AAPL': market}, market.observed_at) == first
+
+
+def test_vix_confirmation_retains_frozen_v1_safeguards():
+    # This release changes leader/level interpretation, not VIX entitlement,
+    # provider freshness, inverse reaction, or fifteen-minute area semantics.
+    import inspect
+    from pivot import strategy
+    from research import baseline_v1
+    for name in ('zones', 'reaction', 'vix_candles_fresh', 'vix_confirmation'):
+        current, frozen = getattr(strategy, name), getattr(baseline_v1, name)
+        assert inspect.getsource(current) == inspect.getsource(frozen)
+
+
+def test_historical_baseline_keeps_fifteen_minute_votes_and_v1_identity_separate():
+    from research.baseline_v1 import analyze as historical_analyze
+    from research.synthetic_example import accepted_long
+    old = accepted_long()
+    assert old['setup']['policy_version'] == 'nasdaq-video-interpretation-v1'
+    assert old['setup']['state'] == 'SETUP_READY'
+    market, leaders, vix, now = setup_scenario()
+    for leader in leaders.values():
+        leader.bars[15] = [candle(now-timedelta(minutes=15), minutes=15),
+                           candle(now, high=105, low=89.9, close=104, minutes=15)]
+        leader.bars.pop(5)
+    assert historical_analyze(market, leaders, vix, now)['state'] == 'SETUP_READY'
+    assert analyze(market, leaders, vix, now)['state'] != 'SETUP_READY'

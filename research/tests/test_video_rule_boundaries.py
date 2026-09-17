@@ -1,23 +1,19 @@
-"""Offline characterization of current Nasdaq interpretation boundaries.
+"""Historical characterization of frozen v1 Nasdaq interpretation boundaries.
 
-These manufactured prices prove what today's code does, not what the video
-creator intended or which trades would be profitable. A future reviewed rule
-change may deliberately update these expectations. No broker is instantiated.
+These manufactured prices preserve what the pre-v2 code did, not what the
+video creator intended or which trades would be profitable. Current v2
+boundaries are tested separately. No broker is instantiated.
 """
 from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-import pytest
 
-from pivot.execution import CHECKS, Executor, Waiting
-from pivot.feeds import FeedError
 from pivot.history_health import frame_gaps
 from pivot.models import Bar, Market, Zone
-from pivot.policy import POLICY_VERSION
-from pivot.store import Store
-from pivot.strategy import analyze, pivot_event, zones
+from research.baseline_v1 import EXECUTION_POLICY_VERSION as POLICY_VERSION
+from research.baseline_v1 import analyze, pivot_event, zones
 
 
 ET = ZoneInfo('America/New_York')
@@ -89,7 +85,7 @@ def test_four_hour_event_hides_an_overlapping_previous_day_sweep_in_current_sing
     assert selected['event_at'] == independently_scoped['event_at']
 
 
-def test_retests_of_one_break_on_successive_hours_have_different_current_order_identities(tmp_path):
+def test_frozen_v1_retests_of_one_break_had_different_order_identities():
     # The execution key is POLICY_VERSION|QQQ|event_at|direction. Current
     # event_at means the reaction candle, not the original break or zone.
     # This permits a fresh intent after a later retest; it is not itself an
@@ -105,37 +101,7 @@ def test_retests_of_one_break_on_successive_hours_have_different_current_order_i
     assert first[3].end != second[3].end
     identity = lambda event: sha256(f'{POLICY_VERSION}|QQQ|{event[3].end.isoformat()}|long'.encode()).hexdigest()[:24]
     assert identity(first) != identity(second)
-    # Exercise the production dedup guard itself, then deliberately stop at
-    # an in-memory account-read marker. No order client exists in this test.
-    class PreflightMarker:
-        calls = 0
-
-        def account(self):
-            self.calls += 1
-            raise FeedError('Synthetic next-preflight marker; no broker connected')
-
-    store = Store(tmp_path / 'event-identity.sqlite3')
-    handled = {'id': identity(first), 'stage': 'finished'}
-    assert store.reserve_trade(handled)
-    store.save_trade(handled, finished=True)
-    broker = PreflightMarker()
-    now = second[3].end
-    executor = Executor(broker, store, now=lambda: now)
-
-    def snapshot(event):
-        return {'analysis_at': now.isoformat(), 'data_valid_until': (now + timedelta(seconds=90)).isoformat(),
-                'feeds': {'vix': 'current'}, 'data_errors': [],
-                'setup': {'state': 'SETUP_READY', 'direction': 'long',
-                          'event_at': event[3].end.isoformat(), 'policy_version': 'nasdaq-video-interpretation-v1',
-                          'checks': [{'name': name, 'passed': True} for name in CHECKS]}}
-
-    with pytest.raises(Waiting, match='already been handled'):
-        executor._entry(snapshot(first))
-    assert broker.calls == 0
-    with pytest.raises(FeedError, match='Synthetic next-preflight marker'):
-        executor._entry(snapshot(second))
-    assert broker.calls == 1
-    assert store.active_trade() is None
+    # v2 executor dedup is tested independently; old v1 admission is not replayed.
 
 
 def test_break_retest_has_no_originating_break_age_or_session_reset_limit():
