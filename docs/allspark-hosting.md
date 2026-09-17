@@ -16,6 +16,8 @@ AllSpark runs the worker independently of the laptop, with automatic container r
 
 AllSpark checks periodically through a user systemd timer. User lingering keeps this timer available after logout and reboot. An exclusive deployment lock prevents the Live money control from enabling execution during the final switch. Updates are serialized.
 
+The bottom-right badge shows the installed app version and exact build ID (for example, `Installed v2.1.0 · abc1234`). A queued update appears separately and is explicitly marked as not installed. “Latest checked release” requires a recent update check that matches the running build; stale or unavailable checks remain unconfirmed. Refresh an older open page after an update to load its new interface.
+
 ## Files on AllSpark
 
 - `~/pivot-trader/repository`: GitHub checkout used by the updater.

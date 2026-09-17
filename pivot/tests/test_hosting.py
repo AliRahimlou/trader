@@ -67,6 +67,7 @@ def test_deployment_revision_is_validated_and_reported_without_other_environment
         for route in ('/api/health', '/api/snapshot'):
             response = client.get(route)
             assert response.json()['revision'] == revision
+            assert response.json()['app_version'] == '2.1.0'
             assert 'hidden' not in response.text
     with pytest.raises(ValueError, match='PIVOT_REVISION'):
         Hosting.from_values({'PIVOT_REVISION': 'accidental-secret-not-a-commit'})

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from .version import APP_VERSION
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,7 @@ def deployment_status(path, now=None):
 def create_app(service, background=True, hosting=None, deployment_lock=None, deployment_status_path=None):
     hosting = hosting or Hosting()
     def decorate_snapshot(payload):
-        result = {**payload, 'hosting': hosting.describe(), 'revision': hosting.revision}
+        result = {**payload, 'hosting': hosting.describe(), 'revision': hosting.revision, 'app_version': APP_VERSION}
         if hosting.public_origin:
             result['deployment'] = deployment_status(deployment_status_path)
         return result
@@ -140,7 +141,7 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
             service.start()
         yield
         service.stop()
-    app = FastAPI(title='Pivot · Video strategies', version='2.0', lifespan=lifespan, root_path=hosting.url_prefix)
+    app = FastAPI(title='Pivot · Video strategies', version=APP_VERSION, lifespan=lifespan, root_path=hosting.url_prefix)
     allowed_hosts = ['127.0.0.1', 'localhost'] + ([] if background else ['testserver'])
     if hosting.public_origin:
         allowed_hosts.append(urlsplit(hosting.public_origin).hostname)
@@ -174,7 +175,7 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     @app.get('/api/health')
     def health():
         return {'ok': True, 'version': 'video-execution-v3', 'live_enabled': service.executor.enabled() if service.executor else False,
-                'legacy_loaded': False, 'revision': hosting.revision}
+                'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION}
 
     @app.get('/api/snapshot')
     def snapshot():
