@@ -226,6 +226,22 @@ def test_both_methods_are_reported_even_when_four_hour_method_also_passes():
     assert all(row['state'] == 'SETUP_READY' for row in branches.values())
     assert branches['four_hour_retest']['event_id'] != branches['prior_day_sweep']['event_id']
     assert result['strategy_id'] in branches
+    assert {c['strategy_id'] for c in result['entry_candidates']} == set(branches)
+    assert {c['event_id'] for c in result['entry_candidates']} >= {r['event_id'] for r in branches.values()}
+    assert all('leader_evidence' not in c and 'entry_candidates' not in c for c in result['entry_candidates'])
+
+
+def test_all_ready_areas_survive_selection_for_durable_executor_deduplication():
+    market, leaders, vix, now = setup_scenario('short', 'four_hour_retest')
+    market.bars[60] = [candle(now-timedelta(hours=2), 104, 105, 103, 104, 60),
+                       candle(now-timedelta(hours=1), 104, 112, 103, 111, 60),
+                       candle(now, 110.5, 112, 105, 111, 60)]
+    result = analyze(market, leaders, vix, now)
+    candidates = [c for c in result['entry_candidates'] if c['strategy_id'] == 'four_hour_retest']
+    assert len(candidates) >= 2
+    assert len({c['event_id'] for c in candidates}) == len(candidates)
+    assert all(c['state'] == 'SETUP_READY' and all(check['passed'] for check in c['checks']) for c in candidates)
+    assert result['event_id'] == candidates[0]['event_id']
 
 
 def test_a_waiting_four_hour_method_cannot_hide_a_ready_previous_day_sweep():

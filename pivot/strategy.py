@@ -430,6 +430,7 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     methods = [('four_hour_retest', '4-hour areas / hourly break and retest'),
                ('prior_day_sweep', 'Previous-day boundary sweep')]
     rows = []
+    qualified = []
     valid = market is not None and market.symbol == 'QQQ' and fresh(market, now, 60)
     bars = closed(market, 60, now) if valid else []
     all_levels = []
@@ -452,6 +453,7 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
         events = location_events(bars, method_levels, method, now)
         if events:
             candidates = [_evaluate_event(result, event, all_levels, bars, leaders, vix, now, policy) for event in events]
+            qualified.extend(candidate for candidate in candidates if candidate['state'] == 'SETUP_READY')
             result = max(candidates, key=_rank)
             result['candidate_count'] = len(candidates)
         else:
@@ -465,6 +467,14 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     selected = max(rows, key=_rank)
     result = {key: value for key, value in selected.items() if key not in ('id', 'label')}
     result.update(strategy_id=selected['id'], strategies=rows, levels=[_zone_dict(z) for z in all_levels])
+    # Preserve every qualified opportunity for admission. A previously handled
+    # event must not hide an unhandled area or the other independently valid
+    # method. Only the executor knows durable consumption; analysis stays pure.
+    result['entry_candidates'] = [
+        {**{key: value for key, value in candidate.items()
+            if key not in ('id', 'label', 'leader_evidence', 'levels', 'candidate_count')},
+         'strategy_id': candidate['id']}
+        for candidate in sorted(qualified, key=_rank, reverse=True)]
     if result['state'] in ('EXPIRED', 'INVALIDATED'):
         result['state'] = 'WATCHING'
     return result

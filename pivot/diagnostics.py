@@ -134,6 +134,8 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
     trace = {'version': VERSION, 'captured_at': now.isoformat(), 'checkpoint_at': checkpoint.isoformat(),
              'setup': {key: deepcopy(setup.get(key)) for key in SETUP_KEYS}, 'checks': checks,
              'strategies': [],
+             'entry_candidates': [{key: deepcopy(candidate.get(key)) for key in SETUP_KEYS}
+                                  for candidate in setup.get('entry_candidates', [])],
              'signal_qualifies': signal_qualifies, 'first_blocker': first,
              'nasdaq': {'input': _market(qqq, now, (15, 60, 240, 1440)),
                        'eligible_zones': [{key: z.get(key) for key in (*ZONE_KEYS, 'source')}
