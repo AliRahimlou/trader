@@ -1,12 +1,12 @@
 {
   "name": "pivot-video-dashboard",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test:models": "node --test ../pivot/web/model.test.mjs"
+    "test:models": "node --test ../pivot/web/*.test.mjs"
   },
   "devDependencies": {
     "vite": "^7.1.10"

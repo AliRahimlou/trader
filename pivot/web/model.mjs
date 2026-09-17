@@ -42,6 +42,22 @@ export function appStatus(snapshot, now=Date.now()) {
     (vixStatus(snapshot.data_health?.vix,now).label==='Candles ready'?'Live money on · watching for a setup':'Live money on · waiting for VIX'):'Watching the primary Nasdaq flow';
   return {title,text:snapshot.execution?.message || 'Live money is off. Analysis continues.'};
 }
+export function loggingStatus(snapshot, now=Date.now()) {
+  const signal=snapshot?.decision_trace, execution=snapshot?.execution_check;
+  const fresh=(record,seconds)=>{
+    const elapsed=now-Date.parse(record?.captured_at);
+    return record?.persisted===true && record.current_at_snapshot===true &&
+      Number.isFinite(elapsed) && elapsed>=0 && elapsed<=seconds*1000;
+  };
+  const signalCurrent=fresh(signal,90) && !snapshot?.diagnostic_error;
+  const executionCurrent=fresh(execution,30) && execution.from_current_process===true && !snapshot?.execution_diagnostic_error;
+  const error=snapshot?.diagnostic_error || snapshot?.execution_diagnostic_error;
+  return {label:error?'Needs attention':signalCurrent&&executionCurrent?'Recording':'Checking records',
+    tone:error?'error':signalCurrent&&executionCurrent?'pass':'wait',
+    detail:error?'Some checks could not be saved. Earlier records remain available.':
+      signalCurrent&&executionCurrent?'Strategy decisions and execution checks are saved. Recording does not mean an entry has qualified.':
+      'Waiting for fresh saved strategy and execution checks. Earlier records may be available.'};
+}
 export function releaseStatus(snapshot, now=Date.now()) {
   const revisionOf=value=>typeof value==='string' && /^[a-f0-9]{40}$/.test(value)?value:null;
   const version=snapshot?.app_version;

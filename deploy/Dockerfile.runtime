@@ -5,7 +5,7 @@ COPY dashboard/package.json dashboard/package-lock.json ./dashboard/
 RUN npm ci --prefix dashboard --ignore-scripts
 COPY dashboard/vite.config.js ./dashboard/
 COPY pivot/web ./pivot/web/
-RUN node --test pivot/web/model.test.mjs && npm --prefix dashboard run build -- --base=./
+RUN node --test pivot/web/*.test.mjs && npm --prefix dashboard run build -- --base=./
 
 FROM python:3.12-slim-bookworm AS tested
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH="/opt/venv/bin:$PATH"

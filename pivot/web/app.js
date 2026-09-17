@@ -1,4 +1,4 @@
-import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus} from './model.mjs';
+import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus} from './model.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -51,6 +51,7 @@ function render() {
     $('amount').value=s.settings.target_dollars;
   }
   const health=s.data_health, stocks=health?.stocks, vix=health?.vix, quote=s.quote_health;
+  const logging=loggingStatus(s);
   const healthStale=age(stocks?.checked_at)>90;
   const current=stocks?.instruments.filter(i=>i.status==='current').length || 0;
   const detailOpen=$('data-connections').querySelector('details')?.open;
@@ -65,6 +66,8 @@ function render() {
     <p class="help">${esc(vix?.source || 'Checking VIX source')} · ${vixDisplay.quoteNote}</p>
     ${vixDisplay.error?`<p class="help error">${esc(vixDisplay.error)}</p>`:''}
     ${quote?.error?`<p class="help error">${esc(quote.error)}</p>`:''}
+    <div><span>Decision logging</span><b id="logging-status" class="${logging.tone}">${logging.label}</b></div>
+    <p id="logging-detail" class="help">${esc(logging.detail)}</p>
     <details class="feed-details"><summary>Check every data input</summary>
       ${stocks?.instruments.map(i=>`<article><b>${esc(i.symbol)}</b><span class="${i.status==='current'&&!healthStale?'pass':'wait'}">${healthStale?'Refresh overdue':esc(i.status.replaceAll('_',' '))}</span>
         <ul>${i.frames.map(f=>`<li><span>${esc(f.label)} · ${f.count} candles</span><span>${esc(candleTime(f.latest_at))}${f.status!=='current'?` · ${esc(f.reason)}`:''}</span></li>`).join('')}</ul></article>`).join('') || '<p>Waiting for the first validated update.</p>'}
@@ -85,7 +88,7 @@ function render() {
 async function refresh() {
   if(fetching||saving||toggling)return; fetching=true; const version=generation;
   try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;render();}}
-  catch { $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown'; }
+  catch { $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
   finally{fetching=false;}
 }
 async function changeLive(enabled) {
