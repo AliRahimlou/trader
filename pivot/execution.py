@@ -150,6 +150,7 @@ class Executor:
         self._execution_check_from_current_process = False
         self._diagnostic_gate = 'runtime_state'
         self._diagnostic_trade = None
+        self._selected_entry_signal = None
         self._diagnostic_outcome = None
         self._submission_attempted = False
         try:
@@ -167,6 +168,27 @@ class Executor:
             return timestamp(value).astimezone(timezone.utc).isoformat() if value is not None else None
         except (ValueError, TypeError, OverflowError):
             return None
+
+    def _diagnostic_signal(self, setup):
+        """Allowlisted signal evidence, shared by analysis and entry selection."""
+        setup = setup if isinstance(setup, dict) else {}
+        checks = setup.get('checks') if isinstance(setup.get('checks'), list) else []
+        first_failed = next((SIGNAL_GATES[c['name']] for c in checks if isinstance(c, dict)
+                             and isinstance(c.get('name'), str) and c['name'] in SIGNAL_GATES
+                             and c.get('passed') is not True), None)
+        return {
+            'event_at': self._diagnostic_time(setup.get('event_at')),
+            'event_origin_at': self._diagnostic_time(setup.get('event_origin_at')),
+            'event_expires_at': self._diagnostic_time(setup.get('event_expires_at')),
+            'latest_evidence_at': self._diagnostic_time(setup.get('latest_evidence_at')),
+            'event_id': setup.get('event_id') if isinstance(setup.get('event_id'), str) and re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id']) else None,
+            'strategy_id': setup.get('strategy_id') if isinstance(setup.get('strategy_id'), str) and setup['strategy_id'] in SIGNAL_METHODS else None,
+            'event': setup.get('event') if setup.get('event') in ('break and retest', 'sweep and reclaim', 'previous-day level sweep') else None,
+            'policy_version': setup.get('policy_version') if setup.get('policy_version') == SIGNAL_POLICY_VERSION else None,
+            'direction': setup.get('direction') if setup.get('direction') in ('long', 'short') else None,
+            'state': setup.get('state') if setup.get('state') in ('WATCHING', 'AT_LEVEL', 'WAITING_FOR_RETEST', 'CONFIRMING', 'SETUP_READY') else None,
+            'first_failed_gate': first_failed,
+        }
 
     def _record_execution_check(self, snapshot, outcome, exception_kind):
         """Persist allowlisted evidence; a logging failure cannot enter the trading path."""
@@ -190,11 +212,6 @@ class Executor:
                 }
             identity = trade.get('id')
             trade_state = trade.get('stage')
-            direction = setup.get('direction')
-            checks = setup.get('checks') if isinstance(setup.get('checks'), list) else []
-            first_failed = next((SIGNAL_GATES[c['name']] for c in checks if isinstance(c, dict)
-                                 and isinstance(c.get('name'), str) and c['name'] in SIGNAL_GATES
-                                 and c.get('passed') is not True), None)
             record = {
                 'version': 'execution-check-v1', 'captured_at': now.isoformat(),
                 'checkpoint_at': now.replace(minute=now.minute // 15 * 15, second=0, microsecond=0).isoformat(),
@@ -205,19 +222,8 @@ class Executor:
                 'gate': self._diagnostic_gate if self._diagnostic_gate in EXECUTION_GATES else 'runtime_state',
                 'exception_kind': exception_kind,
                 'analysis_at': self._diagnostic_time(snapshot.get('analysis_at')),
-                'signal': {
-                    'event_at': self._diagnostic_time(setup.get('event_at')),
-                    'event_origin_at': self._diagnostic_time(setup.get('event_origin_at')),
-                    'event_expires_at': self._diagnostic_time(setup.get('event_expires_at')),
-                    'latest_evidence_at': self._diagnostic_time(setup.get('latest_evidence_at')),
-                    'event_id': setup.get('event_id') if isinstance(setup.get('event_id'), str) and re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id']) else None,
-                    'strategy_id': setup.get('strategy_id') if isinstance(setup.get('strategy_id'), str) and setup['strategy_id'] in SIGNAL_METHODS else None,
-                    'event': setup.get('event') if setup.get('event') in ('break and retest', 'sweep and reclaim', 'previous-day level sweep') else None,
-                    'policy_version': setup.get('policy_version') if setup.get('policy_version') == SIGNAL_POLICY_VERSION else None,
-                    'direction': direction if direction in ('long', 'short') else None,
-                    'state': setup.get('state') if setup.get('state') in ('WATCHING', 'AT_LEVEL', 'WAITING_FOR_RETEST', 'CONFIRMING', 'SETUP_READY') else None,
-                    'first_failed_gate': first_failed,
-                },
+                'signal': self._diagnostic_signal(setup),
+                'selected_entry_signal': self._diagnostic_signal(self._selected_entry_signal) if self._selected_entry_signal is not None else None,
                 'trade': {
                     'id': identity if isinstance(identity, str) and re.fullmatch(r'[a-f0-9]{24}', identity) else None,
                     'stage': trade_state if trade_state in ('entering', 'open', 'exiting', 'attention', 'finished') else None,
@@ -292,6 +298,7 @@ class Executor:
             return
         self._diagnostic_gate = 'runtime_state'
         self._diagnostic_trade = None
+        self._selected_entry_signal = None
         self._diagnostic_outcome = None
         self._submission_attempted = False
         outcome, exception_kind = 'managing', None
@@ -348,18 +355,8 @@ class Executor:
             finally:
                 self.tick_lock.release()
 
-    def _entry(self, snapshot):
-        now = self.now()
-        self._gate('vix_candles')
-        if snapshot.get('feeds', {}).get('vix') != 'current':
-            raise Waiting('Live money is on — waiting for actual VIX data. No entry can be sent yet.')
-        self._gate('analysis_freshness')
-        if snapshot.get('data_errors') or not snapshot.get('analysis_at') or not 0 <= elapsed(snapshot['analysis_at'], now) <= 90:
-            raise Waiting('Live money is on — waiting for fresh, complete strategy data')
-        self._gate('data_expiry')
-        if not data_unexpired(snapshot.get('data_valid_until'), now):
-            raise Waiting('Live money is on — data verification expired; waiting for a fresh update')
-        setup = snapshot.get('setup') if isinstance(snapshot.get('setup'), dict) else {}
+    def _ready_contract(self, setup, now):
+        setup = setup if isinstance(setup, dict) else {}
         checks = setup.get('checks') if isinstance(setup.get('checks'), list) else []
         self._gate('signal_checks')
         if (setup.get('state') != 'SETUP_READY' or len(checks) != len(CHECKS)
@@ -372,11 +369,54 @@ class Executor:
             raise Waiting('Live money is on — waiting for ' + failed.lower())
         self._gate('signal_age_policy')
         expires = signal_expiry(setup, now)
+        self._gate('signal_direction')
+        if setup.get('direction') not in ('long', 'short'):
+            raise Waiting('Setup direction is missing')
+        self._gate('price_geometry')
+        try:
+            stop, reference, target = map(decimal, (setup['stop'], setup['entry'], setup['target']))
+        except (KeyError, ValueError, TypeError, ArithmeticError):
+            raise Waiting('Waiting for valid setup entry, stop and target prices') from None
+        if not (0 < stop < reference < target if setup['direction'] == 'long' else 0 < target < reference < stop):
+            raise Waiting('Waiting for valid setup entry, stop and target prices')
+        return expires
+
+    @staticmethod
+    def _event_key(setup):
         identity = f'{POLICY_VERSION}|QQQ|{setup["event_id"]}'
-        key = sha256(identity.encode()).hexdigest()[:24]
+        return sha256(identity.encode()).hexdigest()[:24]
+
+    def _entry_candidate(self, setup, now):
+        # Validate the complete analyzer contract before looking at consumption.
+        # Malformed/stale alternatives cannot hide behind an otherwise valid top
+        # candidate. Legacy snapshots lacking the list retain one-candidate use.
+        self._ready_contract(setup, now)
+        self._gate('signal_checks')
+        candidates = setup.get('entry_candidates', [setup])
+        if not isinstance(candidates, list) or not candidates:
+            raise Waiting('Waiting for a valid list of ready entry opportunities')
+        validated = [(candidate, self._ready_contract(candidate, now), self._event_key(candidate))
+                     for candidate in candidates]
         self._gate('setup_deduplication')
-        if self.store.trade_exists(key):
-            raise Waiting('This setup has already been handled; waiting for the next event')
+        for candidate, expires, key in validated:
+            if not self.store.trade_exists(key):
+                self._selected_entry_signal = candidate
+                return candidate, expires, key
+        raise Waiting('This setup has already been handled; waiting for the next event')
+
+    def _entry(self, snapshot):
+        now = self.now()
+        self._gate('vix_candles')
+        if snapshot.get('feeds', {}).get('vix') != 'current':
+            raise Waiting('Live money is on — waiting for actual VIX data. No entry can be sent yet.')
+        self._gate('analysis_freshness')
+        if snapshot.get('data_errors') or not snapshot.get('analysis_at') or not 0 <= elapsed(snapshot['analysis_at'], now) <= 90:
+            raise Waiting('Live money is on — waiting for fresh, complete strategy data')
+        self._gate('data_expiry')
+        if not data_unexpired(snapshot.get('data_valid_until'), now):
+            raise Waiting('Live money is on — data verification expired; waiting for a fresh update')
+        setup = snapshot.get('setup') if isinstance(snapshot.get('setup'), dict) else {}
+        setup, expires, key = self._entry_candidate(setup, now)
         self._gate('broker_snapshot')
         account, positions, orders, clock = (self.broker.account(), self.broker.positions(), self.broker.orders(), self.broker.clock())
         self._gate('account_status')

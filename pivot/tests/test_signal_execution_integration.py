@@ -5,8 +5,10 @@ label exercises permission checks only. These tests make no provider requests,
 and cannot establish that today's market or the source videos supply a trade.
 """
 from dataclasses import replace
+from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 
@@ -15,7 +17,7 @@ from pivot.policy import POLICY_VERSION
 from pivot.store import Store
 from pivot.strategy import analyze
 from pivot.tests.test_strategy_v2 import NOW, candle, leader_market, setup_scenario
-from pivot.tests.test_execution import ready
+from pivot.tests.test_execution import ready, identify_event
 from pivot.tests.test_insight_execution import InsightBroker
 
 
@@ -196,3 +198,127 @@ def test_actual_ready_signal_with_stale_analysis_cannot_start_order(tmp_path, me
     executor.tick(snapshot)
     assert broker.sent == [] and broker.confirmed == [] and store.active_trade() is None
     assert executor.execution_check['gate'] == 'analysis_freshness'
+
+
+def multiple_ready_snapshot(kind):
+    """Real analyzer output from manufactured simultaneous opportunity fixtures."""
+    market, leaders, vix, now = setup_scenario('short', 'four_hour_retest')
+    if kind == 'methods':
+        market.bars[1440] = [candle(now - timedelta(days=1), high=109.5, low=90, minutes=1440)]
+        market.previous_session = '2026-09-15'
+    else:
+        market.bars[60] = [candle(now - timedelta(hours=2), 104, 105, 103, 104, 60),
+                           candle(now - timedelta(hours=1), 104, 112, 103, 111, 60),
+                           candle(now, 110.5, 112, 105, 111, 60)]
+    snapshot = ready(now)
+    snapshot['setup'] = analyze(market, leaders, vix, now)
+    candidates = snapshot['setup']['entry_candidates']
+    assert len(candidates) >= 2 and all(c['state'] == 'SETUP_READY' for c in candidates)
+    assert snapshot['setup']['event_id'] == candidates[0]['event_id']
+    assert len({c['event_id'] for c in candidates}) == len(candidates)
+    assert (candidates[0]['strategy_id'] != candidates[1]['strategy_id']) == (kind == 'methods')
+    return snapshot
+
+
+def consumed_event(store, candidate):
+    # A durable, already-finished attempt, without simulating another broker POST.
+    key = sha256(f'{POLICY_VERSION}|QQQ|{candidate["event_id"]}'.encode()).hexdigest()[:24]
+    trade = {'id': key, 'stage': 'finished'}
+    assert store.reserve_trade(trade)
+    store.save_trade(trade, finished=True)
+
+
+def candidate_engine(tmp_path, snapshot):
+    candidate = snapshot['setup']['entry_candidates'][0]
+    reference = Decimal(str(candidate['entry']))
+    executor, broker, store = engine(tmp_path, str(reference.quantize(Decimal('.01'))))
+    broker.bid, broker.ask = str(reference), str(reference + Decimal('.01'))
+    return executor, broker, store
+
+
+@pytest.mark.parametrize('kind', ['methods', 'areas'])
+def test_consumed_top_opportunity_cannot_starve_distinct_ready_analyzer_candidate(tmp_path, kind):
+    snapshot = multiple_ready_snapshot(kind)
+    original = deepcopy(snapshot)
+    top, second = snapshot['setup']['entry_candidates'][:2]
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    consumed_event(store, top)
+    executor.tick(snapshot)
+    trade = store.active_trade()
+    assert trade['signal']['event_id'] == second['event_id']
+    assert len(broker.sent) == 2 and broker.sent[1]['type'] == 'stop'
+    assert len(broker.confirmed) == 1
+    assert snapshot == original  # Execution selection cannot rewrite analyzer evidence.
+    check = store.latest_execution_check()
+    assert check['signal']['event_id'] == top['event_id']
+    assert check['selected_entry_signal']['event_id'] == second['event_id']
+    assert check['selected_entry_signal']['strategy_id'] == second['strategy_id']
+    assert check['trade']['id'] == trade['id']
+
+
+@pytest.mark.parametrize('kind', ['methods', 'areas'])
+def test_all_consumed_analyzer_candidates_stop_before_broker_reads(tmp_path, kind):
+    snapshot = multiple_ready_snapshot(kind)
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    for candidate in snapshot['setup']['entry_candidates']:
+        consumed_event(store, candidate)
+    broker.account = lambda: pytest.fail('Consumed opportunities need no broker reads')
+    executor.tick(snapshot)
+    assert broker.sent == [] and broker.confirmed == [] and store.active_trade() is None
+    assert executor.execution_check['gate'] == 'setup_deduplication'
+    assert executor.execution_check['selected_entry_signal'] is None
+
+
+@pytest.mark.parametrize('consume_top', [False, True])
+@pytest.mark.parametrize('invalid', ['version', 'identity', 'checks', 'expired', 'direction', 'geometry'])
+def test_every_alternative_contract_is_validated_before_any_broker_read(tmp_path, consume_top, invalid):
+    snapshot = multiple_ready_snapshot('methods')
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    top, alternative = snapshot['setup']['entry_candidates']
+    if consume_top:
+        consumed_event(store, top)
+    if invalid == 'version':
+        alternative['policy_version'] = 'nasdaq-video-interpretation-v1'
+    elif invalid == 'identity':
+        alternative['event_id'] = 'ev2_' + 'a' * 64
+    elif invalid == 'checks':
+        alternative['checks'] = alternative['checks'][:-1]
+    elif invalid == 'expired':
+        alternative.update(event_origin_at=(NOW - timedelta(minutes=180)).isoformat(),
+                           event_expires_at=NOW.isoformat())
+        identify_event(alternative)
+    elif invalid == 'direction':
+        alternative['direction'] = None
+    else:
+        alternative['stop'] = float('nan')
+    broker.account = lambda: pytest.fail('Invalid alternatives must stop before any broker reads')
+    executor.tick(snapshot)
+    assert broker.sent == [] and broker.confirmed == [] and store.active_trade() is None
+    assert executor.execution_check['outcome'] == 'waiting'
+    assert executor.execution_check['selected_entry_signal'] is None
+
+
+@pytest.mark.parametrize('candidates', [None, {}, [], [None]])
+def test_present_malformed_candidate_list_cannot_use_single_setup_fallback(tmp_path, candidates):
+    snapshot = multiple_ready_snapshot('methods')
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    snapshot['setup']['entry_candidates'] = candidates
+    executor.tick(snapshot)
+    assert broker.sent == [] and broker.confirmed == [] and store.active_trade() is None
+    assert executor.execution_check['outcome'] == 'waiting'
+
+
+def test_selected_candidate_quote_failure_does_not_hop_to_another_opportunity(tmp_path):
+    snapshot = multiple_ready_snapshot('methods')
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    top, second = snapshot['setup']['entry_candidates']
+    # The first short is structurally valid but its stop is inside the current
+    # ask. The second opportunity has a wider stop and could pass this quote.
+    snapshot['setup']['stop'] = top['stop'] = 111.005
+    executor.tick(snapshot)
+    assert broker.sent == [] and broker.confirmed == [] and store.active_trade() is None
+    assert executor.execution_check['gate'] == 'price_geometry'
+    assert executor.execution_check['selected_entry_signal']['event_id'] == top['event_id']
+    consumed_event(store, top)
+    executor.tick(snapshot)
+    assert len(broker.sent) == 2 and store.active_trade()['signal']['event_id'] == second['event_id']
