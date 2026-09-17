@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from pivot.models import Bar, Market, MAG7
-from pivot.strategy import AnalysisPolicy, leader_confirmation, leader_diagnostics, zones
+from research.baseline_v1 import AnalysisPolicy, leader_confirmation, leader_diagnostics, zones
 from research.data import at_time, expected_ends
 
 

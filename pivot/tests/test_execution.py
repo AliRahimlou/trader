@@ -1,6 +1,8 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
+import json
 import pytest
 from fastapi.testclient import TestClient
 from pivot.api import create_app
@@ -76,12 +78,28 @@ class FakeBroker:
             self.book[oid]['status'] = 'canceled'
 
 
+def identify_event(setup):
+    """Canonical identity for manufactured admission inputs, excluding direction."""
+    zone = setup['event_zone']
+    canonical = ['QQQ', setup['strategy_id'], float(zone['low']).hex(), float(zone['high']).hex(),
+                 datetime.fromisoformat(zone['established_at']).astimezone(timezone.utc).isoformat(),
+                 datetime.fromisoformat(setup['event_origin_at']).astimezone(timezone.utc).isoformat()]
+    setup['event_id'] = 'ev2_' + sha256(json.dumps(canonical, separators=(',', ':')).encode()).hexdigest()
+    return setup
+
+
 def ready(at=NOW, direction='long'):
-    return dict(analysis_at=at.isoformat(), data_valid_until=(at+timedelta(seconds=90)).isoformat(), feeds={'vix': 'current'}, data_errors=[],
+    snapshot = dict(analysis_at=at.isoformat(), data_valid_until=(at+timedelta(seconds=90)).isoformat(), feeds={'vix': 'current'}, data_errors=[],
         setup=dict(state='SETUP_READY', checks=[dict(name=n, passed=True) for n in CHECKS],
-                   policy_version='nasdaq-video-interpretation-v1', event_at=at.isoformat(),
+                   policy_version='nasdaq-video-interpretation-v2', strategy_id='prior_day_sweep',
+                   event_zone={'low': 100.0, 'high': 100.0, 'source': 'previous-day high',
+                               'established_at': (at-timedelta(days=1)).isoformat()},
+                   event_origin_at=at.isoformat(), event_at=at.isoformat(),
+                   event_expires_at=(at+timedelta(minutes=180)).isoformat(), latest_evidence_at=at.isoformat(),
                    direction=direction, entry=100, stop=90 if direction=='long' else 110,
                    target=110 if direction=='long' else 90))
+    identify_event(snapshot['setup'])
+    return snapshot
 
 
 @pytest.fixture

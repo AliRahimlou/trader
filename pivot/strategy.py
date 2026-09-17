@@ -1,22 +1,27 @@
-"""One Nasdaq workflow from the two primary recordings.
+"""Two independently evaluated Nasdaq location methods from the primary recordings.
 
 Closed-bar geometry is an explicit interpretation; broker admission is checked separately.
 No score, FVG, first-clip tape/VWAP rule, or ETF volatility fallback is imported.
 """
-from datetime import timedelta
+from datetime import timedelta, timezone
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from math import isfinite
 from zoneinfo import ZoneInfo
 from .models import Zone, MAG7
 
 ET = ZoneInfo('America/New_York')
+ANALYSIS_VERSION = 'nasdaq-video-interpretation-v2'
+EVENT_LIFETIME_MINUTES = 180
+LEADER_MINUTES = 5
 
 
 @dataclass(frozen=True)
 class AnalysisPolicy:
-    """Explicit research parameters. The running app uses unchanged defaults."""
+    """Declared v2 interpretations, frozen before replay; not creator formulas."""
     zone_tolerance: float = 0.001
-    persistence_bars: int = 1
+    persistence_bars: int = 3
     minimum_leaders: int = 4
     maximum_opposition: int = 0
 
@@ -73,6 +78,43 @@ def zones(bars, before, tolerance=0.001):
                  max(p[1] for p in g), '4h repeated pivot', len(g)) for g in groups if len(g) >= 2]
 
 
+def interaction_zones(bars, before, tolerance=0.001):
+    """Fixed historical anchors with repeated nonadjacent touches or crossings.
+
+    Each closed bar introduces its low/high as candidates. First chronological
+    anchor wins overlapping bands; bounds never move as later evidence arrives.
+    A second interaction at least two bar indices later establishes the area.
+    Both wick touches and body crossings count, without requiring a swing.
+    This is an explicit approximation of manually marked areas, not a recovered
+    supply/demand indicator. Nasdaq uses 4h inputs; leaders use actual 5m inputs.
+    """
+    if not bars or any(a.end >= b.end for a, b in zip(bars, bars[1:])):
+        return []
+    minutes = bars[0].minutes
+    if any(b.minutes != minutes for b in bars):
+        return []
+    history = [b for b in bars if b.end < before]
+    anchors = []
+    for index, bar in enumerate(history):
+        for anchor in anchors:
+            if (index - anchor['last_index'] >= 2
+                    and bar.low <= anchor['high'] and bar.high >= anchor['low']):
+                anchor['touches'] += 1
+                anchor['last_index'] = index
+                if anchor['established_at'] is None:
+                    anchor['established_at'] = bar.end
+        for price in (bar.low, bar.high):
+            low, high = price * (1 - tolerance), price * (1 + tolerance)
+            if any(low <= a['high'] and high >= a['low'] for a in anchors):
+                continue
+            anchors.append({'low': low, 'high': high, 'touches': 1,
+                            'last_index': index, 'established_at': None})
+    source = ('4h' if minutes == 240 else f'{minutes}m') + ' repeated interaction'
+    return sorted((Zone(a['low'], a['high'], a['established_at'], source, a['touches'])
+                   for a in anchors if a['established_at'] is not None),
+                  key=lambda z: (z.low, z.high, z.established_at))
+
+
 def prior_day_zones(market, now):
     today = now.astimezone(ET).date()
     days = [b for b in closed(market, 1440, now) if (b.end - timedelta(seconds=1)).astimezone(ET).date() < today]
@@ -97,95 +139,99 @@ def reaction(previous, current, zone):
     return None
 
 
-def pivot_event(bars, levels):
-    if len(bars) < 3:
-        return None
-    retest = bars[-1]
-    for zone in levels:
-        # Retests can follow several candles. A close through the opposite side
-        # invalidates a continuation; the latest bar must supply the reaction.
-        for i in range(len(bars)-2, 0, -1):
-            before, broken = bars[i-1:i+1]
-            if zone.established_at >= broken.end-timedelta(minutes=broken.minutes):
-                continue
-            between = bars[i+1:-1]
-            if before.close <= zone.high < broken.close and all(b.close >= zone.low for b in between) and retest.low <= zone.high and retest.close > zone.high and retest.close > retest.open:
-                return ('long', zone, 'break and retest', retest)
-            if before.close >= zone.low > broken.close and all(b.close <= zone.high for b in between) and retest.high >= zone.low and retest.close < zone.low and retest.close < retest.open:
-                return ('short', zone, 'break and retest', retest)
-        broken=bars[-2]
-        if zone.established_at >= broken.end-timedelta(minutes=broken.minutes):
-            continue
-        if broken.high > zone.high and retest.close < zone.low and retest.close < retest.open and retest.high >= zone.low:
-            return ('short', zone, 'sweep and reclaim', retest)
-        if broken.low < zone.low and retest.close > zone.high and retest.close > retest.open and retest.low <= zone.high:
-            return ('long', zone, 'sweep and reclaim', retest)
-    return None
-
-
 def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
-    """Point-in-time votes with evidence, including rejected and expired reactions.
+    """Five-minute location/rejection plus bounded, still-valid follow-through.
 
-    Persistent votes belong to one completed Nasdaq event and session. The most
-    recent reaction replaces an older one; a close through its opposite zone
-    boundary invalidates it. A zone is reconstructed at the reaction's start,
-    so later confirming pivots cannot justify an earlier vote.
+    Without a setup origin these are observations only. An admitted branch
+    supplies its originating break time so unrelated earlier reactions cannot
+    accumulate. No active/recent reaction is inferred from fifteen-minute bars.
     """
     rows = {}
     for symbol in MAG7:
         market = leaders.get(symbol)
-        if market is None or not fresh(market, now, 15):
-            rows[symbol] = {'vote': None, 'reason': 'current 15-minute data missing', 'zones': []}
-            continue
-        bars = closed(market, 15, now)
-        four_hour = closed(market, 240, now)
-        levels = zones(four_hour, bars[-1].end - timedelta(minutes=15), policy.zone_tolerance)
-        row = {'vote': None, 'reason': 'no zone reaction' if levels else 'no eligible zones',
-               'latest_bar_at': bars[-1].end.isoformat(), 'reaction_at': None, 'age_minutes': None,
-               'latest_close': bars[-1].close,
-               'zones': [{'low': z.low, 'high': z.high, 'established_at': z.established_at.isoformat(),
-                          'touches': z.touches, 'touched_by_latest_bar': bars[-1].low <= z.high and bars[-1].high >= z.low} for z in levels]}
+        row = {'vote': None, 'reason': 'current 5-minute data missing', 'zones': [],
+               'timeframe_minutes': LEADER_MINUTES, 'observational_only': setup_at is None,
+               'latest_bar_at': None, 'reaction_at': None, 'age_minutes': None,
+               'conflicting_reactions': False}
         rows[symbol] = row
+        if market is None or not fresh(market, now, LEADER_MINUTES):
+            continue
+        bars = closed(market, LEADER_MINUTES, now)
+        latest = bars[-1]
+        levels = interaction_zones(bars, latest.end - timedelta(minutes=LEADER_MINUTES), policy.zone_tolerance)
+        row.update(reason='no zone reaction' if levels else 'no eligible zones',
+                   latest_bar_at=latest.end.isoformat(), latest_close=latest.close,
+                   zones=[{'low': z.low, 'high': z.high, 'source': z.source,
+                           'established_at': z.established_at.isoformat(), 'touches': z.touches,
+                           'touched_by_latest_bar': latest.low <= z.high and latest.high >= z.low}
+                          for z in levels])
         if len(bars) < 2:
             continue
-        if policy.persistence_bars > 1 and setup_at is None:
-            row['reason'] = 'no active Nasdaq event; persistent votes are not accumulated'
+        evidence = []
+        discarded = []
+        # Scan independently per area. Otherwise iteration order could hide an
+        # opposing reaction at a different area on a still-active setup.
+        for zone in levels:
+            for index in range(len(bars)-1, 0, -1):
+                current, previous = bars[index], bars[index-1]
+                observed_age = (now - current.end).total_seconds() / 60
+                if observed_age >= LEADER_MINUTES * policy.persistence_bars:
+                    break
+                if (current.end.astimezone(ET).date() != now.astimezone(ET).date()
+                        or (setup_at is not None and current.end < setup_at)):
+                    continue
+                if current.end - previous.end != timedelta(minutes=LEADER_MINUTES):
+                    continue
+                vote = reaction(previous, current, zone)
+                if vote is None:
+                    continue
+                tail = bars[index:]
+                gap = any(b.end - a.end != timedelta(minutes=LEADER_MINUTES) for a, b in zip(tail, tail[1:]))
+                invalidated = any(b.close < zone.low if vote == 'long' else b.close > zone.high
+                                  for b in bars[index+1:])
+                continuing = latest.close >= current.close if vote == 'long' else latest.close <= current.close
+                item = {'vote': vote, 'at': current.end,
+                        'age': (latest.end - current.end).total_seconds() / 60, 'zone': zone}
+                if gap or invalidated or not continuing:
+                    reason = ('intervening 5-minute candle missing' if gap else
+                              'invalidated by subsequent close through zone' if invalidated else
+                              'reaction has no current directional follow-through')
+                    discarded.append((item, reason))
+                else:
+                    evidence.append(item)
+                # A newer reaction at this area replaces older evidence there.
+                break
+        directions = {item['vote'] for item in evidence}
+        if len(directions) > 1:
+            row.update(reason='conflicting active area reactions', conflicting_reactions=True)
             continue
-        for idx in range(len(bars)-1, max(0, len(bars)-policy.persistence_bars-1), -1):
-            current, previous = bars[idx], bars[idx-1]
-            if policy.persistence_bars > 1 and (current.end.astimezone(ET).date() != now.astimezone(ET).date()
-                    or current.end < setup_at):
-                continue
-            # A missing candle cannot lengthen the declared persistence window.
-            age = (bars[-1].end-current.end).total_seconds()/60
-            if age > 15*(policy.persistence_bars-1):
-                continue
-            known = levels if idx == len(bars)-1 else zones(four_hour, current.end-timedelta(minutes=15), policy.zone_tolerance)
-            found = next(((d, z) for z in known if (d := reaction(previous, current, z))), None)
-            if found is None:
-                continue
-            vote, zone = found
-            row.update(reaction_at=current.end.isoformat(), age_minutes=age,
-                       reaction_zone={'low':zone.low,'high':zone.high,'established_at':zone.established_at.isoformat()})
-            invalidated = any(b.close < zone.low if vote == 'long' else b.close > zone.high for b in bars[idx+1:])
-            row.update(vote=None if invalidated else vote,
-                       reason='invalidated by subsequent close through zone' if invalidated else 'current reaction' if age == 0 else 'persistent reaction')
-            break
+        if evidence:
+            # Most recent evidence first; nearest area breaks same-time ties.
+            chosen = min(evidence, key=lambda e: (-e['at'].timestamp(), abs(latest.close-e['zone'].mid), e['zone'].low))
+            zone = chosen['zone']
+            row.update(vote=chosen['vote'], reaction_at=chosen['at'].isoformat(), age_minutes=chosen['age'],
+                       reason='current reaction' if chosen['at'] == latest.end else 'persistent reaction',
+                       reaction_zone={'low': zone.low, 'high': zone.high, 'source': zone.source,
+                                      'established_at': zone.established_at.isoformat()})
+        elif discarded:
+            chosen, reason = max(discarded, key=lambda item: item[0]['at'])
+            row.update(reason=reason, reaction_at=chosen['at'].isoformat(), age_minutes=chosen['age'])
     return rows
 
 
-def leader_confirmation(leaders, direction, now, policy=BASELINE_POLICY, setup_at=None):
-    rows = leader_diagnostics(leaders, now, policy, setup_at)
+def _leader_confirmation(rows, direction, policy):
     for symbol, row in rows.items():
-        if row['reason'] == 'current 15-minute data missing':
-            return False, f'{symbol}: current 15-minute data missing'
+        if row['reason'] == 'current 5-minute data missing' or row.get('conflicting_reactions'):
+            return False, f'{symbol}: {row["reason"]}'
     votes = {symbol: row['vote'] for symbol, row in rows.items()}
     opposite = 'short' if direction == 'long' else 'long'
-    matches = sum(v == direction for v in votes.values())
-    # Distinct companies; GOOG is not counted a second time. Contradictory rejection denies entry.
-    okay = matches >= policy.minimum_leaders and sum(v == opposite for v in votes.values()) <= policy.maximum_opposition
-    detail = ', '.join(f'{s}: {d or "no zone reaction"}' for s, d in votes.items())
-    return okay, detail
+    okay = (sum(v == direction for v in votes.values()) >= policy.minimum_leaders
+            and sum(v == opposite for v in votes.values()) <= policy.maximum_opposition)
+    return okay, ', '.join(f'{symbol}: {vote or "no zone reaction"}' for symbol, vote in votes.items())
+
+
+def leader_confirmation(leaders, direction, now, policy=BASELINE_POLICY, setup_at=None):
+    return _leader_confirmation(leader_diagnostics(leaders, now, policy, setup_at), direction, policy)
 
 
 def vix_confirmation(vix, direction, now):
@@ -219,72 +265,216 @@ def vix_candles_fresh(vix, now):
 
 
 
-def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
-    """One Nasdaq method from V2/V3. No V1 tape/VWAP or unrelated indicators.
+def _event_identity(method, zone, origin):
+    # Retest time, current leader direction, and order price cannot create a
+    # second identity for the same initiating location event.
+    payload = ['QQQ', method, float(zone.low).hex(), float(zone.high).hex(),
+               zone.established_at.astimezone(timezone.utc).isoformat(),
+               origin.end.astimezone(timezone.utc).isoformat()]
+    return 'ev2_' + sha256(json.dumps(payload, separators=(',', ':')).encode()).hexdigest()
 
-    Rules not specified numerically by the videos are versioned interpretations,
-    never described as verbatim instructions. The result is a setup for review,
-    not permission for an order.
+
+def location_events(bars, levels, method, now):
+    """Latest bounded state per pre-existing area, reconstructed without writes.
+
+    Break/retest: first closed crossing starts the event; a later hourly
+    directional retest confirms it. A close through the opposite zone boundary
+    invalidates it. Prior-day sweep: no reclaim is invented; a later close
+    through the sweep candle's opposite extreme invalidates the location.
+    Both expire 180 minutes after origin, on session change, or an hourly gap.
+    A fresh crossing is required to create a new event after invalidation/expiry.
     """
-    checks=[]
-    def check(name, passed, detail):
-        checks.append({'name':name,'passed':bool(passed),'detail':detail})
-        return bool(passed)
-    result={'state':'WATCHING','can_enter':False,'checks':checks,'levels':[],
-            'direction':None,'entry':None,'stop':None,'target':None,'event_at':None,
-            'policy_version':'nasdaq-video-interpretation-v1','execution_blocker':'Waiting for the complete strategy setup'}
-    if not check('Current Nasdaq observation',market.symbol=='QQQ' and fresh(market,now,60),
-                 'Analysis uses QQQ as a Nasdaq ETF proxy; fresh completed 1-hour candles required'):
-        return result
-    bars=closed(market,60,now)
-    # Premarked before the start of the potential event, not constructed around its outcome.
-    before=bars[-1].end-timedelta(minutes=120)
-    levels=zones(closed(market,240,now),before,policy.zone_tolerance)
-    previous=prior_day_zones(market,now)
-    result['levels']=[{'low':z.low,'high':z.high,'source':z.source,'established_at':z.established_at.isoformat()} for z in levels+previous]
-    if not check('Premarked levels',levels or previous,'Repeated 4-hour levels and previous-day extremes are marked before the event'):
-        return result
-    event=pivot_event(bars,levels)
-    # V2 describes a sweep as a break above/below yesterday's boundary. Do not
-    # invent a mandatory close-back-inside or blend in the old daily-sweep detector.
-    if event is None and len(bars)>=2:
-        prior,current=bars[-2:]
-        for zone in previous:
-            if zone.established_at>=current.end-timedelta(minutes=60):
+    if (method not in ('four_hour_retest', 'prior_day_sweep') or len(bars) < 2
+            or any(b.minutes != 60 for b in bars)
+            or any(a.end >= b.end for a, b in zip(bars, bars[1:]))):
+        return []
+    bars = [b for b in bars if b.end <= now]
+    events = []
+    day = now.astimezone(ET).date()
+    for zone in levels:
+        active = None
+        for previous, current in zip(bars, bars[1:]):
+            if current.end.astimezone(ET).date() != day:
                 continue
-            if (zone.source=='previous-day high' and prior.high<=zone.high<current.high) or (zone.source=='previous-day low' and prior.low>=zone.low>current.low):
-                event=(None,zone,'previous-day level sweep',current)
-                break
-    if event is None:
-        current=bars[-1]
-        touched=any(current.low<=z.high and current.high>=z.low for z in levels+previous)
-        broken=len(bars)>1 and any((bars[-2].close<=z.high<current.close) or (bars[-2].close>=z.low>current.close) for z in levels)
-        result['state']='WAITING_FOR_RETEST' if broken else 'AT_LEVEL' if touched else 'WATCHING'
-        check('Nasdaq level event',False,'Wait for a break/retest at a 4-hour level, or a sweep of a previous-day extreme')
-        return result
-    _,zone,kind,bar=event
-    result.update(state='CONFIRMING',event=kind,event_at=bar.end.isoformat(),entry=bar.close)
-    check('Nasdaq level event',True,kind+' · '+zone.source)
-    confirmations={direction:leader_confirmation(leaders,direction,now,policy,bar.end) for direction in ('long','short')}
-    direction=next((d for d,(okay,_) in confirmations.items() if okay),None)
-    if not check('Magnificent Seven at their zones',direction, confirmations[direction][1] if direction else confirmations['long'][1]):
-        return result
-    # The videos select direction from leader/volatility confirmation. A break
-    # above a Nasdaq level is not automatically a long; V3 illustrates a short.
-    result['direction']=direction
-    okay,detail=vix_confirmation(vix,direction,now)
-    check('Actual VIX zone reaction',okay,detail)
-    # Both location sources were already validated and premarked above. A
-    # previous-day sweep must not require an unrelated four-hour target when
-    # an eligible previous-day boundary supplies the next opposing level.
-    target_levels=levels+previous
-    targets=[z.low for z in target_levels if z.low>bar.close] if direction=='long' else [z.high for z in target_levels if z.high<bar.close]
-    target=(min(targets) if direction=='long' else max(targets)) if targets else None
-    stop=min(zone.low,bar.low)-0.01 if direction=='long' else max(zone.high,bar.high)+0.01
-    # This exit policy is an explicit implementation proposal, not specified in V2/V3.
-    geometry=target is not None and (stop<bar.close<target if direction=='long' else target<bar.close<stop)
-    check('Stop and target',geometry,'Execution policy: stop beyond event/zone, target next opposing premarked 4-hour or previous-day level; the videos omit exit rules')
-    result.update(stop=round(stop,2),target=round(target,2) if target else None)
-    if all(c['passed'] for c in checks):
+            start = current.end - timedelta(minutes=60)
+            if zone.established_at >= start:
+                continue
+            contiguous = (current.end - previous.end == timedelta(minutes=60)
+                          or previous.end.astimezone(ET).date() != day)
+            if active is not None and active['state'] not in ('EXPIRED', 'INVALIDATED'):
+                if current.end >= active['expires_at']:
+                    active.update(state='EXPIRED', reason='The originating event reached its 180-minute limit')
+                elif not contiguous:
+                    active.update(state='INVALIDATED', reason='An intervening hourly candle is missing')
+                else:
+                    opposite_edge = (zone.low if active['break_direction'] == 'long' else zone.high)
+                    if method == 'prior_day_sweep':
+                        opposite_edge = (active['origin'].low if active['break_direction'] == 'long'
+                                         else active['origin'].high)
+                    invalid = (current.close < opposite_edge if active['break_direction'] == 'long'
+                               else current.close > opposite_edge)
+                    if invalid:
+                        active.update(state='INVALIDATED', reason='A later close crossed the event invalidation boundary')
+                    elif active['confirmed'] is None:
+                        retested = ((current.low <= zone.high and current.close > zone.high and current.close > current.open)
+                                    if active['break_direction'] == 'long' else
+                                    (current.high >= zone.low and current.close < zone.low and current.close < current.open))
+                        if retested:
+                            active.update(confirmed=current, state='CONFIRMING', reason='Hourly break and retest confirmed')
+            if active is not None and active['state'] not in ('EXPIRED', 'INVALIDATED'):
+                continue
+            if not contiguous:
+                continue
+            if method == 'four_hour_retest':
+                direction = ('long' if previous.close <= zone.high < current.close else
+                             'short' if previous.close >= zone.low > current.close else None)
+            else:
+                direction = ('long' if zone.source == 'previous-day high' and previous.high <= zone.high < current.high else
+                             'short' if zone.source == 'previous-day low' and previous.low >= zone.low > current.low else None)
+            if direction is None:
+                continue
+            confirmed = current if method == 'prior_day_sweep' else None
+            active = {'id': _event_identity(method, zone, current), 'zone': zone, 'origin': current,
+                      'confirmed': confirmed, 'break_direction': direction,
+                      'expires_at': current.end + timedelta(minutes=EVENT_LIFETIME_MINUTES),
+                      'state': 'CONFIRMING' if confirmed else 'WAITING_FOR_RETEST',
+                      'reason': 'Previous-day boundary swept' if confirmed else 'Break observed; waiting for the hourly retest'}
+        if active is not None:
+            if now >= active['expires_at']:
+                active.update(state='EXPIRED', reason='The originating event reached its 180-minute limit')
+            events.append(active)
+    return events
+
+
+def _zone_dict(zone):
+    return {'low': zone.low, 'high': zone.high, 'source': zone.source,
+            'established_at': zone.established_at.isoformat()}
+
+
+def _empty_result(method, label):
+    return {'id': method, 'label': label, 'state': 'WATCHING', 'can_enter': False,
+            'checks': [], 'levels': [], 'direction': None, 'entry': None, 'stop': None, 'target': None,
+            'event': None, 'event_at': None, 'event_id': None, 'event_origin_at': None,
+            'event_expires_at': None, 'latest_evidence_at': None,
+            'policy_version': ANALYSIS_VERSION, 'execution_blocker': 'Waiting for the complete strategy setup'}
+
+
+def _checked(result, name, passed, detail):
+    result['checks'].append({'name': name, 'passed': bool(passed), 'detail': detail})
+    return bool(passed)
+
+
+def _finish(result):
+    result['blockers'] = [c['name'] for c in result['checks'] if not c['passed']]
+    return result
+
+
+def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
+    result = {**base, 'checks': list(base['checks'])}
+    origin, zone, confirmed = event['origin'], event['zone'], event['confirmed']
+    result.update(state=event['state'], event_id=event['id'], event_origin_at=origin.end.isoformat(),
+                  event_expires_at=event['expires_at'].isoformat(),
+                  event_at=confirmed.end.isoformat() if confirmed else None,
+                  event='break and retest' if result['id'] == 'four_hour_retest' else 'previous-day level sweep',
+                  event_zone=_zone_dict(zone), latest_evidence_at=bars[-1].end.isoformat(),
+                  event_invalidation_price=(zone.low if event['break_direction'] == 'long' else zone.high)
+                  if result['id'] == 'four_hour_retest' else
+                  (origin.low if event['break_direction'] == 'long' else origin.high))
+    result['leader_evidence'] = leader_diagnostics(leaders, now, policy, origin.end)
+    if not _checked(result, 'Nasdaq level event', event['state'] == 'CONFIRMING', event['reason']):
+        return _finish(result)
+    rows = result['leader_evidence']
+    confirmations = {d: _leader_confirmation(rows, d, policy) for d in ('long', 'short')}
+    direction = next((d for d, (okay, _) in confirmations.items() if okay), None)
+    if not _checked(result, 'Magnificent Seven at their zones', direction,
+                    confirmations[direction][1] if direction else confirmations['long'][1]):
+        return _finish(result)
+    result['direction'] = direction
+    okay, detail = vix_confirmation(vix, direction, now)
+    _checked(result, 'Actual VIX zone reaction', okay, detail)
+    # Location direction is independent of trade direction, as in V3's short
+    # after an upward break. The exit policy remains an app interpretation.
+    current = bars[-1]
+    result['entry'] = current.close
+    before_origin = origin.end - timedelta(minutes=60)
+    targets = [z.low for z in all_levels if z.established_at < before_origin and z.low > current.close] if direction == 'long' else [
+        z.high for z in all_levels if z.established_at < before_origin and z.high < current.close]
+    target = (min(targets) if direction == 'long' else max(targets)) if targets else None
+    stop = (min(zone.low, origin.low, confirmed.low, current.low) - .01 if direction == 'long' else
+            max(zone.high, origin.high, confirmed.high, current.high) + .01)
+    stop = round(stop, 2)
+    target = round(target, 2) if target is not None else None
+    geometry = target is not None and (stop < current.close < target if direction == 'long' else target < current.close < stop)
+    _checked(result, 'Stop and target', geometry,
+             'Execution interpretation: stop beyond event/zone; target nearest pre-existing 4-hour or previous-day level')
+    result.update(stop=stop, target=target)
+    if all(c['passed'] for c in result['checks']):
         result.update(state='SETUP_READY', execution_blocker='Owner permission and current broker checks still required')
+    return _finish(result)
+
+
+def _rank(result):
+    order = {'SETUP_READY': 6, 'CONFIRMING': 5, 'WAITING_FOR_RETEST': 4,
+             'AT_LEVEL': 3, 'WATCHING': 2, 'INVALIDATED': 1, 'EXPIRED': 0}
+    return (order.get(result['state'], 0), sum(c['passed'] for c in result['checks']),
+            result.get('event_origin_at') or '', result.get('event_id') or '')
+
+
+def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
+    """Independently evaluate the two source location methods; never authorize orders.
+
+    Five-minute leaders, fixed interaction areas, and bounded event/reaction
+    persistence are declared v2 interpretations. QQQ completed-hour sampling
+    and unchanged actual-index fifteen-minute VIX confirmation remain explicit.
+    """
+    methods = [('four_hour_retest', '4-hour areas / hourly break and retest'),
+               ('prior_day_sweep', 'Previous-day boundary sweep')]
+    rows = []
+    qualified = []
+    valid = market is not None and market.symbol == 'QQQ' and fresh(market, now, 60)
+    bars = closed(market, 60, now) if valid else []
+    all_levels = []
+    if valid:
+        levels = interaction_zones(closed(market, 240, now), bars[-1].end, policy.zone_tolerance)
+        previous = prior_day_zones(market, now)
+        all_levels = levels + previous
+    for method, label in methods:
+        result = _empty_result(method, label)
+        if not _checked(result, 'Current Nasdaq observation', valid,
+                        'QQQ Nasdaq ETF proxy; fresh completed 1-hour candles required'):
+            rows.append(_finish(result))
+            continue
+        method_levels = levels if method == 'four_hour_retest' else previous
+        result.update(levels=[_zone_dict(z) for z in method_levels], latest_evidence_at=bars[-1].end.isoformat())
+        if not _checked(result, 'Premarked levels', method_levels,
+                        'Repeated historical 4-hour interactions' if method == 'four_hour_retest' else 'Verified previous-session high and low'):
+            rows.append(_finish(result))
+            continue
+        events = location_events(bars, method_levels, method, now)
+        if events:
+            candidates = [_evaluate_event(result, event, all_levels, bars, leaders, vix, now, policy) for event in events]
+            qualified.extend(candidate for candidate in candidates if candidate['state'] == 'SETUP_READY')
+            result = max(candidates, key=_rank)
+            result['candidate_count'] = len(candidates)
+        else:
+            touched = any(bars[-1].low <= z.high and bars[-1].high >= z.low for z in method_levels)
+            result['state'] = 'AT_LEVEL' if touched else 'WATCHING'
+            _checked(result, 'Nasdaq level event', False,
+                     'Wait for a closed-hour break and retest at a pre-existing 4-hour area' if method == 'four_hour_retest' else
+                     'Wait for a fresh sweep of the previous-day high or low')
+            _finish(result)
+        rows.append(result)
+    selected = max(rows, key=_rank)
+    result = {key: value for key, value in selected.items() if key not in ('id', 'label')}
+    result.update(strategy_id=selected['id'], strategies=rows, levels=[_zone_dict(z) for z in all_levels])
+    # Preserve every qualified opportunity for admission. A previously handled
+    # event must not hide an unhandled area or the other independently valid
+    # method. Only the executor knows durable consumption; analysis stays pure.
+    result['entry_candidates'] = [
+        {**{key: value for key, value in candidate.items()
+            if key not in ('id', 'label', 'leader_evidence', 'levels', 'candidate_count')},
+         'strategy_id': candidate['id']}
+        for candidate in sorted(qualified, key=_rank, reverse=True)]
+    if result['state'] in ('EXPIRED', 'INVALIDATED'):
+        result['state'] = 'WATCHING'
     return result

@@ -17,7 +17,7 @@ from dotenv import dotenv_values
 from pivot.feeds import ET, ReadOnlyFeeds
 from pivot.history_health import frame_gaps
 from pivot.models import MAG7, timestamp
-from pivot.strategy import analyze, closed, leader_diagnostics, reaction, zones
+from research.baseline_v1 import analyze, closed, leader_diagnostics, reaction, zones
 from .collect import ReadOnlySession
 from .data import at_time, encode_bar, load
 from .offline import disconnected

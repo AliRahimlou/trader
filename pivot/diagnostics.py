@@ -10,9 +10,10 @@ import json
 from .models import MAG7, timestamp
 from .strategy import closed, leader_diagnostics, reaction, vix_candles_fresh, zones
 
-VERSION = 'decision-trace-v1'
+VERSION = 'decision-trace-v2'
 SOURCES = {'alpaca_iex', 'alpaca_sip', 'insightsentry', 'massive_indices'}
-SETUP_KEYS = ('state', 'direction', 'entry', 'stop', 'target', 'event', 'event_at', 'policy_version')
+SETUP_KEYS = ('state', 'strategy_id', 'direction', 'entry', 'stop', 'target', 'event', 'event_at',
+              'event_id', 'event_origin_at', 'event_expires_at', 'latest_evidence_at', 'policy_version')
 ZONE_KEYS = ('low', 'high', 'established_at', 'touches')
 CHECK_NAMES = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
                'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
@@ -33,6 +34,20 @@ def _zone(zone):
             'touches': zone.touches}
 
 
+def _leader_summary(rows):
+    """Branch evidence without duplicating entire historical area lists per method."""
+    keys = ('vote', 'reason', 'timeframe_minutes', 'observational_only', 'latest_bar_at',
+            'latest_close', 'reaction_at', 'age_minutes', 'conflicting_reactions')
+    result = {}
+    for symbol in MAG7:
+        row = rows.get(symbol) or {}
+        result[symbol] = {key: deepcopy(row.get(key)) for key in keys}
+        zone = row.get('reaction_zone') or {}
+        result[symbol]['reaction_zone'] = {key: deepcopy(zone.get(key)) for key in
+                                           ('low', 'high', 'source', 'established_at')} if zone else None
+    return result
+
+
 def _market(market, now, frames):
     if market is None:
         return {'source': None, 'observed_at': None, 'realtime': False, 'frames': {}}
@@ -42,7 +57,7 @@ def _market(market, now, frames):
         bars = closed(market, minutes, now)
         result['frames'][str(minutes)] = {'count': len(bars),
             'latest_at': bars[-1].end.isoformat() if bars else None,
-            'recent': [_bar(b) for b in bars[-2:]] if minutes in (15, 60) else []}
+            'recent': [_bar(b) for b in bars[-2:]] if minutes in (5, 15, 60) else []}
     return result
 
 
@@ -94,10 +109,10 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
                             all(c.get('passed') is True for c in setup['checks']))
     if first is not None:
         first['stage'] = 'signal'
-    event_at = timestamp(setup['event_at']) if setup.get('event_at') else None
-    leaders = leader_diagnostics(markets, now, setup_at=event_at)
+    event_at = timestamp(setup['event_origin_at']) if setup.get('event_origin_at') else None
+    leaders = deepcopy(setup.get('leader_evidence')) or leader_diagnostics(markets, now, setup_at=event_at)
     for symbol, row in leaders.items():
-        row['input'] = _market(markets.get(symbol), now, (15, 240))
+        row['input'] = _market(markets.get(symbol), now, (5, 15, 240))
         row['age_at_observation_minutes'] = ((now - timestamp(row['reaction_at'])).total_seconds() / 60
                                              if row.get('reaction_at') else None)
     vix_bars = closed(vix, 15, now) if vix else []
@@ -113,11 +128,14 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
                   'expected reaction present' if any(r['direction'] == expected for r in reactions) else
                   'expected zone reaction absent')
     qqq = markets.get('QQQ')
-    # Fifteen-minute wall-clock checkpoints also record missing/stalled inputs.
-    checkpoint = now.replace(minute=now.minute // 15 * 15, second=0, microsecond=0)
+    # Five-minute checkpoints retain missing/stalled input evidence at the leader timeframe.
+    checkpoint = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
     clock = broker_clock or {}
     trace = {'version': VERSION, 'captured_at': now.isoformat(), 'checkpoint_at': checkpoint.isoformat(),
              'setup': {key: deepcopy(setup.get(key)) for key in SETUP_KEYS}, 'checks': checks,
+             'strategies': [],
+             'entry_candidates': [{key: deepcopy(candidate.get(key)) for key in SETUP_KEYS}
+                                  for candidate in setup.get('entry_candidates', [])],
              'signal_qualifies': signal_qualifies, 'first_blocker': first,
              'nasdaq': {'input': _market(qqq, now, (15, 60, 240, 1440)),
                        'eligible_zones': [{key: z.get(key) for key in (*ZONE_KEYS, 'source')}
@@ -134,6 +152,16 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
                            'order_authorized_by_trace': False, 'account_observed_at': _time(account_at),
                            'regular_session_open': clock.get('is_open') if isinstance(clock.get('is_open'), bool) else None,
                            'clock_at': _time(clock.get('timestamp'))}}
+    for method in setup.get('strategies', []):
+        method_checks = [{'name': c['name'], 'passed': c.get('passed') is True, 'detail': c.get('detail')}
+                         for c in method.get('checks', []) if c.get('name') in CHECK_NAMES]
+        trace['strategies'].append({**{key: deepcopy(method.get(key)) for key in (*SETUP_KEYS, 'id', 'label')},
+            'checks': method_checks,
+            'first_blocker': next((deepcopy(c) for c in method_checks if not c['passed']), None),
+            'signal_qualifies': bool(method.get('state') == 'SETUP_READY' and method_checks
+                                     and all(c['passed'] for c in method_checks)),
+            'leader_evidence': _leader_summary(method.get('leader_evidence') or {}),
+            'order_authorized_by_trace': False})
     # Fail locally and visibly if any unexpected unserializable/nonfinite value enters evidence.
     json.dumps(trace, allow_nan=False)
     return trace

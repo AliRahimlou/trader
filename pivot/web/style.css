@@ -7,3 +7,5 @@
 
 /* Keep the installed build visible without covering the final page content. */
 body{padding-bottom:90px}.release-badge{position:fixed;z-index:20;right:max(16px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));max-width:min(360px,calc(100vw - 32px));padding:10px 14px;border:1px solid #ccd8c8;border-radius:12px;background:#fffffff5;box-shadow:0 3px 16px #173f2714;color:#324f3b;font-size:11px;line-height:1.5;backdrop-filter:blur(8px)}.release-badge strong,.release-badge span{display:block}.release-badge strong{font-size:12px;font-weight:650}.release-badge span{color:#64725e;margin-top:2px}.release-badge[data-state="pending"]{border-color:#d4b970;background:#fffdf5}.release-badge[data-state="unknown"]{border-color:#b8bfb4}
+
+.leader-summary{margin:0 0 12px}.leader-chips{display:flex;flex-wrap:wrap;gap:8px}.leader-chip{font-size:11px;border:1px solid #e3e8de;border-radius:8px;padding:6px 9px}.leader-chip b{margin-right:4px;font-weight:600}

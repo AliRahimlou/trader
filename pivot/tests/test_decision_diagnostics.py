@@ -13,7 +13,7 @@ from pivot.store import DECISION_TRACE_RETENTION, Store
 from pivot.strategy import analyze
 
 
-NOW = datetime(2026, 9, 17, 16, tzinfo=timezone.utc)
+from pivot.tests.test_strategy_v2 import NOW, setup_scenario
 
 
 def candle(at, opening=100, high=102, low=98, close=101, minutes=60):
@@ -21,23 +21,8 @@ def candle(at, opening=100, high=102, low=98, close=101, minutes=60):
 
 
 def scenario():
-    ranges = [(105, 95), (110, 94), (105, 95), (106, 90), (105, 95),
-              (110, 94), (105, 95), (106, 90), (105, 95)]
-    history = [candle(NOW - timedelta(hours=4*(14-i)), 100, h, l, 100, 240)
-               for i, (h, l) in enumerate(ranges)]
-    qqq = Market('QQQ', {240: history, 60: [
-        candle(NOW-timedelta(hours=2), 108, 109, 107, 108),
-        candle(NOW-timedelta(hours=1), 108, 112, 107, 111),
-        candle(NOW, 110.5, 112, 110, 111)]}, 'alpaca_iex', True, NOW)
-    previous = candle(NOW-timedelta(minutes=15), 100, 106, 94, 100, 15)
-    current = candle(NOW, 100, 110.1, 95, 96, 15)
-    markets = {symbol: Market(symbol, {240: history, 15: [previous, current]},
-                              'alpaca_iex', True, NOW) for symbol in MAG7}
-    markets['QQQ'] = qqq
-    vix = Market('I:VIX', {15: [replace(b, minutes=15) for b in history] +
-                              [previous, candle(NOW, 100, 105, 89.9, 104, 15)]},
-                 'massive_indices', True, NOW)
-    return markets, vix
+    qqq, leaders, vix, _ = setup_scenario('short', 'four_hour_retest')
+    return {**leaders, 'QQQ': qqq}, vix
 
 
 def trace(now=NOW):
@@ -68,11 +53,22 @@ def test_trace_preserves_actual_signals_and_never_authorizes_broker_orders():
     assert result['vix']['expected_reaction'] == 'long'
     assert result['vix']['reason'] == 'expected reaction present'
     assert result['vix']['gate_reached'] is True
+    assert result['version'] == 'decision-trace-v2'
+    assert result['leaders']['AAPL']['input']['frames']['5']['recent'][-1]['minutes'] == 5
+    assert result['setup']['event_id'] == setup['event_id']
+    methods = {row['id']: row for row in result['strategies']}
+    assert methods['four_hour_retest']['signal_qualifies'] is True
+    assert methods['prior_day_sweep']['signal_qualifies'] is False
+    assert methods['prior_day_sweep']['first_blocker']['name'] == 'Premarked levels'
+    assert all(row['order_authorized_by_trace'] is False for row in methods.values())
+    # Every method retains its reaction evidence without duplicating full area history.
+    assert methods['four_hour_retest']['leader_evidence']['AAPL']['reaction_zone']
+    assert 'zones' not in methods['four_hour_retest']['leader_evidence']['AAPL']
 
 
 def test_exact_first_signal_blocker_and_unreached_vix_evidence_are_distinct():
     markets, vix = scenario()
-    markets['AAPL'].bars[15][-1] = candle(NOW, 100, 105, 89.9, 104, 15)
+    markets['AAPL'].bars[5][-1] = candle(NOW, 100, 105, 89.9, 104, 5)
     setup = analyze(markets['QQQ'], markets, vix, NOW)
     result = build_decision_trace(setup, markets, vix, NOW)
     failed = next(c for c in setup['checks'] if not c['passed'])
@@ -93,7 +89,7 @@ def test_missing_and_stale_data_are_visible_without_invented_votes():
     markets, vix = scenario()
     result = build_decision_trace(analyze(markets['QQQ'], markets, vix, NOW+timedelta(minutes=2)),
                                   markets, vix, NOW+timedelta(minutes=2))
-    assert result['leaders']['AAPL']['reason'] == 'current 15-minute data missing'
+    assert result['leaders']['AAPL']['reason'] == 'current 5-minute data missing'
     assert result['leaders']['AAPL']['input']['observed_at'] == NOW.isoformat()
 
 

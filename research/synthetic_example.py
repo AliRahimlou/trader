@@ -2,7 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pivot.models import Bar, Market, MAG7
-from pivot.strategy import analyze, leader_diagnostics
+from research.baseline_v1 import analyze, leader_diagnostics
 
 
 def accepted_long():

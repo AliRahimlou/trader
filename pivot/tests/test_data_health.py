@@ -21,6 +21,8 @@ def test_expected_complete_candles_respect_calendar_early_closes_and_overnight()
 def test_all_eight_symbols_are_audited_and_missing_one_cannot_look_connected():
     bars=[Bar(NOW-timedelta(minutes=15*i+5),15,100,101,99,100) for i in reversed(range(4))]
     markets={symbol:Market(symbol,{15:bars,60:[replace(b,minutes=60) for b in bars],240:[replace(b,minutes=240) for b in bars],1440:[replace(b,minutes=1440) for b in bars]},'alpaca_iex',True,NOW) for symbol in ('QQQ',*MAG7)}
+    for symbol in MAG7:
+        markets[symbol].bars[5] = [Bar(NOW-timedelta(minutes=5*i),5,100,101,99,100) for i in reversed(range(4))]
     healthy=stock_health(markets,{},NOW)
     assert healthy['status']=='current' and healthy['coverage']=='IEX only; one exchange'
     markets.pop('NVDA')

@@ -1,12 +1,12 @@
-"""Inspectable decisions sharing the production analyzer, never an order client."""
+"""Historical v1 decisions from the frozen pre-v2 analyzer, never an order client."""
 from dataclasses import asdict
 from datetime import timedelta
 from hashlib import sha256
 import json
-from pivot.strategy import analyze, leader_diagnostics, vix_confirmation, AnalysisPolicy, ET
+from research.baseline_v1 import analyze, leader_diagnostics, vix_confirmation, AnalysisPolicy, ET
 from pivot.history_health import frame_gaps
 from pivot.models import timestamp
-from pivot.policy import POLICY_VERSION
+from research.baseline_v1 import EXECUTION_POLICY_VERSION as POLICY_VERSION
 
 
 def decision(markets, vix, sessions, at, variant):
@@ -29,7 +29,7 @@ def decision(markets, vix, sessions, at, variant):
         passed.append(check['name'])
     first_failed = next((c['name'] for c in setup['checks'] if not c['passed']), None)
     qualified = setup['state'] == 'SETUP_READY'
-    # Match Executor._enter exactly; changing an exit level is not a new event.
+    # Preserve the historical v1 executor identity; changing an exit level is not a new event.
     key = f'{POLICY_VERSION}|QQQ|{setup.get("event_at")}|{direction}'
     setup_id = sha256(key.encode()).hexdigest()[:24] if event_at and direction else None
     blockers = []
