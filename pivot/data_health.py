@@ -2,7 +2,7 @@
 from datetime import timedelta
 from math import isfinite
 from .models import MAG7, timestamp
-from .strategy import closed, vix_candles_fresh
+from .strategy import closed, vix_candles_fresh, CANDLE_PUBLICATION_GRACE_SECONDS
 from .history_health import frame_gaps
 from .feeds import leader_history_sessions, LEADER_HISTORY_SESSIONS
 
@@ -11,7 +11,7 @@ LABELS = {5: '5-minute', 15: '15-minute', 60: '1-hour', 240: '4-hour', 1440: 'Da
 
 def last_expected(sessions, minutes, now):
     """Last complete regular-session bucket, allowing 90 seconds for publication."""
-    cutoff = now - timedelta(seconds=90)
+    cutoff = now - timedelta(seconds=CANDLE_PUBLICATION_GRACE_SECONDS)
     candidates = []
     for session in sessions.values():
         opening, closing = timestamp(session['open']), timestamp(session['close'])
@@ -25,17 +25,41 @@ def last_expected(sessions, minutes, now):
     return max(candidates) if candidates else None
 
 
+def next_publication_deadline(sessions, minutes, latest):
+    """When another full calendar candle must replace the current last candle."""
+    if latest is None:
+        return None
+    candidates = []
+    for session in sessions.values():
+        opening, closing = timestamp(session['open']), timestamp(session['close'])
+        if minutes == 1440:
+            if closing > latest:
+                candidates.append(closing)
+            continue
+        end = opening + timedelta(minutes=minutes)
+        while end <= closing:
+            if end > latest:
+                candidates.append(end)
+                break
+            end += timedelta(minutes=minutes)
+    return min(candidates) + timedelta(seconds=CANDLE_PUBLICATION_GRACE_SECONDS) if candidates else None
+
+
 def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refresh_mode=None, full_at=None):
     instruments = []
     recent_sessions = leader_history_sessions(sessions)
     for symbol in ('QQQ', *MAG7):
         market = markets.get(symbol)
         frames = []
-        for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else (5, 15, 240)):
+        # Nasdaq needs the resampled context used by its location methods.
+        # Leaders use native five-minute areas/reactions only; legacy context
+        # must not veto otherwise complete inputs to the current strategies.
+        for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else (5,)):
             bars = closed(market, minutes, now) if market else []
             latest = bars[-1].end if bars else None
             frame_sessions = recent_sessions if minutes == 5 else sessions
             expected = last_expected(frame_sessions, minutes, now)
+            deadline = next_publication_deadline(frame_sessions, minutes, latest)
             gaps = frame_gaps(bars, frame_sessions, minutes, now)
             if not bars:
                 status, reason = 'missing', 'No validated completed candles'
@@ -50,18 +74,24 @@ def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refr
             frames.append({'minutes': minutes, 'label': LABELS[minutes], 'status': status,
                            'reason': reason, 'count': len(bars), 'latest_at': latest.isoformat() if latest else None,
                            'expected_at': expected.isoformat() if expected else None,
+                           'valid_until': deadline.isoformat() if deadline else None,
                            'missing_count': gaps['missing_count'], 'first_missing_at': gaps['first_missing_at'],
                            'history_scope': f'Last {LEADER_HISTORY_SESSIONS} trading sessions; native provider candles' if minutes == 5 else '60 calendar days',
                            'history_session_count': len(frame_sessions),
                            'history_from': min((timestamp(s['open']) for s in frame_sessions.values()), default=None).isoformat() if frame_sessions else None})
-        valid_age = market and 0 <= (now - market.observed_at).total_seconds() <= 90
+        deadlines = ([market.observed_at + timedelta(seconds=90)] if market else []) + [
+            timestamp(frame['valid_until']) for frame in frames if frame['valid_until']]
+        valid_until = min(deadlines) if deadlines else None
+        valid_age = market and 0 <= (now - market.observed_at).total_seconds() < 90 and valid_until > now
         okay = bool(market and market.realtime and valid_age and all(f['status'] == 'current' for f in frames))
         instruments.append({'symbol': symbol, 'status': 'current' if okay else 'needs_attention',
                             'source': market.source if market else None, 'frames': frames,
-                            'observed_at': market.observed_at.isoformat() if market else None})
+                            'observed_at': market.observed_at.isoformat() if market else None,
+                            'valid_until': valid_until.isoformat() if valid_until else None})
     ready = not error and all(i['status'] == 'current' for i in instruments)
     source = next((m.source for m in markets.values()), None)
     return {'status': 'current' if ready else 'needs_attention', 'checked_at': now.isoformat(),
+            'valid_until': min(timestamp(i['valid_until']) for i in instruments if i['valid_until']).isoformat() if ready else None,
             'coverage': 'IEX only; one exchange' if source == 'alpaca_iex' else 'Consolidated US exchanges' if source == 'alpaca_sip' else 'Unavailable',
             'source': source, 'instruments': instruments, 'error': error, 'fetch_seconds': fetch_seconds,
             'refresh_mode': refresh_mode, 'last_full_refresh_at': full_at.isoformat() if full_at else None,
@@ -121,7 +151,14 @@ def expire_health(health, now):
     stocks, vix = health['stocks'], health['vix']
     for instrument in stocks['instruments']:
         at = instrument.get('observed_at')
-        if not at or not 0 <= (now-timestamp(at)).total_seconds() <= 90:
+        until = instrument.get('valid_until')
+        for frame in instrument.get('frames', []):
+            frame_until = frame.get('valid_until')
+            if frame.get('status') == 'current' and frame_until and now >= timestamp(frame_until):
+                frame.update(status='stale', reason='A newer completed candle is due; waiting for a fresh update')
+                instrument['status'] = 'needs_attention'
+        if (not at or not 0 <= (now-timestamp(at)).total_seconds() < 90
+                or (until and now >= timestamp(until))):
             instrument['status'] = 'needs_attention'
     if any(i['status'] != 'current' for i in stocks['instruments']):
         stocks['status'] = 'needs_attention'

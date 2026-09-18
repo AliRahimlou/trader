@@ -165,6 +165,6 @@ def test_frozen_engine_uses_committed_sources_without_git_or_runtime_files(monke
     monkeypatch.setattr('research.validate_v2.subprocess.run', fake_git)
     frozen = freeze_engine('frozen', source_root.parent)
     assert frozen.strategy is not strategy
-    assert frozen.strategy.ANALYSIS_VERSION == 'nasdaq-video-interpretation-v2'
+    assert frozen.strategy.ANALYSIS_VERSION == strategy.ANALYSIS_VERSION
     assert len(frozen.identity['files_sha256']) == 5
     assert frozen.data_health.closed is frozen.strategy.closed

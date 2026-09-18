@@ -178,3 +178,43 @@ def test_missing_old_candle_invalidates_history_even_with_current_latest_bar():
     frame=result['instruments'][0]['frames'][0]
     assert frame['status']=='incomplete' and frame['missing_count']==1
     assert result['status']=='needs_attention'
+
+
+def current_native_stock_inputs():
+    from pivot.tests.test_stock_feeds import StockFixture, CALENDAR, NOW as STOCK_NOW
+    # Three prior full sessions supply the existing minimum four-hour history.
+    calendar = [{'date': '2026-09-11', 'open': '09:30', 'close': '16:00'}, *CALENDAR]
+    feed = StockFixture(calendar)
+    return feed.stocks(STOCK_NOW), feed.stock_sessions, STOCK_NOW
+
+
+@pytest.mark.parametrize('legacy_frame', [15, 240])
+def test_unused_leader_context_cannot_block_complete_native_five_minute_inputs(legacy_frame):
+    markets, sessions, now = current_native_stock_inputs()
+    assert stock_health(markets, sessions, now)['status'] == 'current'
+    for symbol in MAG7:
+        # Even malformed optional legacy context cannot become an entry gate.
+        markets[symbol].bars[legacy_frame] = markets[symbol].bars[5][:1]
+    health = stock_health(markets, sessions, now)
+    assert health['status'] == 'current'
+    assert all([frame['minutes'] for frame in item['frames']] == [5]
+               for item in health['instruments'] if item['symbol'] in MAG7)
+
+
+@pytest.mark.parametrize('required_frame', [15, 60, 240, 1440])
+def test_each_nasdaq_location_input_remains_required(required_frame):
+    markets, sessions, now = current_native_stock_inputs()
+    markets['QQQ'].bars.pop(required_frame)
+    health = stock_health(markets, sessions, now)
+    assert health['status'] == 'needs_attention'
+    qqq = next(item for item in health['instruments'] if item['symbol'] == 'QQQ')
+    assert next(frame for frame in qqq['frames'] if frame['minutes'] == required_frame)['status'] == 'missing'
+
+
+def test_missing_historical_native_leader_candle_still_blocks_even_with_current_last_bar():
+    markets, sessions, now = current_native_stock_inputs()
+    markets['NVDA'].bars[5].pop(1)
+    health = stock_health(markets, sessions, now)
+    assert health['status'] == 'needs_attention'
+    frame = next(item for item in health['instruments'] if item['symbol'] == 'NVDA')['frames'][0]
+    assert frame['minutes'] == 5 and frame['status'] == 'incomplete' and frame['missing_count'] == 1

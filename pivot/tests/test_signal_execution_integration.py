@@ -12,7 +12,7 @@ from hashlib import sha256
 
 import pytest
 
-from pivot.execution import Executor
+from pivot.execution import Executor, SIGNAL_FIELDS
 from pivot.policy import POLICY_VERSION
 from pivot.store import Store
 from pivot.strategy import analyze
@@ -32,7 +32,7 @@ def analyzed_snapshot(direction, method='prior_day_sweep'):
     assert all(check['passed'] for check in setup['checks'])
     assert setup['direction'] == direction
     assert setup['can_enter'] is False
-    assert setup['policy_version'] == 'nasdaq-video-interpretation-v2'
+    assert setup['policy_version'] == 'nasdaq-video-interpretation-v3'
     assert all(row['timeframe_minutes'] == 5 for row in setup['leader_evidence'].values())
     snapshot = ready()
     snapshot['setup'] = setup
@@ -270,7 +270,7 @@ def test_all_consumed_analyzer_candidates_stop_before_broker_reads(tmp_path, kin
 
 
 @pytest.mark.parametrize('consume_top', [False, True])
-@pytest.mark.parametrize('invalid', ['version', 'identity', 'checks', 'expired', 'direction', 'geometry'])
+@pytest.mark.parametrize('invalid', ['version', 'identity', 'checks', 'expiry_value', 'leader_expiry_value', 'direction', 'geometry'])
 def test_every_alternative_contract_is_validated_before_any_broker_read(tmp_path, consume_top, invalid):
     snapshot = multiple_ready_snapshot('methods')
     executor, broker, store = candidate_engine(tmp_path, snapshot)
@@ -283,10 +283,10 @@ def test_every_alternative_contract_is_validated_before_any_broker_read(tmp_path
         alternative['event_id'] = 'ev2_' + 'a' * 64
     elif invalid == 'checks':
         alternative['checks'] = alternative['checks'][:-1]
-    elif invalid == 'expired':
-        alternative.update(event_origin_at=(NOW - timedelta(minutes=180)).isoformat(),
-                           event_expires_at=NOW.isoformat())
-        identify_event(alternative)
+    elif invalid == 'expiry_value':
+        alternative['event_expires_at'] = None
+    elif invalid == 'leader_expiry_value':
+        alternative['leader_evidence_valid_until'] = 'unverified'
     elif invalid == 'direction':
         alternative['direction'] = None
     else:
@@ -296,6 +296,54 @@ def test_every_alternative_contract_is_validated_before_any_broker_read(tmp_path
     assert broker.sent == [] and broker.confirmed == [] and store.active_trade() is None
     assert executor.execution_check['outcome'] == 'waiting'
     assert executor.execution_check['selected_entry_signal'] is None
+
+
+def expire_candidate(candidate, field):
+    if field == 'event':
+        candidate.update(event_origin_at=(NOW - timedelta(minutes=180)).isoformat(),
+                         event_expires_at=NOW.isoformat())
+        identify_event(candidate)
+    elif field == 'observation':
+        candidate['leader_observation_at'] = (NOW-timedelta(seconds=390)).isoformat()
+        candidate['leader_observation_valid_until'] = NOW.isoformat()
+    else:
+        candidate['leader_evidence_valid_until'] = NOW.isoformat()
+
+
+@pytest.mark.parametrize('field', ['event', 'leader', 'observation'])
+def test_expired_leading_event_cannot_hide_independently_current_candidate(tmp_path, field):
+    snapshot = multiple_ready_snapshot('methods')
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    top, second = snapshot['setup']['entry_candidates']
+    expire_candidate(top, field)
+    snapshot['setup'].update({key: top[key] for key in SIGNAL_FIELDS})
+    executor.tick(snapshot)
+    assert len(broker.sent) == 2 and store.active_trade()['signal']['event_id'] == second['event_id']
+    assert executor.execution_check['selected_entry_signal']['event_id'] == second['event_id']
+    assert not store.trade_exists(executor._event_key(top))
+
+
+def test_all_expired_candidates_stop_before_broker_reads(tmp_path):
+    snapshot = multiple_ready_snapshot('methods')
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    for candidate in snapshot['setup']['entry_candidates']:
+        expire_candidate(candidate, 'leader')
+    broker.account = lambda: pytest.fail('Expired evidence cannot reach broker admission')
+    executor.tick(snapshot)
+    assert not broker.sent and store.active_trade() is None
+    assert executor.execution_check['gate'] == 'signal_age_policy'
+
+
+def test_expired_candidate_cannot_hide_malformed_geometry(tmp_path):
+    snapshot = multiple_ready_snapshot('methods')
+    executor, broker, store = candidate_engine(tmp_path, snapshot)
+    alternative = snapshot['setup']['entry_candidates'][1]
+    expire_candidate(alternative, 'leader')
+    alternative['stop'] = float('nan')
+    broker.account = lambda: pytest.fail('Malformed contracts must not be skipped as expired')
+    executor.tick(snapshot)
+    assert not broker.sent and store.active_trade() is None
+    assert executor.execution_check['gate'] == 'price_geometry'
 
 
 @pytest.mark.parametrize('candidates', [None, {}, [], [None]])

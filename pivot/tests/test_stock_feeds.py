@@ -86,7 +86,7 @@ def test_calendar_covers_entire_history_and_ongoing_candle_is_removed():
     assert calendar_call['end'] == '2026-09-16'
     assert set(markets) == set(SYMBOLS)
     for market in markets.values():
-        assert market.bars[15][-1].end == NOW.replace(minute=30)
+        assert market.bars[15 if market.symbol == 'QQQ' else 5][-1].end == NOW.replace(minute=30)
         assert all(bar.end <= NOW for bars in market.bars.values() for bar in bars)
         assert market.previous_session == '2026-09-15'
     assert feed.stock_refresh_mode == 'full'
@@ -130,7 +130,7 @@ def test_failed_or_missing_symbol_refresh_does_not_change_cache_or_claim_success
         feed.stocks(NOW + timedelta(minutes=1))
     assert feed._stock_cache == before
     feed.fail = False
-    feed.data.pop('TSLA')
+    feed.data5.pop('TSLA')
     with pytest.raises(FeedError, match='TSLA'):
         feed.stocks(NOW + timedelta(minutes=2))
     assert feed._stock_cache == before
@@ -263,14 +263,34 @@ def test_native_five_minute_leaders_are_distinct_from_fifteen_minute_context():
     markets = feed.stocks(NOW)
     assert 5 not in markets['QQQ'].bars
     assert set(feed.leader_calls[0]['symbols'].split(',')) == set(MAG7)
-    assert set(feed.stock_calls[0]['symbols'].split(',')) == set(SYMBOLS)
+    assert set(feed.stock_calls[0]['symbols'].split(',')) == {'QQQ'}
     for symbol in MAG7:
         bars = markets[symbol].bars[5]
         assert all(b.minutes == 5 and b.end <= NOW for b in bars)
         assert bars[-1].end == NOW.replace(minute=30)
-        assert len(bars) == 3 * len(markets[symbol].bars[15])
+        assert len(bars) == 3 * len(markets['QQQ'].bars[15])
+        assert set(markets[symbol].bars) == {5}
     assert markets['AAPL'].bars[5][0].close == 175
-    assert markets['AAPL'].bars[15][0].close == 100
+    assert markets['QQQ'].bars[15][0].close == 100
+
+
+def test_unused_legacy_leader_history_cannot_break_required_data_refresh():
+    feed = StockFixture()
+    feed.data = {'QQQ': feed.data['QQQ']}
+    markets = feed.stocks(NOW)
+    assert set(markets) == set(SYMBOLS)
+    assert set(feed._stock_cache['bars']) == {'QQQ'}
+    assert all(set(markets[symbol].bars) == {5} for symbol in MAG7)
+    assert all(call['symbols'] == 'QQQ' for call in feed.stock_calls)
+
+
+def test_previous_cache_layout_forces_a_full_required_frame_refresh():
+    feed = StockFixture()
+    feed.stocks(NOW)
+    feed._stock_cache.pop('schema')
+    feed.stocks(NOW + timedelta(minutes=1))
+    assert feed.stock_refresh_mode == 'full'
+    assert feed._stock_cache['schema'] == 'required-frames-v3'
 
 
 def longer_calendar():
@@ -285,7 +305,7 @@ def test_five_minute_window_is_seven_actual_sessions_not_sixty_days():
     assert len(feed.stock_sessions) == 9 and len(feed.stock_leader_sessions) == 7
     assert timestamp(feed.leader_calls[0]['start']) == datetime(2026, 9, 8, 9, 30, tzinfo=ET)
     assert markets['AAPL'].bars[5][0].end == datetime(2026, 9, 8, 9, 35, tzinfo=ET)
-    assert markets['AAPL'].bars[15][0].end == datetime(2026, 9, 3, 9, 45, tzinfo=ET)
+    assert markets['QQQ'].bars[15][0].end == datetime(2026, 9, 3, 9, 45, tzinfo=ET)
     assert markets['AAPL'].bars[5][-1].end == NOW.replace(minute=30)
 
 
@@ -342,7 +362,7 @@ def test_removed_five_minute_overlap_candle_is_not_resurrected_from_cache():
     feed.data5['AAPL'] = [b for b in feed.data5['AAPL'] if timestamp(b['t']) != missing]
     result = feed.stocks(NOW + timedelta(minutes=1))
     assert missing + timedelta(minutes=5) not in [b.end for b in result['AAPL'].bars[5]]
-    assert missing + timedelta(minutes=15) in [b.end for b in result['AAPL'].bars[15]]
+    assert missing + timedelta(minutes=15) in [b.end for b in result['QQQ'].bars[15]]
 
 
 def test_five_minute_candles_use_calendar_early_close_and_holiday_filters():
@@ -380,7 +400,7 @@ def test_health_reports_native_five_minute_scope_without_false_sixty_day_gaps():
         if item['symbol'] == 'QQQ':
             assert [f['minutes'] for f in item['frames']] == [15, 60, 240, 1440]
             continue
-        assert [f['minutes'] for f in item['frames']] == [5, 15, 240]
+        assert [f['minutes'] for f in item['frames']] == [5]
         five = item['frames'][0]
         assert five['status'] == 'current' and five['missing_count'] == 0
         assert five['history_session_count'] == 7
@@ -400,6 +420,6 @@ def test_missing_initial_five_minute_history_and_stale_five_minute_data_block_re
     assert health['status'] == 'needs_attention'
     assert by_symbol['AAPL']['frames'][0]['status'] == 'incomplete'
     assert by_symbol['AAPL']['frames'][0]['missing_count'] == 1
-    assert by_symbol['AAPL']['frames'][1]['status'] == 'current'
+    assert by_symbol['QQQ']['status'] == 'current'
     assert by_symbol['MSFT']['frames'][0]['status'] == 'stale'
-    assert by_symbol['MSFT']['frames'][1]['status'] == 'current'
+    assert markets['QQQ'].bars[15][-1].end == NOW.replace(minute=30)

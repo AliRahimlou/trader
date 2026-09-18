@@ -151,8 +151,8 @@ def freeze_engine(commit, repo=None):
         setattr(package, name, module)
         exec(compile(raw, module.__file__, 'exec'), module.__dict__)
         modules[name], hashes['pivot/' + filename] = module, sha256(raw).hexdigest()
-    if modules['strategy'].ANALYSIS_VERSION != 'nasdaq-video-interpretation-v2':
-        raise ValueError('The frozen commit must contain production strategy v2')
+    if modules['strategy'].ANALYSIS_VERSION not in ('nasdaq-video-interpretation-v2', 'nasdaq-video-interpretation-v3'):
+        raise ValueError('The frozen commit must contain a supported production strategy')
     return SimpleNamespace(**modules, identity={'commit': commit, 'files_sha256': hashes,
                            'analysis_version': modules['strategy'].ANALYSIS_VERSION,
                            'policy': asdict(modules['strategy'].BASELINE_POLICY)})

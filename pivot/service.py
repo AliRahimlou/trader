@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from threading import Event, Lock, Thread
 from .rulebook import rulebook
 from .strategy import analyze
+from .market_context import market_context
 from .sizing import decimal
 from .data_health import stock_health, vix_health, quote_health, expire_health
 from .diagnostics import build_decision_trace
@@ -21,7 +22,7 @@ class Service:
         self.state = {'account':None, 'positions':[], 'orders':[], 'clock':None, 'account_at':None,
                       'analysis_at':None, 'setup':None, 'account_error':None, 'data_errors':[], 'observations':[], 'feeds':{},
                       'live_enabled':False, 'execution_available':False, 'data_health':None, 'data_valid_until':None, 'quote':None, 'quote_at':None, 'quote_error':None,
-                      'decision_trace':None, 'diagnostic_error':None}
+                      'decision_trace':None, 'diagnostic_error':None, 'market_context':None}
         try:
             self.state['decision_trace'] = self.store.latest_decision()
         except Exception:
@@ -103,9 +104,11 @@ class Service:
         qqq=markets.get('QQQ')
         ready=stocks['status']=='current' and index['status']=='current'
         deadlines=[now+timedelta(seconds=90), *[m.observed_at+timedelta(seconds=90) for m in markets.values()]]
+        if stocks.get('valid_until'): deadlines.append(datetime.fromisoformat(stocks['valid_until']))
         if index['valid_until']: deadlines.append(datetime.fromisoformat(index['valid_until']))
         with self.lock:
             self.state.update(data_health={'stocks':stocks, 'vix':index, 'ready':ready}, data_valid_until=min(deadlines).isoformat() if ready else None, analysis_at=checked_at.isoformat(),setup=analyze(qqq,markets,vix,checked_at) if qqq else None, observations=observations,data_errors=errors,
+                market_context=market_context(qqq, checked_at),
                 feeds={'stocks':qqq.source if qqq else 'unavailable',
                        'vix':'current' if index['status']=='current' else 'unavailable or delayed'})
         self._record_decision(markets, vix, checked_at)
@@ -163,7 +166,7 @@ class Service:
         if self.executor: result.update(self.executor.snapshot())
         result.update(settings=self.store.settings(), rulebook=rulebook(), events=self.store.events(),
                       trade_results=self.store.trade_results(),
-                      execution_policy=POLICY, version='video-execution-v4', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
+                      execution_policy=POLICY, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
         return result
 
     def save_settings(self,payload):

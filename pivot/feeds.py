@@ -162,11 +162,14 @@ class ReadOnlyFeeds:
     def stocks(self, now):
         started = monotonic()
         try:
-            symbols = ('QQQ', *MAG7)
+            # Only QQQ needs the long 15-minute history used for higher frames.
+            # Leaders use native five-minute observations, not legacy 15m/4h data.
+            symbols = ('QQQ',)
             # Start at a session boundary so the earliest historical day is complete.
             start = (now.astimezone(ET) - timedelta(days=60)).replace(hour=0, minute=0, second=0, microsecond=0)
             cache = getattr(self, '_stock_cache', None)
-            full = (not cache or 'leader_bars' not in cache or cache['feed'] != self.feed or now < cache['at']
+            full = (not cache or cache.get('schema') != 'required-frames-v3'
+                    or 'leader_bars' not in cache or cache['feed'] != self.feed or now < cache['at']
                     or (now - cache['full_at']).total_seconds() >= 3600)
             if full or cache['at'].astimezone(ET).date() != now.astimezone(ET).date():
                 sessions = self.stock_calendar(start, now)
@@ -205,13 +208,14 @@ class ReadOnlyFeeds:
             for symbol, bars in context.items():
                 frames = {15: bars, 60: resample(bars, 60, sessions),
                           240: resample(bars, 240, sessions), 1440: daily(bars, sessions)}
-                if symbol in leader_context:
-                    frames[5] = leader_context[symbol]
                 result[symbol] = Market(symbol, frames, f'alpaca_{self.feed}', True, now,
+                                        previous_session=previous_session)
+            for symbol, bars in leader_context.items():
+                result[symbol] = Market(symbol, {5: bars}, f'alpaca_{self.feed}', True, now,
                                         previous_session=previous_session)
             # Only successful, fully validated results replace the cache. A failed refresh
             # raises to the caller; cached data is never relabeled as a successful fetch.
-            self._stock_cache = {'feed': self.feed, 'bars': {s: list(b) for s, b in context.items()},
+            self._stock_cache = {'schema': 'required-frames-v3', 'feed': self.feed, 'bars': {s: list(b) for s, b in context.items()},
                                  'leader_bars': {s: list(b) for s, b in leader_context.items()},
                                  'at': now, 'full_at': now if full else cache['full_at']}
             self.stock_sessions = sessions

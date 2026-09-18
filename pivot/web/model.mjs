@@ -62,12 +62,19 @@ export function strategyViews(snapshot, now=Date.now()) {
   return methods.map(method=>{
     const checks=Array.isArray(method.checks)?method.checks:[];
     const blocked=checks.find(check=>check.passed!==true);
-    const qualified=method.state==='SETUP_READY' && checks.length>0 && !blocked;
-    const state=marketClosed?'Market closed':!current?'Analysis out of date':qualified?'Setup found':String(method.state || 'WATCHING').replaceAll('_',' ').toLowerCase();
+    const leaderDeadline=Date.parse(method.leader_evidence_valid_until), eventDeadline=Date.parse(method.event_expires_at);
+    const observationDeadline=Date.parse(method.leader_observation_valid_until);
+    const timingKnown=Number.isFinite(leaderDeadline) && Number.isFinite(eventDeadline) && Number.isFinite(observationDeadline);
+    const observationExpired=Number.isFinite(observationDeadline) && now>=observationDeadline;
+    const timingCurrent=timingKnown && now<leaderDeadline && now<eventDeadline && !observationExpired;
+    const expiredReady=method.state==='SETUP_READY' && !timingCurrent;
+    const qualified=method.state==='SETUP_READY' && checks.length>0 && !blocked && timingCurrent;
+    const state=marketClosed?'Market closed':!current?'Analysis out of date':expiredReady?
+      (observationExpired?'Leader data out of date':timingKnown?'Confirmation expired':'Waiting for confirmation timing'):qualified?'Setup found':String(method.state || 'WATCHING').replaceAll('_',' ').toLowerCase();
     const detail=marketClosed?'Waiting for the next regular session and fresh completed candles. Saved history remains available under Data connections.':!current?'Waiting for a current analysis. Saved observations cannot authorize an entry.':
+      expiredReady?(observationExpired?'The latest five-minute leader candles are too old. Waiting for fresh observations.':timingKnown?'A confirmation window has ended. Waiting for a new analysis.':'Confirmation timing is unavailable. Waiting for a complete analysis.'):
       qualified?'The strategy checks pass. Fresh broker checks and your Live money permission are still required.':
       blocked?.name==='Premarked levels'?(method.id==='prior_day_sweep'?'Waiting for verified previous-day high and low.':'Waiting for repeated historical touches or crossings to establish an area.'):
-      blocked?.name==='Magnificent Seven at their zones'?'Waiting for at least four technology leaders to agree, with none opposing.':
       blocked?.detail || 'Waiting for the next qualifying observation.';
     const reference=snapshot?.observations?.find(row=>row.symbol==='QQQ')?.price;
     const levels=(Array.isArray(method.levels)?method.levels:[]).filter(z=>[z.low,z.high].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>0)&&z.low<=z.high);
@@ -75,6 +82,25 @@ export function strategyViews(snapshot, now=Date.now()) {
     const area=typeof reference==='number' && Number.isFinite(reference)?levels.sort((a,b)=>distance(a)-distance(b)||a.low-b.low)[0]:null;
     return {...method,checks,state,detail,current,area:current?area:null,qualified:current&&!marketClosed&&qualified,selected:snapshot.setup.strategy_id===method.id};
   });
+}
+export function marketOverview(snapshot, now=Date.now()) {
+  const context=snapshot?.market_context;
+  const marketClosed=snapshot?.clock?.is_open===false && age(snapshot.account_at,now)<=60 && !snapshot.account_error;
+  const current=!marketClosed && age(snapshot?.analysis_at,now)<=90 && context?.data_current===true &&
+    snapshot?.data_health?.stocks?.status==='current';
+  const names={up:'Upward structure',down:'Downward structure',mixed:'Mixed structure',unknown:'Waiting for structure'};
+  const frames=[60,240].map(minutes=>{
+    const frame=context?.frames?.find(f=>f.timeframe_minutes===minutes);
+    const usable=current && frame?.status==='ready' && ['up','down','mixed'].includes(frame.direction);
+    return {minutes,label:minutes===60?'1-hour view':'4-hour view',direction:usable?frame.direction:'unknown',
+      value:usable?names[frame.direction]:marketClosed?'Market closed':frame?.status==='insufficient'?'More history needed':'Waiting for current data',
+      detail:current?frame?.detail || 'Waiting for structure observations.':'Saved observations do not describe current entry readiness.',
+      latestAt:frame?.latest_bar_at || null};
+  });
+  return {current,frames,detail:marketClosed?'Market closed · the overview resumes with fresh session data.':
+    current?'QQQ price structure across completed candles. Entry setups and leader confirmation are checked separately.':
+    'Waiting for current Nasdaq context.',
+    explanation:'Higher swing highs and lows indicate upward structure; lower swing highs and lows indicate downward structure. Mixed means the evidence differs or price has broken the last supporting swing. This describes price history; it is not a forecast or an extra entry rule.'};
 }
 export function leaderOverview(snapshot, now=Date.now()) {
   const names=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','TSLA'];
@@ -86,11 +112,39 @@ export function leaderOverview(snapshot, now=Date.now()) {
     return {current:false,detail:'Waiting for current saved leader observations.',rows:[]};
   const rows=names.map(symbol=>{
     const observation=trace.leaders?.[symbol] || {};
-    const vote=['long','short'].includes(observation.vote)?observation.vote:null;
-    return {symbol,vote,label:vote==='long'?'Up':vote==='short'?'Down':'Waiting',reason:observation.reason || 'Observation missing'};
+    const deadline=Date.parse(observation.evidence_valid_until);
+    const expired=Number.isFinite(deadline) && deadline<=now;
+    const observationDeadline=Date.parse(observation.observation_valid_until);
+    const stale=Number.isFinite(observationDeadline) && observationDeadline<=now;
+    const missing=!observation.reason || observation.reason==='current 5-minute data missing';
+    const conflict=observation.conflicting_reactions===true;
+    const vote=!stale && !expired && !missing && !conflict && ['long','short'].includes(observation.vote)?observation.vote:null;
+    const reactionAge=age(observation.reaction_at,now);
+    const reactionLabel=vote && Number.isFinite(reactionAge)?`${Math.floor(reactionAge/60)}m ago`:'';
+    return {symbol,vote,missing,conflict,expired,stale,reactionLabel,
+      label:missing?'Data missing':stale?'Data stale':conflict?'Conflicting':expired?'Expired':vote==='long'?'Up':vote==='short'?'Down':'Neutral',
+      reason:stale?'The latest five-minute candle is too old; waiting for fresh data.':expired?'This reaction expired; waiting for a fresh analysis.':observation.reason || 'Observation missing',
+      latestAt:observation.latest_bar_at || null};
   });
   const up=rows.filter(row=>row.vote==='long').length, down=rows.filter(row=>row.vote==='short').length;
-  return {current:true,rows,detail:`5-minute leaders · ${up} up / ${down} down. Need 4 agreeing and none opposing.`};
+  const rule=trace.setup?.leader_rule || snapshot?.setup?.leader_rule;
+  const hasRule=Number.isInteger(rule?.minimum_agree) && rule.minimum_agree>=1 && rule.minimum_agree<=7 &&
+    Number.isInteger(rule?.maximum_opposing) && rule.maximum_opposing>=0 && rule.maximum_opposing<rule.minimum_agree;
+  const ruleText=hasRule?`Entry rule: at least ${rule.minimum_agree} agreeing; ${rule.maximum_opposing===0?'none opposing':`up to ${rule.maximum_opposing} opposing`}.`:'Waiting for the current entry rule.';
+  const observational=names.every(symbol=>trace.leaders?.[symbol]?.observational_only===true);
+  const timestamps=rows.map(row=>Date.parse(row.latestAt));
+  const synchronized=timestamps.every(Number.isFinite) && new Set(timestamps).size===1;
+  const issues=rows.filter(row=>row.missing || row.conflict || row.expired || row.stale);
+  const majority=up>=4?'long':down>=4?'short':null;
+  const dissent=majority?rows.filter(row=>row.vote && row.vote!==majority):[];
+  const alignment=issues.length?`${issues.map(row=>`${row.symbol}: ${row.label.toLowerCase()}`).join(' · ')}.`:
+    !synchronized?'Leader candles are still updating to the same observation time.':
+    majority?`${majority==='long'?'Upward':'Downward'} majority${dissent.length?`; ${dissent.map(row=>row.symbol).join(', ')} ${dissent.length===1?'opposes':'oppose'}`:''}.`:
+    'No majority of qualifying zone reactions.';
+  const window=Number.isFinite(rule?.persistence_minutes)?rule.persistence_minutes:15;
+  return {current:true,rows,detail:`Recent leader reactions · ${up} up / ${down} down.`,ruleText,alignment,
+    timing:`Reactions can start on different five-minute candles and remain valid for up to ${window} minutes with continued confirmation.`,
+    scope:observational?'Market observations only · waiting for a Nasdaq event.':'Leader confirmation for the leading analysis event.'};
 }
 export function loggingStatus(snapshot, now=Date.now()) {
   const signal=snapshot?.decision_trace, execution=snapshot?.execution_check;

@@ -19,6 +19,7 @@ from .policy import POLICY_VERSION
 from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
 from .deployment import DeploymentHold
+from .strategy import LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
 WORKING_PROTECTION = {'new', 'partially_filled'}
@@ -26,10 +27,12 @@ UNAVAILABLE_PROTECTION = {'suspended', 'done_for_day', 'pending_cancel', 'pendin
 # Proposed release safety policy: a submitted stop must become executable within
 # this interval. This is not a promise about venue latency or a maximum loss.
 PROTECTION_CONFIRM_SECONDS = 30
-SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v2'
+SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v3'
 SIGNAL_METHODS = {'four_hour_retest', 'prior_day_sweep'}
 SIGNAL_FIELDS = ('policy_version', 'strategy_id', 'event_id', 'event_origin_at',
-                 'event_at', 'event_expires_at', 'latest_evidence_at', 'event_zone')
+                 'event_at', 'event_expires_at', 'latest_evidence_at', 'event_zone',
+                 'leader_evidence_valid_until', 'leader_observation_at',
+                 'leader_observations_synchronized', 'leader_observation_valid_until')
 NEW_YORK = ZoneInfo('America/New_York')
 CHECKS = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
           'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
@@ -64,12 +67,16 @@ class Waiting(ValueError):
         self.code = code
 
 
+class ExpiredSignal(Waiting):
+    """A structurally valid observation whose time window has ended."""
+
+
 def elapsed(at, now):
     return (now - timestamp(at)).total_seconds()
 
 
 def data_unexpired(until, now):
-    return bool(until and 0 <= (timestamp(until) - now).total_seconds() <= 90)
+    return bool(until and 0 < (timestamp(until) - now).total_seconds() <= 90)
 
 
 def signal_expiry(setup, now):
@@ -86,6 +93,9 @@ def signal_expiry(setup, now):
             raise ValueError
         origin, event, expires, evidence = (
             timestamp(setup[key]) for key in ('event_origin_at', 'event_at', 'event_expires_at', 'latest_evidence_at'))
+        leader_deadline = timestamp(setup['leader_evidence_valid_until'])
+        observation_at = timestamp(setup['leader_observation_at'])
+        observation_deadline = timestamp(setup['leader_observation_valid_until'])
         zone = setup['event_zone']
         if (not isinstance(zone, dict)
                 or any(isinstance(zone.get(key), bool) or not isinstance(zone.get(key), (int, float))
@@ -99,15 +109,22 @@ def signal_expiry(setup, now):
         if setup['event_id'] != expected_id:
             raise ValueError
         if (established >= origin - timedelta(minutes=60)
-                or not origin <= event <= evidence <= now < expires
+                or not origin <= event <= evidence <= now
                 or expires != origin + timedelta(minutes=180)
-                or not 0 <= (now - evidence).total_seconds() <= 3690
-                or any(at.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()
-                       for at in (origin, event, evidence))):
+                or leader_deadline > now + timedelta(minutes=15)
+                or setup.get('leader_observations_synchronized') is not True
+                or observation_at > now
+                or observation_deadline != observation_at + timedelta(
+                    minutes=LEADER_MINUTES, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)):
             raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError):
         raise Waiting('Waiting for a current setup under the active video rules') from None
-    return expires
+    if (now >= expires or now >= leader_deadline or now >= observation_deadline
+            or (now - evidence).total_seconds() > 3690
+            or any(at.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()
+                   for at in (origin, event, evidence))):
+        raise ExpiredSignal('Waiting for a current setup under the active video rules')
+    return min(expires, leader_deadline, observation_deadline)
 
 
 def session_open(clock, now):
@@ -181,6 +198,10 @@ class Executor:
             'event_origin_at': self._diagnostic_time(setup.get('event_origin_at')),
             'event_expires_at': self._diagnostic_time(setup.get('event_expires_at')),
             'latest_evidence_at': self._diagnostic_time(setup.get('latest_evidence_at')),
+            'leader_evidence_valid_until': self._diagnostic_time(setup.get('leader_evidence_valid_until')),
+            'leader_observation_at': self._diagnostic_time(setup.get('leader_observation_at')),
+            'leader_observation_valid_until': self._diagnostic_time(setup.get('leader_observation_valid_until')),
+            'leader_observations_synchronized': setup.get('leader_observations_synchronized') is True,
             'event_id': setup.get('event_id') if isinstance(setup.get('event_id'), str) and re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id']) else None,
             'strategy_id': setup.get('strategy_id') if isinstance(setup.get('strategy_id'), str) and setup['strategy_id'] in SIGNAL_METHODS else None,
             'event': setup.get('event') if setup.get('event') in ('break and retest', 'sweep and reclaim', 'previous-day level sweep') else None,
@@ -367,8 +388,6 @@ class Executor:
                            and c.get('passed') is not True), 'the complete video setup')
             self._gate(SIGNAL_GATES.get(failed, 'signal_checks'))
             raise Waiting('Live money is on — waiting for ' + failed.lower())
-        self._gate('signal_age_policy')
-        expires = signal_expiry(setup, now)
         self._gate('signal_direction')
         if setup.get('direction') not in ('long', 'short'):
             raise Waiting('Setup direction is missing')
@@ -379,7 +398,8 @@ class Executor:
             raise Waiting('Waiting for valid setup entry, stop and target prices') from None
         if not (0 < stop < reference < target if setup['direction'] == 'long' else 0 < target < reference < stop):
             raise Waiting('Waiting for valid setup entry, stop and target prices')
-        return expires
+        self._gate('signal_age_policy')
+        return signal_expiry(setup, now)
 
     @staticmethod
     def _event_key(setup):
@@ -387,19 +407,30 @@ class Executor:
         return sha256(identity.encode()).hexdigest()[:24]
 
     def _entry_candidate(self, setup, now):
-        # Validate the complete analyzer contract before looking at consumption.
-        # Malformed/stale alternatives cannot hide behind an otherwise valid top
-        # candidate. Legacy snapshots lacking the list retain one-candidate use.
-        self._ready_contract(setup, now)
+        # Malformed alternatives cannot hide behind an otherwise valid top.
+        # Independently expired windows are not ready opportunities, and must
+        # not hide a still-current event. No broker failure triggers fallback.
+        try:
+            self._ready_contract(setup, now)
+        except ExpiredSignal:
+            pass
         self._gate('signal_checks')
         candidates = setup.get('entry_candidates', [setup])
         if not isinstance(candidates, list) or not candidates:
             raise Waiting('Waiting for a valid list of ready entry opportunities')
-        validated = [(candidate, self._ready_contract(candidate, now), self._event_key(candidate))
-                     for candidate in candidates]
+        validated = []
+        for candidate in candidates:
+            try:
+                expires = self._ready_contract(candidate, now)
+            except ExpiredSignal:
+                continue
+            validated.append((candidate, expires, self._event_key(candidate)))
+        if not validated:
+            self._gate('signal_age_policy')
+            raise Waiting('Waiting for a current setup under the active video rules')
         self._gate('setup_deduplication')
         for candidate, expires, key in validated:
-            if not self.store.trade_exists(key):
+            if not self.store.entry_consumed(key):
                 self._selected_entry_signal = candidate
                 return candidate, expires, key
         raise Waiting('This setup has already been handled; waiting for the next event')
@@ -542,7 +573,7 @@ class Executor:
                     self._gate('broker_snapshot')
                     clock = self.broker.clock()
                     if self._prepared_entry_expired(trade, clock):
-                        self._finish(trade, 'Entry expired before submission; no order sent')
+                        self._expire_entry(trade)
                         return None
                     return self._order_admitted(trade, name)
         return self._order_admitted(trade, name)
@@ -556,8 +587,17 @@ class Executor:
         try:
             if op['state'] == 'prepared':
                 # Commit BEFORE POST. A crash or timeout can never produce an automatic second POST.
-                if self.store.claim_operation(trade['id'], name):
+                if self.store.claim_operation(trade['id'], name, expected_entry=trade if name == 'entry' else None):
                     op['state'] = 'attempted'
+                    if name == 'entry':
+                        # Waiting for the durable claim can cross an evidence
+                        # deadline. Keep the claim consumed, but do not POST an
+                        # entry whose saved authorization has now expired.
+                        self._gate('final_data_expiry')
+                        now = self.now()
+                        signal_expiry(trade.get('signal') or {}, now)
+                        if elapsed(trade['created_at'], now) > 10 or not data_unexpired(trade.get('data_valid_until'), now):
+                            raise Waiting('Entry admission expired before the broker request. Durable claim retained; no retry will be sent.')
                     try:
                         self._gate('order_submit')
                         self._submission_attempted = True
@@ -574,6 +614,11 @@ class Executor:
                         self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol']})
                         return {'status': 'rejected', 'filled_qty': '0'}
                 else:
+                    if name == 'entry':
+                        # Another worker may have attempted, retired, or replaced
+                        # this reservation. Reload its durable state next tick;
+                        # this stale object cannot submit or manage the replacement.
+                        raise Waiting('Entry state changed; waiting for durable order reconciliation')
                     op['state'] = 'attempted'
                     self._gate('order_lookup')
                     order = self.broker.lookup(op['payload']['client_order_id'])
@@ -609,6 +654,16 @@ class Executor:
         if not self._diagnostic_outcome:
             self._gate('order_reconciliation')
         return order
+
+    def _expire_entry(self, trade):
+        self._gate('trade_finish')
+        finished = self.store.expire_prepared_entry(trade, self.now().isoformat())
+        if finished is None:
+            raise Waiting('Entry state changed; waiting for durable order reconciliation')
+        trade.update(finished)
+        self._diagnostic_trade = trade
+        self._diagnostic_outcome = self._diagnostic_outcome or 'completed'
+        self.message = trade['reason']
 
     def _finish(self, trade, reason):
         self._gate('trade_finish')
@@ -687,7 +742,7 @@ class Executor:
             # Expiry is not new exposure and must keep working during a hold.
             with self.entry_lock:
                 if trade['ops']['entry']['state'] == 'prepared' and self._prepared_entry_expired(trade, clock):
-                    self._finish(trade, 'Entry expired before submission; no order sent')
+                    self._expire_entry(trade)
                     return
             order = self._order(trade, 'entry')
             if order is None:
