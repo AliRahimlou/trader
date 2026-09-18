@@ -1,5 +1,7 @@
 # Owner-controlled execution — September 16, 2026
 
+This document records the original execution release. Some details below are historical: the current leader rule is five agreeing with up to one opposing, AllSpark hosts the worker, and VIX has bounded recovery. See the [current method specification](research/current-method-specifications.md), [3.2 monitoring changes](production-v3.2.md), and [3.2.2 recovery audit](production-v3.2.2.md) for the current implementation and validation limits.
+
 ## What changed
 
 The previous rebuild deliberately exposed no broker order path. Its Live money button only opened an explanation. Version `video-execution-v3` adds a persistent, owner-operated control and a new Alpaca execution worker. It does not load the archived strategy or order engines.

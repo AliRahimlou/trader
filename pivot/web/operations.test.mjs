@@ -25,6 +25,21 @@ test('small targets explain whole-share short constraint without raising the tar
   assert.equal(state.settings.target_dollars,'5.00');
   assert.doesNotMatch(operationStatus({...state,quote_health:{}}).directionNote,/cannot open a short/);
 });
+test('unconfirmed exit remains prominent after Live pauses and across snapshots until resolved',()=>{
+  const state={live_enabled:false,execution:{trade:{stage:'exiting',exit_pending:{
+    first_observed_at:new Date(now-60000).toISOString(),raised_at:new Date(now-30000).toISOString()}}}};
+  assert.match(operationStatus(structuredClone(state),now).incident,/Exit needs attention/);
+  assert.match(operationStatus(state,now).incident,/without sending a competing order/);
+  state.execution.trade.exit_pending.resolved_at=new Date(now).toISOString();
+  assert.equal(operationStatus(state,now).incident,'');
+  assert.equal(operationStatus({...state,execution:{trade:null}},now).incident,'');
+});
+test('account shorting restriction remains visible even with a whole-share target',()=>{
+  const state={account:{shorting_enabled:false},settings:{target_dollars:'800'},quote_health:{ask:700}};
+  assert.match(operationStatus(state).directionNote,/disabled on this Alpaca account/);
+  assert.doesNotMatch(operationStatus({...state,account:{shorting_enabled:true}}).directionNote,/disabled/);
+  assert.doesNotMatch(operationStatus({...state,account:{}}).directionNote,/disabled/);
+});
 test('historical funnel preserves distinct-event counts and partial-history warning',()=>{
   const value=sessionReview({session_review:{status:'available',events_seen:3,checkpoints:70,
     complete_candidate_coverage:false,latest_execution_blockers:{purchase_size:1},
