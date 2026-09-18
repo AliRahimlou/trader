@@ -4,12 +4,56 @@ from copy import deepcopy
 from contextlib import nullcontext
 from datetime import datetime, timezone, timedelta
 from threading import Event, Lock, Thread
+from time import monotonic
 from .rulebook import rulebook
 from .strategy import analyze
 from .market_context import market_context
 from .sizing import decimal
 from .data_health import stock_health, vix_health, quote_health, expire_health
 from .diagnostics import build_decision_trace
+from .observations import ObservationArchive
+from .worker_health import WorkerHealth, next_tick
+
+
+def publication_catchup_bucket(markets, sessions, now):
+    """Only a missing newest native candle earns one extra stock-only collection.
+
+    Historic gaps, absent/invalid instruments, failed reads and closed sessions
+    do not qualify. The window starts after 30 seconds of publication allowance
+    and ends two minutes after a five-minute boundary.
+    """
+    from .models import MAG7, timestamp
+    from .feeds import leader_history_sessions
+    from .history_health import frame_gaps
+    from .strategy import closed
+    active = next((row for row in sessions.values()
+                   if timestamp(row['open']) <= now < timestamp(row['close'])), None)
+    if active is None:
+        return None
+    opening = timestamp(active['open'])
+    bucket = opening + timedelta(seconds=int((now-opening).total_seconds()//300)*300)
+    if bucket == opening or not 30 <= (now-bucket).total_seconds() <= 120:
+        return None
+    lagging = False
+    for symbol in ('QQQ', *MAG7):
+        market = markets.get(symbol)
+        minutes = 15 if symbol == 'QQQ' else 5
+        if (market is None or market.symbol != symbol or not market.realtime
+                or market.source not in ('alpaca_iex', 'alpaca_sip')
+                or not 0 <= (now-market.observed_at).total_seconds() < 90):
+            return None
+        bars = closed(market, minutes, now)
+        if not bars:
+            return None
+        calendar = sessions if symbol == 'QQQ' else leader_history_sessions(sessions)
+        gaps = frame_gaps(bars, calendar, minutes, now+timedelta(seconds=90))
+        expected = opening + timedelta(minutes=int((now-opening).total_seconds()//(minutes*60))*minutes)
+        if gaps['missing_count']:
+            if (gaps['missing_count'] != 1 or expected <= opening
+                    or timestamp(gaps['first_missing_at']) != expected):
+                return None
+            lagging = True
+    return bucket.isoformat() if lagging else None
 
 
 class Service:
@@ -17,38 +61,79 @@ class Service:
         self.feeds, self.store = feeds, store
         self.lock, self.stop_event = Lock(), Event()
         self.threads = []
+        self._stock_catchup_buckets = set()
         from .execution import Executor
         self.executor = Executor(broker, store) if broker else None
+        self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else []))
+        self.archive = None
+        try:
+            self.archive = ObservationArchive(str(store.path) + '.observations.sqlite3')
+        except Exception:
+            pass  # Observation failure is visible below, independent of trading permission.
         self.state = {'account':None, 'positions':[], 'orders':[], 'clock':None, 'account_at':None,
                       'analysis_at':None, 'setup':None, 'account_error':None, 'data_errors':[], 'observations':[], 'feeds':{},
                       'live_enabled':False, 'execution_available':False, 'data_health':None, 'data_valid_until':None, 'quote':None, 'quote_at':None, 'quote_error':None,
-                      'decision_trace':None, 'diagnostic_error':None, 'market_context':None}
+                      'decision_trace':None, 'diagnostic_error':None, 'market_context':None,
+                      'input_archive':{'status':'starting' if self.archive else 'unavailable'},
+                      'worker_incidents':[]}
         try:
             self.state['decision_trace'] = self.store.latest_decision()
         except Exception:
             self.state['diagnostic_error'] = 'Saved decision trace unavailable; current analysis remains separate'
 
     def start(self):
+        if self.threads:
+            raise RuntimeError('Workers already started')
         loops = [('account', self.refresh_account, 15), ('data', self.refresh_analysis, 60)]
         if self.executor: loops.append(('execution', self.refresh_execution, 5))
         for name, function, delay in loops:
-            thread=Thread(target=self._loop,args=(function,delay),name=f'pivot-{name}',daemon=True)
+            thread=Thread(target=self._loop,args=(name,function,delay),name=f'pivot-{name}',daemon=True)
             self.threads.append(thread)
             thread.start()
+        monitor = Thread(target=self._monitor_loop, name='pivot-monitor', daemon=True)
+        self.threads.append(monitor)
+        monitor.start()
 
     def stop(self):
         self.stop_event.set()
         for thread in self.threads:
             thread.join(timeout=1)
 
-    def _loop(self,function,delay):
+    def _loop(self,name,function,delay):
+        due = monotonic()
         while not self.stop_event.is_set():
+            self.workers.begin(name)
+            failed = False
             try:
                 function()
             except Exception:
+                failed = True
                 with self.lock:
                     self.state['data_errors']=['Data update failed; waiting for a validated snapshot']
-            self.stop_event.wait(delay)
+            finally:
+                self.workers.finish(name, failed)
+            due = next_tick(due, delay, monotonic())
+            self.stop_event.wait(max(0, due-monotonic()))
+
+    def worker_health(self):
+        alive = {thread.name.removeprefix('pivot-') for thread in self.threads if thread.is_alive()}
+        return self.workers.snapshot(alive)
+
+    def _monitor_loop(self):
+        previous = None
+        while not self.stop_event.wait(5):
+            health = self.worker_health()
+            incidents = [{'worker': row['name'], 'status': row['status']} for row in health['workers']
+                         if row['status'] in ('stalled', 'stopped', 'error')]
+            with self.lock:
+                self.state['worker_incidents'] = incidents
+            if incidents != previous:
+                try:
+                    if incidents or previous:
+                        self.store.event('worker_attention' if incidents else 'workers_recovered', {'workers': incidents})
+                    previous = incidents
+                except Exception:
+                    pass  # Health endpoint and in-memory incidents remain available on ledger failure.
 
     def refresh_account(self):
         try:
@@ -80,6 +165,26 @@ class Service:
             except Exception as exc:
                 stock_error=str(exc) if isinstance(exc,FeedError) else 'Stock data could not be validated'
                 errors.append(stock_error)
+            if markets and not stock_error:
+                catchup_at = datetime.now(timezone.utc)
+                bucket = publication_catchup_bucket(markets, getattr(self.feeds, 'stock_sessions', {}), catchup_at)
+                with self.lock:
+                    # One data worker normally calls this; reserve atomically for manual callers too.
+                    attempt = bucket is not None and bucket not in self._stock_catchup_buckets
+                    if attempt:
+                        self._stock_catchup_buckets.add(bucket)
+                        self._stock_catchup_buckets = set(sorted(self._stock_catchup_buckets)[-288:])
+                if attempt:
+                    if self.stop_event.wait(5):
+                        return
+                    now = datetime.now(timezone.utc)
+                    try:
+                        markets = self.feeds.stocks(now)
+                    except Exception as exc:
+                        # Do not relabel the first read after a failed catch-up as freshly collected.
+                        markets = {}
+                        stock_error = str(exc) if isinstance(exc, FeedError) else 'Stock catch-up could not be validated'
+                        errors.append(stock_error)
             if insight:
                 # The actual exchange calendar is a dependency of VIX coverage.
                 vf = pool.submit(self.feeds.vix,datetime.now(timezone.utc))
@@ -122,6 +227,13 @@ class Service:
                 data_health=state['data_health'], live_permission=self.executor.enabled() if self.executor else False,
                 execution_available=self.executor is not None, broker_clock=state.get('clock'),
                 account_at=state.get('account_at'))
+        except Exception:
+            with self.lock:
+                self.state['diagnostic_error'] = 'Current decision evidence could not be built; saved history may be older than current analysis.'
+                self.state['input_archive'] = {'status':'unavailable',
+                    'detail':'Current decision evidence is unavailable; complete inputs could not be archived.'}
+            return
+        try:
             saved = self.store.record_decision(trace)
             with self.lock:
                 self.state.update(decision_trace=saved, diagnostic_error=None)
@@ -129,6 +241,24 @@ class Service:
             with self.lock:
                 self.state['diagnostic_error'] = ('Decision trace could not be saved; latest saved trace may be older '
                                                   'than current analysis. Trading rules and permission are unchanged.')
+        # The separate input archive must still capture evidence when the decision
+        # ledger is busy or unwritable. Settings are optional observational context.
+        try:
+            if self.archive is None:
+                raise ValueError('Archive unavailable')
+            try:
+                settings = self.store.settings()
+            except Exception:
+                settings = None
+            archived = self.archive.record(markets, vix, checked_at, trace=trace,
+                sessions=getattr(self.feeds, 'stock_sessions', {}), settings=settings,
+                revision=getattr(self.executor, 'revision', '') if self.executor else '')
+            with self.lock:
+                self.state['input_archive'] = archived
+        except Exception:
+            with self.lock:
+                self.state['input_archive'] = {'status':'unavailable',
+                    'detail':'Complete input history could not be saved. Check archive storage; decision summaries remain separate.'}
 
     def refresh_execution(self):
         with self.lock: state = deepcopy(self.state)
@@ -164,6 +294,11 @@ class Service:
             market_open=bool((result.get('clock') or {}).get('is_open')), error=result['quote_error'])
         from .policy import POLICY
         if self.executor: result.update(self.executor.snapshot())
+        result['worker_health'] = self.worker_health()
+        try:
+            result['session_review'] = self.store.session_review()
+        except Exception:
+            result['session_review'] = {'status':'unavailable', 'historical_only':True}
         result.update(settings=self.store.settings(), rulebook=rulebook(), events=self.store.events(),
                       trade_results=self.store.trade_results(),
                       execution_policy=POLICY, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)

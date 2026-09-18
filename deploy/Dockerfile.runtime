@@ -33,6 +33,6 @@ COPY backend_server.py ./
 COPY --from=web /app/dashboard/dist ./pivot/web/
 USER 1000:1000
 EXPOSE 8011
-HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=4 \
-    CMD python -c "import json,urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:8011/api/health',timeout=4)); assert r.get('ok') is True and r.get('legacy_loaded') is False"
+HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=4 \
+    CMD python -c "import json,urllib.request; r=json.load(urllib.request.urlopen('http://127.0.0.1:8011/api/health',timeout=4)); assert r.get('ok') is True and r.get('legacy_loaded') is False and r.get('ready') is True"
 CMD ["python", "backend_server.py", "--host", "0.0.0.0", "--port", "8011"]

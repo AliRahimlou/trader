@@ -187,9 +187,23 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     def health():
         result = {'ok': True, 'version': 'video-execution-v3', 'live_enabled': service.executor.enabled() if service.executor else False,
                   'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION}
+        result['worker_health'] = service.worker_health()
+        result['ready'] = result['worker_health']['ready']
         if service.executor is not None and service.executor.entry_gate is not None:
             result['deployment_protocol'] = PROTOCOL
         return result
+
+    @app.get('/api/worker-health')
+    def worker_health():
+        result = service.worker_health()
+        return JSONResponse(result, status_code=200 if result['ready'] else 503)
+
+    @app.get('/api/session-review')
+    def session_review(day: str | None = None):
+        try:
+            return service.store.session_review(day)
+        except ValueError:
+            raise HTTPException(422, detail='Use a valid session date in YYYY-MM-DD format') from None
 
     @app.get('/api/deployment-readiness')
     def readiness():

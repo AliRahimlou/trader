@@ -359,6 +359,8 @@ def wait_healthy(revision, *, hold, locked_at, permission_token=None, legacy_off
             health = read_local('/api/health')
             if health.get('ok') is not True or health.get('legacy_loaded') is not False or health.get('revision') != revision:
                 raise UpdateError('Replacement health identity is not verified')
+            if 'ready' in health and health['ready'] is not True:
+                raise UpdateError('Replacement workers have not completed their first healthy cycles')
             if health.get('deployment_protocol') == 'entry-gate-v1':
                 readiness = read_local('/api/deployment-readiness')
                 allowed, _ = readiness_allowed(readiness, revision, hold, locked_at, utcnow(),

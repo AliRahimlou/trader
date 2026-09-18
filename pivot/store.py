@@ -4,15 +4,18 @@ import sqlite3
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
+from copy import deepcopy
+from time import monotonic
 
 DEFAULTS = {'sizing_mode': 'target', 'target_dollars': '25.00'}
-DECISION_TRACE_RETENTION = 24000  # >=60 regular sessions even at one changed state per minute.
+DECISION_TRACE_RETENTION = 24000  # Row bound; does not imply a guaranteed number of sessions.
 EXECUTION_CHECK_RETENTION = 24000
 
 
 class Store:
     def __init__(self, path):
         self.path = str(path)
+        self._session_cache = {}
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);'
@@ -36,6 +39,11 @@ class Store:
                              'ON execution_checks(last_observed_at DESC,id DESC);')
             db.execute('INSERT OR IGNORE INTO control VALUES(1, ?)', (json.dumps({'enabled': False, 'policy': None}),))
             db.execute('INSERT OR IGNORE INTO settings VALUES(1, ?)', (json.dumps(DEFAULTS),))
+            db.execute('CREATE TABLE IF NOT EXISTS authorization_generation '
+                       '(id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO authorization_generation VALUES(1,0)')
+            for table in ('decision_traces', 'execution_checks'):
+                db.execute(f'CREATE INDEX IF NOT EXISTS {table}_session_time ON {table}(julianday(last_observed_at))')
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=5)
@@ -43,6 +51,18 @@ class Store:
     def settings(self):
         with self.connect() as db:
             return json.loads(db.execute('SELECT body FROM settings WHERE id=1').fetchone()[0])
+
+    @staticmethod
+    def _entry_authorization(db):
+        row = db.execute('SELECT (SELECT body FROM control WHERE id=1),'
+                         '(SELECT body FROM settings WHERE id=1),'
+                         '(SELECT generation FROM authorization_generation WHERE id=1)').fetchone()
+        return {'control': json.loads(row[0]), 'settings': json.loads(row[1]), 'generation': row[2]}
+
+    def entry_authorization(self):
+        """One SQLite snapshot of the permission/settings generation used by a plan."""
+        with self.connect() as db:
+            return self._entry_authorization(db)
 
     @staticmethod
     def _decision_row(row):
@@ -102,6 +122,96 @@ class Store:
                              'FROM execution_checks ORDER BY last_observed_at DESC,id DESC LIMIT 1').fetchone()
         return self._decision_row(row)
 
+    def session_review(self, day=None):
+        """Distinct events seen in the retained journal, never a count of polling ticks."""
+        from collections import Counter
+        from datetime import date, timedelta
+        from zoneinfo import ZoneInfo
+        local = ZoneInfo('America/New_York')
+        day = datetime.now(local).date() if day is None else date.fromisoformat(day)
+        cached = self._session_cache.get(day.isoformat())
+        if cached and monotonic() - cached[0] < 30:
+            return deepcopy(cached[1])
+        begin = datetime.combine(day, datetime.min.time(), local)
+        end = begin + timedelta(days=1)
+        params = (begin.isoformat(), end.isoformat())
+        with self.connect() as db:
+            traces = [json.loads(row[0]) for row in db.execute(
+                'SELECT body FROM decision_traces WHERE julianday(last_observed_at)>=julianday(?) '
+                'AND julianday(first_observed_at)<julianday(?) ORDER BY julianday(last_observed_at),id', params)]
+            execution = [json.loads(row[0]) for row in db.execute(
+                'SELECT body FROM execution_checks WHERE julianday(last_observed_at)>=julianday(?) '
+                'AND julianday(first_observed_at)<julianday(?) ORDER BY julianday(last_observed_at),id', params)]
+            trades = [json.loads(row[0]) for row in db.execute(
+                "SELECT body FROM trades WHERE julianday(json_extract(body,'$.created_at'))>=julianday(?) "
+                "AND julianday(json_extract(body,'$.created_at'))<julianday(?)", params)]
+        stage_names = ('Nasdaq level event', 'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target')
+        passed = {name: set() for name in stage_names}
+        events, blockers, checkpoints = set(), {}, set()
+        history_complete = True
+        for trace in traces:
+            checkpoints.add(trace.get('checkpoint_at'))
+            if 'candidate_diagnostics' not in trace:
+                history_complete = False
+            candidates = trace.get('candidate_diagnostics', trace.get('strategies', []))
+            for candidate in candidates:
+                identity = candidate.get('event_id')
+                if not identity:
+                    continue
+                events.add(identity)
+                checks = {check['name']: check.get('passed') is True for check in candidate.get('checks', [])}
+                first = next((name for name in stage_names if not checks.get(name)), None)
+                blockers[identity] = first or 'Signal qualified; broker checks separate'
+                for name in stage_names:
+                    if not checks.get(name):
+                        break
+                    passed[name].add(identity)
+        broker_blocks = {}
+        for check in execution:
+            signal = check.get('selected_entry_signal') or check.get('signal') or {}
+            identity = signal.get('event_id')
+            if identity and check.get('outcome') in ('waiting', 'feed_error', 'invalid_data', 'unexpected_error', 'attention', 'order_rejected'):
+                broker_blocks[identity] = check.get('gate', 'unknown')
+            elif identity and check.get('outcome') == 'entry_planned':
+                broker_blocks.pop(identity, None)
+        submitted, filled, protected, finished = set(), set(), set(), set()
+        for trade in trades:
+            key = trade['id']
+            entry = trade.get('ops', {}).get('entry', {})
+            if entry.get('state') in ('attempted', 'rejected'):
+                submitted.add(key)
+            try:
+                if float(entry.get('last_seen', {}).get('filled_qty', 0)) > 0:
+                    filled.add(key)
+            except (ValueError, TypeError):
+                pass
+            stop = trade.get('ops', {}).get('stop', {}).get('last_seen', {})
+            if stop.get('status') in ('new', 'partially_filled', 'filled'):
+                protected.add(key)
+            if trade.get('stage') == 'finished':
+                finished.add(key)
+        today_ids = {trade['id'] for trade in trades}
+        for check in execution:
+            trade = check.get('trade') or {}
+            if (trade.get('id') in today_ids and
+                    trade.get('operation_states', {}).get('stop', {}).get('broker_status') in ('new', 'partially_filled', 'filled')):
+                protected.add(trade['id'])
+        result = {'status':'available', 'day':day.isoformat(), 'timezone':'America/New_York',
+                'generated_at':datetime.now(timezone.utc).isoformat(), 'refresh_seconds':30,
+                'historical_only':True, 'complete_candidate_coverage':history_complete,
+                'scope':'Retained observations only; distinct events may pass checks at different observations. No-trade is not a profitability result.',
+                'checkpoints':len(checkpoints), 'events_seen':len(events),
+                'stages':[{'label':name, 'count':len(passed[name])} for name in stage_names],
+                'latest_signal_blockers':dict(Counter(blockers.values())),
+                'latest_execution_blockers':dict(Counter(broker_blocks.values())),
+                'orders':{'submission_attempts':len(submitted), 'confirmed_entries':len(filled),
+                          'confirmed_protection':len(protected), 'finished_lifecycles':len(finished)},
+                'latest_checks':[{'at':t['captured_at'], 'strategy':t.get('setup', {}).get('strategy_id'),
+                                  'blocker':(t.get('first_blocker') or {}).get('name') or 'Signal qualified; broker checks separate'}
+                                 for t in traces[-8:][::-1]]}
+        self._session_cache = {day.isoformat():(monotonic(), deepcopy(result))}
+        return result
+
     def execution_history(self, limit=50, before_id=None):
         """Historical observations only; reading these cannot authorize an order."""
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -149,7 +259,9 @@ class Store:
 
     def save(self, settings):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE settings SET body=? WHERE id=1', (json.dumps(settings),))
+            db.execute('UPDATE authorization_generation SET generation=generation+1 WHERE id=1')
             db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
                        (datetime.now(timezone.utc).isoformat(), 'settings_saved', json.dumps(settings)))
 
@@ -170,7 +282,9 @@ class Store:
     def set_control(self, enabled, policy=None, account_ref=None):
         value = {'enabled': enabled, 'policy': policy, 'account_ref': account_ref, 'at': datetime.now(timezone.utc).isoformat()}
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE control SET body=? WHERE id=1', (json.dumps(value),))
+            db.execute('UPDATE authorization_generation SET generation=generation+1 WHERE id=1')
             db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
                        (value['at'], 'live_on' if enabled else 'live_off', json.dumps(value)))
         return value
@@ -212,11 +326,13 @@ class Store:
             rows=db.execute('SELECT body FROM trades WHERE finished=1 ORDER BY rowid DESC LIMIT 20').fetchall()
         return [trade_result(json.loads(row[0])) for row in rows]
 
-    def reserve_trade(self, trade):
+    def reserve_trade(self, trade, *, expected_authorization=None):
         # Unique signal + single active slot survive restarts and competing workers.
         try:
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
+                if expected_authorization is not None and self._entry_authorization(db) != expected_authorization:
+                    return False
                 row = db.execute('SELECT finished,body FROM trades WHERE id=?', (trade['id'],)).fetchone()
                 if row is None:
                     db.execute('INSERT INTO trades(id,finished,body) VALUES(?,0,?)', (trade['id'], json.dumps(trade)))
@@ -269,8 +385,32 @@ class Store:
             trade = json.loads(row[1])
             if name == 'entry' and expected_entry is not None and trade != expected_entry:
                 return False
+            if name == 'entry' and trade.get('authorization') is not None:
+                if self._entry_authorization(db) != trade['authorization']:
+                    return False
             if trade['ops'][name]['state'] != 'prepared':
                 return False
             trade['ops'][name]['state'] = 'attempted'
             db.execute('UPDATE trades SET body=? WHERE id=?', (json.dumps(trade), trade_id))
             return True
+
+    def abort_claimed_entry(self, expected, completed_at):
+        """CAS for the submitting process's proven no-network-call result, never recovery guesses."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT finished,body FROM trades WHERE id=?', (expected['id'],)).fetchone()
+            if row is None or row[0] != 0:
+                return None
+            trade = json.loads(row[1])
+            entry = trade.get('ops', {}).get('entry', {})
+            if (trade != expected or trade.get('stage') != 'entering'
+                    or set(trade.get('ops', {})) != {'entry'} or entry.get('state') != 'attempted'
+                    or 'last_seen' in entry or 'filled_qty' in trade):
+                return None
+            entry['state'] = 'aborted_before_submit'
+            trade.update(stage='finished', completed_at=completed_at,
+                         reason='Entry admission expired before broker submission; no order sent. This event remains consumed.')
+            db.execute('UPDATE trades SET body=?,finished=1 WHERE id=?', (json.dumps(trade), trade['id']))
+            db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
+                       (completed_at, 'trade_finished', json.dumps({'symbol': trade['symbol'], 'reason': trade['reason']})))
+            return trade

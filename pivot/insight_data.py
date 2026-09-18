@@ -13,6 +13,8 @@ def _payload(envelope):
         reason = {'budget_exhausted': 'The free VIX request allowance is exhausted',
                   'rate_limited': 'The free VIX request rate limit was reached',
                   'in_flight': 'A VIX refresh is already running',
+                  'retry_wait': 'Waiting for the bounded VIX recovery time',
+                  'recovery_budget_exhausted': 'The VIX recovery allowance is exhausted for this period',
                   'stale': 'The saved VIX quote is no longer current'}.get(
                       envelope.get('status'), 'Current InsightSentry VIX data is unavailable')
         raise FeedError(reason + '; new entries must wait')
@@ -27,12 +29,17 @@ def diagnostics(cache, now, history=None):
                'budget': {'used': state['budget_used'], 'limit': state['budget_limit'],
                           'remaining': max(0, state['budget_limit'] - state['budget_used']),
                           'reserved': state['reserved_requests'],
-                          'actual_requests': state['requests_recorded']}}
+                          'actual_requests': state['requests_recorded'],
+                          **{key: state[key] for key in ('recovery_month_used', 'recovery_month_limit',
+                             'recovery_day_used', 'recovery_day_limit') if key in state}}}
     if history:
         details.update(history_status=history['status'], history_received_at=history.get('received_at'),
                        source_updated_at=history.get('source_updated_at'),
-                       next_refresh_at=history.get('next_refresh_at'))
+                       next_refresh_at=history.get('next_refresh_at'),
+                       retry_at=history.get('retry_at'), retry_reason=history.get('retry_reason'))
     quote = cache.peek_quote(now)
+    details.update(entry_quote_retry_at=quote.get('retry_at'),
+                   entry_quote_retry_reason=quote.get('retry_reason'))
     if quote.get('payload'):
         try:
             _validate('quote', quote['payload'], _aware(quote['received_at']))
@@ -59,6 +66,7 @@ def load_history(cache, now, sessions, *, clock=None, report=None):
             raise ValueError('Recent trading calendar missing')
         meta_envelope = cache.metadata(now)
         report.update(diagnostics(cache, _aware(clock())))
+        report.update(retry_at=meta_envelope.get('retry_at'), retry_reason=meta_envelope.get('retry_reason'))
         info, meta_received = _payload(meta_envelope)
         checked_at = _aware(clock())
         if not timedelta(0) <= checked_at - meta_received < timedelta(hours=24):

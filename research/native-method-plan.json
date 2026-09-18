@@ -1,0 +1,100 @@
+{
+  "schema": "pivot-current-method-experiments-v1",
+  "version": "2026-09-18-native-methods-v3",
+  "plan_written_before_this_run": true,
+  "prior_information": "The six available September sessions were previously inspected. A chronological validation partition is not an untouched holdout. The completed v2 policy comparison is also known; this v3 run tests only prespecified native F1/X1 algorithms without retuning.",
+  "budget": {
+    "implemented_policy_variants": 1,
+    "proposed_native_five_minute_variants": 2,
+    "adaptive_combinations": 0,
+    "orders": 0,
+    "data_request_note": "Bounded native5m actual VIX and native5m QQQ collection planned separately; not performed. The disconnected experiment makes no requests.",
+    "maximum_planned_new_data_requests": 2,
+    "executed_new_data_requests": 0
+  },
+  "methods": [
+    "four_hour_retest",
+    "prior_day_sweep"
+  ],
+  "variants": [
+    {
+      "id": "current_5_agree_1_opposing",
+      "minimum_leaders": 5,
+      "maximum_opposition": 1
+    }
+  ],
+  "proposed_variants": [
+    {
+      "id": "closed_five_minute_location",
+      "requires": [
+        "native_qqq_5m",
+        "native_actual_vix_5m"
+      ],
+      "specification": "docs/research/current-method-specifications.md#f1-closed-five-minute-location-candidate",
+      "implementation": "implemented",
+      "entrypoint": "research.five_minute_candidates.fast_location_candidates"
+    },
+    {
+      "id": "vix_five_minute_opposing_pivot_exit",
+      "requires": [
+        "native_qqq_5m",
+        "native_actual_vix_5m"
+      ],
+      "specification": "docs/research/current-method-specifications.md#x1-vix-opposing-pivot-exit-candidate",
+      "implementation": "implemented",
+      "entrypoint": "research.five_minute_candidates.freeze_vix_exit / vix_exit_decision / research_exit_reference"
+    }
+  ],
+  "fixed": {
+    "starting_capital": 100.0,
+    "purchase_target": 5.0,
+    "zone_tolerance": 0.001,
+    "persistence_bars": 3,
+    "publication_delay_seconds": 60,
+    "fractional_precision": 6,
+    "max_entry_drift": 0.01
+  },
+  "execution_scenarios": {
+    "base": {
+      "spread_bps": 2.0,
+      "slippage_bps": 2.0,
+      "fee_per_order": 0.01,
+      "latency_seconds": 0.0
+    },
+    "higher_cost": {
+      "spread_bps": 4.0,
+      "slippage_bps": 5.0,
+      "fee_per_order": 0.02,
+      "latency_seconds": 0.0
+    },
+    "delay_60s": {
+      "spread_bps": 2.0,
+      "slippage_bps": 2.0,
+      "fee_per_order": 0.01,
+      "latency_seconds": 60.0
+    }
+  },
+  "cost_note": "These are explicit adverse research assumptions, not quoted Alpaca fees or observed spreads. Capital is a synthetic research budget, not a read of the live account.",
+  "split": {
+    "development_fraction": 0.6,
+    "unit": "complete_exchange_session",
+    "close_positions_each_session": true
+  },
+  "future_holdout": {
+    "status": "not_available",
+    "minimum_sessions": 40,
+    "minimum_independent_completed_trades": 60,
+    "retuning_allowed": false
+  },
+  "selection": "No promotion or winner from this run. Record every variant and rejection. Genuine unseen evidence, execution validation, costs and approved loss limits are separate requirements.",
+  "baseline": "current_5_agree_1_opposing from completed hashed v2 run",
+  "native_contract": {
+    "qqq_warmup": "previous and current verified exchange session",
+    "vix_warmup": "14 calendar days through current verified exchange session",
+    "complete_days_only": true,
+    "publication_delay_seconds": 60,
+    "historical_receipts": "modeled, not observed",
+    "quote_execution": "unavailable; observed native5m QQQ openings only"
+  },
+  "X1_comparison": "Matched baseline executed entries only, same quantity/entry; no reinvestment or new-portfolio performance claim."
+}

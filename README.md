@@ -26,6 +26,9 @@ These are related source variants in one workflow. The app does not add opening-
 - [Creator channel review and exact-rule limits](docs/research/socrates-channel-review-20260918.md)
 - [Version 3.1 release notes and latest visual findings](docs/production-v3.1.md)
 - [3.1.0 leader/context implementation and validation](docs/research/leader-context-implementation-20260918.md)
+- [Version 3.2 fixes, monitoring and remaining validation](docs/production-v3.2.md)
+- [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
+- [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
 
 ## Run locally
 
@@ -46,6 +49,8 @@ Use `.venv/bin/python -m pip install -r requirements.txt` and `npm --prefix dash
 - `pivot/execution.py`, `pivot/broker.py`: durable order lifecycle and a narrow Alpaca adapter.
 - `pivot/policy.py`: the versioned rules reviewed before live permission is saved.
 - `pivot/store.py`: separate SQLite settings, permission, order-intent and audit storage.
+- `pivot/observations.py`, `pivot/worker_health.py`: private reproducible input history and independent worker-progress checks.
+- `research/`: disconnected strategy comparisons, exact observation replay and an explicitly isolated paper-broker workflow.
 - `pivot/performance.py`: evidence-based completed-trade gross results; fees remain separate.
 - `pivot/web/`: small standalone interface, no old dashboard imports.
 - `pivot/tests/`: isolated tests; all HTTP requests denied.

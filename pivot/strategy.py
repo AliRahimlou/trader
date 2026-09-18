@@ -471,6 +471,7 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
                ('prior_day_sweep', 'Previous-day boundary sweep')]
     rows = []
     qualified = []
+    candidate_diagnostics = []
     valid = market is not None and market.symbol == 'QQQ' and fresh(market, now, 60)
     bars = closed(market, 60, now) if valid else []
     all_levels = []
@@ -493,6 +494,9 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
         events = location_events(bars, method_levels, method, now)
         if events:
             candidates = [_evaluate_event(result, event, all_levels, bars, leaders, vix, now, policy) for event in events]
+            for candidate in candidates:
+                candidate_diagnostics.append({key: candidate.get(key) for key in
+                    ('id', 'event_id', 'event_origin_at', 'event_at', 'event_expires_at', 'state', 'direction', 'checks')})
             qualified.extend(candidate for candidate in candidates if candidate['state'] == 'SETUP_READY')
             result = max(candidates, key=_rank)
             result['candidate_count'] = len(candidates)
@@ -518,6 +522,7 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
             if key not in ('id', 'label', 'leader_evidence', 'levels', 'candidate_count')},
          'strategy_id': candidate['id']}
         for candidate in sorted(qualified, key=_rank, reverse=True)]
+    result['candidate_diagnostics'] = candidate_diagnostics
     if result['state'] in ('EXPIRED', 'INVALIDATED'):
         result['state'] = 'WATCHING'
     return result

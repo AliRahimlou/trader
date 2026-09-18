@@ -140,6 +140,12 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
     trace = {'version': VERSION, 'captured_at': now.isoformat(), 'checkpoint_at': checkpoint.isoformat(),
              'setup': {key: deepcopy(setup.get(key)) for key in SETUP_KEYS}, 'checks': checks,
              'strategies': [],
+             'candidate_diagnostics': [
+                 {**{key: deepcopy(candidate.get(key)) for key in
+                     ('id', 'event_id', 'event_origin_at', 'event_at', 'event_expires_at', 'state', 'direction')},
+                  'checks': [{key: check.get(key) for key in ('name', 'passed', 'detail')}
+                             for check in candidate.get('checks', []) if check.get('name') in CHECK_NAMES]}
+                 for candidate in setup.get('candidate_diagnostics', [])],
              'entry_candidates': [{key: deepcopy(candidate.get(key)) for key in SETUP_KEYS}
                                   for candidate in setup.get('entry_candidates', [])],
              'signal_qualifies': signal_qualifies, 'first_blocker': first,

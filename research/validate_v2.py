@@ -108,7 +108,8 @@ def load_inputs(native_path, warmup_path, legacy_path):
         raise ValueError('All required stock symbols must be present')
     stocks15, stocks5, corrections = {}, {}, {}
     for symbol in SYMBOLS:
-        bars15 = _bars(native['stocks'][symbol]['15'], 15, native_calendar)
+        bars15 = _bars(native['stocks'][symbol]['15'] if symbol == 'QQQ' else
+                       native['stocks'][symbol].get('15', []), 15, native_calendar)
         stocks15[symbol], corrections[symbol] = merge_bars(
             old_stocks[symbol], bars15, min(s['open'] for s in native_calendar.values()),
             timestamp(native['requested_at']))
@@ -177,6 +178,8 @@ def at_time(inputs, at, engine):
         frames = {15: bars, 60: engine.feeds.resample(bars, 60, sessions),
                   240: engine.feeds.resample(bars, 240, sessions), 1440: engine.feeds.daily(bars, sessions)}
         if symbol in MAG7:
+            if engine.strategy.ANALYSIS_VERSION == 'nasdaq-video-interpretation-v3':
+                frames = {}
             frames[5] = [b for b in inputs.stocks5[symbol]
                          if b.end <= at and b.end - timedelta(minutes=5) >= leader_start]
         markets[symbol] = engine.models.Market(symbol, frames, 'alpaca_iex', True, at, previous_session=previous)
@@ -192,8 +195,10 @@ def checkpoint(inputs, at, engine):
     markets, vix, sessions, leader_sessions, vix_sessions = at_time(inputs, at, engine)
     health = engine.data_health.stock_health(markets, sessions, at)
     incomplete = []
+    leader_frames = ((5,) if engine.strategy.ANALYSIS_VERSION == 'nasdaq-video-interpretation-v3'
+                     else (5, 15, 240))
     for symbol, market in markets.items():
-        for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else (5, 15, 240)):
+        for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else leader_frames):
             calendar = leader_sessions if minutes == 5 else sessions
             # Include the exact cutoff candle: eventual historical completeness
             # does not prove it was published within the live 90-second allowance.

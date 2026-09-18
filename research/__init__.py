@@ -1,1 +1,1 @@
-"""Offline research only. This package has no order submission path."""
+"""Offline strategy research; paper_commission is a separate explicit paper-only workflow."""

@@ -1,0 +1,26 @@
+{
+  "schema": "pivot-current-method-experiments-v1",
+  "version": "2026-09-18-current-methods-v2",
+  "plan_written_before_this_run": true,
+  "prior_information": "The six available September sessions were previously inspected. A chronological validation partition is not an untouched holdout.",
+  "budget": {"implemented_policy_variants": 2, "proposed_native_five_minute_variants": 2, "adaptive_combinations": 0, "new_data_requests": 0, "orders": 0},
+  "methods": ["four_hour_retest", "prior_day_sweep"],
+  "variants": [
+    {"id": "current_5_agree_1_opposing", "minimum_leaders": 5, "maximum_opposition": 1},
+    {"id": "control_4_agree_0_opposing", "minimum_leaders": 4, "maximum_opposition": 0}
+  ],
+  "proposed_variants": [
+    {"id": "closed_five_minute_location", "requires": ["native_qqq_5m", "native_actual_vix_5m"], "specification": "docs/research/current-method-specifications.md#f1-closed-five-minute-location-candidate", "implementation": "implemented", "entrypoint": "research.five_minute_candidates.fast_location_candidates"},
+    {"id": "vix_five_minute_opposing_pivot_exit", "requires": ["native_qqq_5m", "native_actual_vix_5m"], "specification": "docs/research/current-method-specifications.md#x1-vix-opposing-pivot-exit-candidate", "implementation": "implemented", "entrypoint": "research.five_minute_candidates.freeze_vix_exit / vix_exit_decision / research_exit_reference"}
+  ],
+  "fixed": {"starting_capital": 100.0, "purchase_target": 5.0, "zone_tolerance": 0.001, "persistence_bars": 3, "publication_delay_seconds": 60, "fractional_precision": 6, "max_entry_drift": 0.01},
+  "execution_scenarios": {
+    "base": {"spread_bps": 2.0, "slippage_bps": 2.0, "fee_per_order": 0.01, "latency_seconds": 0.0},
+    "higher_cost": {"spread_bps": 4.0, "slippage_bps": 5.0, "fee_per_order": 0.02, "latency_seconds": 0.0},
+    "delay_60s": {"spread_bps": 2.0, "slippage_bps": 2.0, "fee_per_order": 0.01, "latency_seconds": 60.0}
+  },
+  "cost_note": "These are explicit adverse research assumptions, not quoted Alpaca fees or observed spreads. Capital is a synthetic research budget, not a read of the live account.",
+  "split": {"development_fraction": 0.6, "unit": "complete_exchange_session", "close_positions_each_session": true},
+  "future_holdout": {"status": "not_available", "minimum_sessions": 40, "minimum_independent_completed_trades": 60, "retuning_allowed": false},
+  "selection": "No promotion or winner from this run. Record every variant and rejection. Genuine unseen evidence, execution validation, costs and approved loss limits are separate requirements."
+}
