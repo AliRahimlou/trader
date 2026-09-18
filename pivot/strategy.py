@@ -9,12 +9,13 @@ from hashlib import sha256
 import json
 from math import isfinite
 from zoneinfo import ZoneInfo
-from .models import Zone, MAG7
+from .models import Zone, MAG7, timestamp
 
 ET = ZoneInfo('America/New_York')
-ANALYSIS_VERSION = 'nasdaq-video-interpretation-v2'
+ANALYSIS_VERSION = 'nasdaq-video-interpretation-v3'
 EVENT_LIFETIME_MINUTES = 180
 LEADER_MINUTES = 5
+CANDLE_PUBLICATION_GRACE_SECONDS = 90
 
 
 @dataclass(frozen=True)
@@ -22,8 +23,8 @@ class AnalysisPolicy:
     """Declared v2 interpretations, frozen before replay; not creator formulas."""
     zone_tolerance: float = 0.001
     persistence_bars: int = 3
-    minimum_leaders: int = 4
-    maximum_opposition: int = 0
+    minimum_leaders: int = 5
+    maximum_opposition: int = 1
 
     def __post_init__(self):
         if (isinstance(self.zone_tolerance, bool) or not isinstance(self.zone_tolerance, (float, int))
@@ -47,7 +48,7 @@ def closed(market, minutes, now):
     return [b for b in bars if b.end <= now]
 
 
-def fresh(market, now, minutes, grace=90):
+def fresh(market, now, minutes, grace=CANDLE_PUBLICATION_GRACE_SECONDS):
     bars = closed(market, minutes, now)
     return bool(market.realtime and 0 <= (now - market.observed_at).total_seconds() <= 90
                 and bars and 0 <= (now - bars[-1].end).total_seconds() <= minutes * 60 + grace)
@@ -152,15 +153,23 @@ def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
         row = {'vote': None, 'reason': 'current 5-minute data missing', 'zones': [],
                'timeframe_minutes': LEADER_MINUTES, 'observational_only': setup_at is None,
                'latest_bar_at': None, 'reaction_at': None, 'age_minutes': None,
+               'evidence_valid_until': None, 'observation_valid_until': None,
                'conflicting_reactions': False}
         rows[symbol] = row
         if market is None or not fresh(market, now, LEADER_MINUTES):
             continue
         bars = closed(market, LEADER_MINUTES, now)
         latest = bars[-1]
+        observation_deadline = latest.end + timedelta(
+            minutes=LEADER_MINUTES, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)
+        row.update(latest_bar_at=latest.end.isoformat(), latest_close=latest.close,
+                   observation_valid_until=observation_deadline.isoformat())
+        # Admission deadlines are exclusive even at the publication boundary.
+        # A recently fetched receipt cannot extend an old candle's validity.
+        if now >= observation_deadline:
+            continue
         levels = interaction_zones(bars, latest.end - timedelta(minutes=LEADER_MINUTES), policy.zone_tolerance)
         row.update(reason='no zone reaction' if levels else 'no eligible zones',
-                   latest_bar_at=latest.end.isoformat(), latest_close=latest.close,
                    zones=[{'low': z.low, 'high': z.high, 'source': z.source,
                            'established_at': z.established_at.isoformat(), 'touches': z.touches,
                            'touched_by_latest_bar': latest.low <= z.high and latest.high >= z.low}
@@ -210,6 +219,8 @@ def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
             chosen = min(evidence, key=lambda e: (-e['at'].timestamp(), abs(latest.close-e['zone'].mid), e['zone'].low))
             zone = chosen['zone']
             row.update(vote=chosen['vote'], reaction_at=chosen['at'].isoformat(), age_minutes=chosen['age'],
+                       evidence_valid_until=(chosen['at'] + timedelta(
+                           minutes=LEADER_MINUTES * policy.persistence_bars)).isoformat(),
                        reason='current reaction' if chosen['at'] == latest.end else 'persistent reaction',
                        reaction_zone={'low': zone.low, 'high': zone.high, 'source': zone.source,
                                       'established_at': zone.established_at.isoformat()})
@@ -219,10 +230,26 @@ def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
     return rows
 
 
+def _leader_observation_at(rows):
+    """Common current behavior observation; reaction times need not match."""
+    # Provider publication can reach symbols at different times within the
+    # freshness allowance. Compare their current behavior at one candle close;
+    # their qualifying reactions may still occur on different earlier candles.
+    try:
+        observation_times = {timestamp(row['latest_bar_at']) for row in rows.values()}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if set(rows) != set(MAG7) or len(observation_times) != 1:
+        return None
+    return next(iter(observation_times)).astimezone(timezone.utc).isoformat()
+
+
 def _leader_confirmation(rows, direction, policy):
     for symbol, row in rows.items():
         if row['reason'] == 'current 5-minute data missing' or row.get('conflicting_reactions'):
             return False, f'{symbol}: {row["reason"]}'
+    if _leader_observation_at(rows) is None:
+        return False, 'Leader 5-minute candles are not synchronized; waiting for a common completed timestamp'
     votes = {symbol: row['vote'] for symbol, row in rows.items()}
     opposite = 'short' if direction == 'long' else 'long'
     okay = (sum(v == direction for v in votes.values()) >= policy.minimum_leaders
@@ -356,6 +383,8 @@ def _empty_result(method, label):
             'checks': [], 'levels': [], 'direction': None, 'entry': None, 'stop': None, 'target': None,
             'event': None, 'event_at': None, 'event_id': None, 'event_origin_at': None,
             'event_expires_at': None, 'latest_evidence_at': None,
+            'leader_observation_at': None, 'leader_observations_synchronized': False,
+            'leader_evidence_valid_until': None, 'leader_observation_valid_until': None,
             'policy_version': ANALYSIS_VERSION, 'execution_blocker': 'Waiting for the complete strategy setup'}
 
 
@@ -381,9 +410,20 @@ def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
                   if result['id'] == 'four_hour_retest' else
                   (origin.low if event['break_direction'] == 'long' else origin.high))
     result['leader_evidence'] = leader_diagnostics(leaders, now, policy, origin.end)
+    rows = result['leader_evidence']
+    observation_at = _leader_observation_at(rows)
+    # Reaction lifetime and the latest candle's publication allowance are
+    # separate clocks. The executor must respect the earlier deadline between
+    # polls, even when the original reaction itself remains within its window.
+    evidence_deadlines = [timestamp(row['evidence_valid_until']) for row in rows.values() if row['vote']]
+    observation_deadline = (timestamp(observation_at) + timedelta(
+        minutes=LEADER_MINUTES, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)) if observation_at else None
+    result.update(leader_observation_at=observation_at,
+                  leader_observations_synchronized=observation_at is not None,
+                  leader_observation_valid_until=observation_deadline.isoformat() if observation_deadline else None,
+                  leader_evidence_valid_until=min(evidence_deadlines).isoformat() if evidence_deadlines else None)
     if not _checked(result, 'Nasdaq level event', event['state'] == 'CONFIRMING', event['reason']):
         return _finish(result)
-    rows = result['leader_evidence']
     confirmations = {d: _leader_confirmation(rows, d, policy) for d in ('long', 'short')}
     direction = next((d for d, (okay, _) in confirmations.items() if okay), None)
     if not _checked(result, 'Magnificent Seven at their zones', direction,
@@ -466,7 +506,10 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
         rows.append(result)
     selected = max(rows, key=_rank)
     result = {key: value for key, value in selected.items() if key not in ('id', 'label')}
-    result.update(strategy_id=selected['id'], strategies=rows, levels=[_zone_dict(z) for z in all_levels])
+    result.update(strategy_id=selected['id'], strategies=rows, levels=[_zone_dict(z) for z in all_levels],
+                  leader_rule={'minimum_agree': policy.minimum_leaders,
+                               'maximum_opposing': policy.maximum_opposition,
+                               'persistence_minutes': LEADER_MINUTES * policy.persistence_bars})
     # Preserve every qualified opportunity for admission. A previously handled
     # event must not hide an unhandled area or the other independently valid
     # method. Only the executor knows durable consumption; analysis stays pure.

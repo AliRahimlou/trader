@@ -184,6 +184,28 @@ class Store:
         with self.connect() as db:
             return db.execute('SELECT 1 FROM trades WHERE id=?', (identity,)).fetchone() is not None
 
+    @staticmethod
+    def _retryable_unsent_entry(row, identity):
+        """Only a finished, durably never-attempted entry may be reserved again."""
+        if row is None or row[0] != 1:
+            return False
+        try:
+            trade = json.loads(row[1])
+            operations = trade['ops']
+            entry = operations['entry']
+            return (trade['id'] == identity and trade['stage'] == 'finished'
+                    and trade.get('reason') == 'Entry expired before submission; no order sent'
+                    and 'filled_qty' not in trade and set(operations) == {'entry'}
+                    and entry['state'] == 'prepared' and 'last_seen' not in entry
+                    and entry['payload']['client_order_id'] == f'pvt-{identity}-entry')
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def entry_consumed(self, identity):
+        with self.connect() as db:
+            row = db.execute('SELECT finished,body FROM trades WHERE id=?', (identity,)).fetchone()
+        return row is not None and not self._retryable_unsent_entry(row, identity)
+
     def trade_results(self):
         from .performance import trade_result
         with self.connect() as db:
@@ -194,7 +216,21 @@ class Store:
         # Unique signal + single active slot survive restarts and competing workers.
         try:
             with self.connect() as db:
-                db.execute('INSERT INTO trades(id,finished,body) VALUES(?,0,?)', (trade['id'], json.dumps(trade)))
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT finished,body FROM trades WHERE id=?', (trade['id'],)).fetchone()
+                if row is None:
+                    db.execute('INSERT INTO trades(id,finished,body) VALUES(?,0,?)', (trade['id'], json.dumps(trade)))
+                elif self._retryable_unsent_entry(row, trade['id']):
+                    # Preserve the abandoned reservation in the append-only
+                    # journal in the same transaction as its replacement.
+                    # Its client ID was never posted: claim_operation durably
+                    # changes prepared -> attempted before every broker POST.
+                    db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
+                               (datetime.now(timezone.utc).isoformat(), 'unsubmitted_entry_retried', row[1]))
+                    db.execute('UPDATE trades SET finished=0,body=? WHERE id=?',
+                               (json.dumps(trade), trade['id']))
+                else:
+                    return False
             return True
         except sqlite3.IntegrityError:
             return False
@@ -203,12 +239,36 @@ class Store:
         with self.connect() as db:
             db.execute('UPDATE trades SET body=?,finished=? WHERE id=?', (json.dumps(trade), int(finished), trade['id']))
 
-    def claim_operation(self, trade_id, name):
+    def expire_prepared_entry(self, expected, completed_at):
+        """Retire this exact reservation only while its durable entry is unsent."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT finished,body FROM trades WHERE id=?', (expected['id'],)).fetchone()
+            if row is None or row[0] != 0:
+                return None
+            trade = json.loads(row[1])
+            if (trade != expected or trade.get('stage') != 'entering'
+                    or trade.get('ops', {}).get('entry', {}).get('state') != 'prepared'):
+                return None
+            trade.update(stage='finished', reason='Entry expired before submission; no order sent',
+                         completed_at=completed_at)
+            if not self._retryable_unsent_entry((1, json.dumps(trade)), trade['id']):
+                return None
+            db.execute('UPDATE trades SET body=?,finished=1 WHERE id=?', (json.dumps(trade), trade['id']))
+            db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
+                       (completed_at, 'trade_finished', json.dumps({'symbol': trade['symbol'], 'reason': trade['reason']})))
+            return trade
+
+    def claim_operation(self, trade_id, name, *, expected_entry=None):
         """Durably mark the single allowed POST attempt before making a network call."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT body FROM trades WHERE id=?', (trade_id,)).fetchone()
-            trade = json.loads(row[0])
+            row = db.execute('SELECT finished,body FROM trades WHERE id=?', (trade_id,)).fetchone()
+            if row is None or row[0] != 0:
+                return False
+            trade = json.loads(row[1])
+            if name == 'entry' and expected_entry is not None and trade != expected_entry:
+                return False
             if trade['ops'][name]['state'] != 'prepared':
                 return False
             trade['ops'][name]['state'] = 'attempted'

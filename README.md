@@ -23,6 +23,8 @@ These are related source variants in one workflow. The app does not add opening-
 - [Implementation and verification audit](docs/rebuild-audit.md)
 - [Data collection audit and free-source findings](docs/data-feed-audit.md)
 - [Latest completion audit and outstanding dependencies](docs/completion-audit.md)
+- [Creator channel review and exact-rule limits](docs/research/socrates-channel-review-20260918.md)
+- [Local 3.1.0 leader/context candidate and validation](docs/research/leader-context-implementation-20260918.md)
 
 ## Run locally
 

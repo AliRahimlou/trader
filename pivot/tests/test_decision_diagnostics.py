@@ -53,9 +53,15 @@ def test_trace_preserves_actual_signals_and_never_authorizes_broker_orders():
     assert result['vix']['expected_reaction'] == 'long'
     assert result['vix']['reason'] == 'expected reaction present'
     assert result['vix']['gate_reached'] is True
-    assert result['version'] == 'decision-trace-v2'
+    assert result['version'] == 'decision-trace-v3'
     assert result['leaders']['AAPL']['input']['frames']['5']['recent'][-1]['minutes'] == 5
     assert result['setup']['event_id'] == setup['event_id']
+    assert result['setup']['leader_evidence_valid_until'] == setup['leader_evidence_valid_until']
+    assert result['setup']['leader_observation_valid_until'] == setup['leader_observation_valid_until']
+    assert result['setup']['leader_rule'] == {'minimum_agree': 5, 'maximum_opposing': 1, 'persistence_minutes': 15}
+    assert result['market_context']['descriptive_only'] is True
+    assert result['market_context']['entry_veto'] is False
+    assert result['leaders']['AAPL']['evidence_valid_until']
     methods = {row['id']: row for row in result['strategies']}
     assert methods['four_hour_retest']['signal_qualifies'] is True
     assert methods['prior_day_sweep']['signal_qualifies'] is False
@@ -68,13 +74,14 @@ def test_trace_preserves_actual_signals_and_never_authorizes_broker_orders():
 
 def test_exact_first_signal_blocker_and_unreached_vix_evidence_are_distinct():
     markets, vix = scenario()
-    markets['AAPL'].bars[5][-1] = candle(NOW, 100, 105, 89.9, 104, 5)
+    for symbol in ('AAPL', 'MSFT'):
+        markets[symbol].bars[5][-1] = candle(NOW, 100, 105, 89.9, 104, 5)
     setup = analyze(markets['QQQ'], markets, vix, NOW)
     result = build_decision_trace(setup, markets, vix, NOW)
     failed = next(c for c in setup['checks'] if not c['passed'])
     assert result['first_blocker'] == {**failed, 'stage': 'signal'}
     assert result['first_blocker']['name'] == 'Magnificent Seven at their zones'
-    assert result['leader_counts'] == {'long': 1, 'short': 6}
+    assert result['leader_counts'] == {'long': 2, 'short': 5}
     assert not result['signal_qualifies'] and not result['vix']['gate_reached']
     assert result['vix']['reactions']  # Counterfactual evidence is labeled, not admitted as a passed gate.
 

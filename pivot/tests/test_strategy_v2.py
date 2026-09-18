@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from pivot.models import Bar, Market, MAG7, Zone
-from pivot.strategy import (ANALYSIS_VERSION, analyze, interaction_zones,
+from pivot.strategy import (ANALYSIS_VERSION, CANDLE_PUBLICATION_GRACE_SECONDS, AnalysisPolicy, analyze, interaction_zones,
                             leader_confirmation, leader_diagnostics, location_events)
 
 NOW = datetime(2026, 9, 16, 16, tzinfo=timezone.utc)
@@ -267,14 +267,180 @@ def test_event_id_is_independent_of_leader_direction_and_future_target_geometry(
     assert analyze(market, leaders, None, now)['event_id'] == first['event_id']
 
 
-def test_leader_vote_still_requires_four_companies_and_no_opposition():
-    leaders = {s: leader_market(s, 'long' if i < 4 else None) for i, s in enumerate(MAG7)}
-    assert leader_confirmation(leaders, 'long', NOW)[0]
-    leaders[MAG7[3]] = leader_market(MAG7[3], None)
-    assert not leader_confirmation(leaders, 'long', NOW)[0]
-    leaders[MAG7[3]] = leader_market(MAG7[3], 'long')
-    leaders[MAG7[4]] = leader_market(MAG7[4], 'short')
-    assert not leader_confirmation(leaders, 'long', NOW)[0]
+@pytest.mark.parametrize('direction', ['long', 'short'])
+@pytest.mark.parametrize('agreeing,opposing,expected', [
+    (5, 1, True), (5, 2, False), (4, 1, False),
+    (7, 0, True), (6, 1, True), (5, 0, True), (4, 0, False),
+])
+def test_leader_vote_requires_five_companies_and_allows_one_opposing(direction, agreeing, opposing, expected):
+    opposite = 'short' if direction == 'long' else 'long'
+    leaders = {symbol: leader_market(symbol, direction if i < agreeing else
+                                    opposite if i < agreeing+opposing else None)
+               for i, symbol in enumerate(MAG7)}
+    assert leader_confirmation(leaders, direction, NOW)[0] is expected
+
+
+def test_five_agreeing_and_one_opposing_cannot_hide_a_missing_seventh_leader():
+    leaders = {symbol: leader_market(symbol, 'long' if i < 5 else 'short')
+               for i, symbol in enumerate(MAG7[:6])}
+    okay, reason = leader_confirmation(leaders, 'long', NOW)
+    assert not okay and reason == 'TSLA: current 5-minute data missing'
+
+
+@pytest.mark.parametrize('direction', ['long', 'short'])
+def test_five_one_neutral_can_qualify_when_the_other_strategy_gates_pass(direction):
+    market, leaders, vix, now = setup_scenario(direction)
+    opposite = 'short' if direction == 'long' else 'long'
+    leaders['GOOGL'] = leader_market('GOOGL', opposite)
+    leaders['TSLA'] = leader_market('TSLA', None)
+    result = analyze(market, leaders, vix, now)
+    assert result['state'] == 'SETUP_READY' and result['direction'] == direction
+    assert sum(row['vote'] == direction for row in result['leader_evidence'].values()) == 5
+    assert sum(row['vote'] == opposite for row in result['leader_evidence'].values()) == 1
+
+
+def test_leader_confirmation_does_not_combine_different_latest_candle_times():
+    now = NOW + timedelta(seconds=30)
+    leaders = {
+        symbol: leader_market(symbol, 'long' if i < 5 else None,
+                              at=NOW if i < 5 else NOW-timedelta(minutes=5))
+        for i, symbol in enumerate(MAG7)
+    }
+    for market in leaders.values():
+        market.observed_at = now
+    rows = leader_diagnostics(leaders, now)
+    assert all(row['latest_bar_at'] for row in rows.values())  # each passes freshness
+    assert len({row['latest_bar_at'] for row in rows.values()}) == 2
+    okay, reason = leader_confirmation(leaders, 'long', now)
+    assert not okay and 'not synchronized' in reason
+    # Once the other companies publish the same closing timestamp, admission
+    # uses the current evidence without rewinding an already available candle.
+    for symbol in MAG7[5:]:
+        leaders[symbol] = leader_market(symbol, None)
+        leaders[symbol].observed_at = now
+    assert leader_confirmation(leaders, 'long', now)[0]
+
+
+def test_common_observation_time_does_not_require_simultaneous_reactions():
+    leaders = {symbol: leader_market(symbol, None) for symbol in MAG7}
+    for symbol, age in zip(MAG7[:5], (0, 5, 10, 0, 5)):
+        market = leader_market(symbol, at=NOW-timedelta(minutes=age))
+        for minutes in range(age-5, -1, -5):
+            market.bars[5].append(candle(NOW-timedelta(minutes=minutes), 106, 106.05, 105.95, 106))
+        market.observed_at = NOW
+        leaders[symbol] = market
+    rows = leader_diagnostics(leaders, NOW, setup_at=NOW-timedelta(minutes=20))
+    assert {rows[symbol]['age_minutes'] for symbol in MAG7[:5]} == {0, 5, 10}
+    assert len({row['latest_bar_at'] for row in rows.values()}) == 1
+    assert leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))[0]
+    # Equivalent timezone representations still describe the same observation.
+    eastern = leaders['AAPL']
+    from zoneinfo import ZoneInfo
+    eastern.bars[5] = [replace(bar, end=bar.end.astimezone(ZoneInfo('America/New_York')))
+                       for bar in eastern.bars[5]]
+    assert leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))[0]
+
+
+def test_ready_candidate_expires_with_its_earliest_counted_leader_reaction():
+    market, leaders, vix, now = setup_scenario('long', 'four_hour_retest')
+    for symbol, age in zip(MAG7, (10, 5, 0, 0, 0, None, None)):
+        leader = leader_market(symbol, 'long' if age is not None else None,
+                               at=NOW-timedelta(minutes=age or 0))
+        for minutes in range((age or 0)-5, -1, -5):
+            leader.bars[5].append(candle(NOW-timedelta(minutes=minutes), 106, 106.05, 105.95, 106))
+        leader.observed_at = now
+        leaders[symbol] = leader
+    result = analyze(market, leaders, vix, now)
+    deadline = now+timedelta(minutes=5)
+    assert result['state'] == 'SETUP_READY'
+    assert result['leader_observations_synchronized'] is True
+    assert result['leader_observation_at'] == now.isoformat()
+    assert result['leader_evidence_valid_until'] == deadline.isoformat()
+    assert all(candidate['leader_evidence_valid_until'] == deadline.isoformat()
+               for candidate in result['entry_candidates'])
+    assert result['leader_evidence']['AAPL']['evidence_valid_until'] == deadline.isoformat()
+    assert result['leader_evidence']['TSLA']['evidence_valid_until'] is None
+    # Refreshing receipts cannot extend the selected reaction's wall-clock life.
+    for observed_at in (deadline-timedelta(seconds=1), deadline):
+        for observed in (market, vix, *leaders.values()):
+            observed.observed_at = observed_at
+        checked = analyze(market, leaders, vix, observed_at)
+        if observed_at < deadline:
+            assert checked['state'] == 'SETUP_READY'
+            assert checked['leader_evidence_valid_until'] == deadline.isoformat()
+        else:
+            assert checked['state'] != 'SETUP_READY'
+            assert checked['leader_evidence']['AAPL']['vote'] is None
+
+
+@pytest.mark.parametrize('persistence_bars', [1, 2, 3])
+def test_candidate_leader_deadline_uses_the_declared_persistence_policy(persistence_bars):
+    market, leaders, vix, now = setup_scenario()
+    policy = AnalysisPolicy(persistence_bars=persistence_bars)
+    result = analyze(market, leaders, vix, now, policy)
+    assert result['state'] == 'SETUP_READY'
+    assert result['leader_evidence_valid_until'] == (now+timedelta(minutes=5*persistence_bars)).isoformat()
+    assert result['leader_rule'] == {'minimum_agree': 5, 'maximum_opposing': 1,
+                                     'persistence_minutes': 5*persistence_bars}
+
+
+def test_candidate_deadline_includes_the_permitted_opposing_vote():
+    market, leaders, vix, now = setup_scenario('long', 'four_hour_retest')
+    opposing = leader_market('GOOGL', 'short', at=now-timedelta(minutes=10))
+    opposing.bars[5] += [candle(now-timedelta(minutes=5), 94, 94.05, 93.95, 94),
+                         candle(now, 94, 94.05, 93.95, 94)]
+    opposing.observed_at = now
+    leaders['GOOGL'] = opposing
+    leaders['TSLA'] = leader_market('TSLA', None)
+    result = analyze(market, leaders, vix, now)
+    assert result['state'] == 'SETUP_READY'
+    assert result['leader_evidence']['GOOGL']['vote'] == 'short'
+    assert result['leader_evidence_valid_until'] == (now+timedelta(minutes=5)).isoformat()
+
+
+def test_candidate_exposes_observation_expiry_before_the_reaction_window_ends():
+    market, leaders, vix, base = setup_scenario()
+    checked_at = base+timedelta(minutes=6, seconds=20)
+    for item in (market, vix, *leaders.values()):
+        item.observed_at = checked_at
+    result = analyze(market, leaders, vix, checked_at)
+    observation_deadline = base+timedelta(minutes=5, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)
+    reaction_deadline = base+timedelta(minutes=15)
+    assert result['state'] == 'SETUP_READY'
+    assert result['leader_evidence_valid_until'] == reaction_deadline.isoformat()
+    assert result['leader_observation_valid_until'] == observation_deadline.isoformat()
+    assert all(row['observation_valid_until'] == observation_deadline.isoformat()
+               for row in result['leader_evidence'].values())
+    assert all(candidate['leader_observation_valid_until'] == observation_deadline.isoformat()
+               for candidate in result['entry_candidates'])
+    for at in (observation_deadline-timedelta(seconds=1), observation_deadline,
+               observation_deadline+timedelta(seconds=1)):
+        for item in (market, vix, *leaders.values()):
+            item.observed_at = at
+        later = analyze(market, leaders, vix, at)
+        if at < observation_deadline:
+            assert later['state'] == 'SETUP_READY'
+            assert later['leader_observation_valid_until'] == observation_deadline.isoformat()
+        else:
+            assert later['state'] != 'SETUP_READY'
+            assert all(row['vote'] is None for row in later['leader_evidence'].values())
+            assert 'current 5-minute data missing' in later['checks'][-1]['detail']
+
+
+def test_new_candle_refreshes_observation_deadline_without_extending_reaction_age():
+    market, leaders, vix, base = setup_scenario()
+    checked_at = base+timedelta(minutes=6, seconds=40)
+    for leader in leaders.values():
+        leader.bars[5].append(candle(base+timedelta(minutes=5), 106, 106.05, 105.95, 106))
+    for item in (market, vix, *leaders.values()):
+        item.observed_at = checked_at
+    result = analyze(market, leaders, vix, checked_at)
+    assert result['state'] == 'SETUP_READY'
+    assert result['leader_observation_at'] == (base+timedelta(minutes=5)).isoformat()
+    assert result['leader_observation_valid_until'] == (
+        base+timedelta(minutes=10, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)).isoformat()
+    assert result['leader_evidence_valid_until'] == (base+timedelta(minutes=15)).isoformat()
+    assert all(row['reaction_at'] == base.isoformat() for row in result['leader_evidence'].values())
 
 
 def test_conflicting_active_reactions_within_one_company_are_not_arbitrary_neutral_votes():
@@ -287,9 +453,10 @@ def test_conflicting_active_reactions_within_one_company_are_not_arbitrary_neutr
     row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
     assert row['vote'] is None and row['conflicting_reactions']
     assert row['reason'] == 'conflicting active area reactions'
-    # Six apparent long votes cannot hide contradictory evidence in the seventh.
+    # Five apparent long votes cannot hide contradictory evidence in the seventh.
     leaders = {symbol: leader_market(symbol) for symbol in MAG7}
     leaders['AAPL'] = market
+    leaders['TSLA'] = leader_market('TSLA', None)
     okay, reason = leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))
     assert not okay and 'conflicting active area reactions' in reason
 

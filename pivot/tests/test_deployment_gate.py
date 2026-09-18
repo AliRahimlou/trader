@@ -165,10 +165,10 @@ def test_entry_keeps_shared_admission_through_reads_claim_and_post(gated, monkey
     checked = []
     for owner, name in ((broker, 'account'), (store, 'reserve_trade'), (store, 'claim_operation'), (broker, 'submit')):
         original = getattr(owner, name)
-        def inspected(*args, original=original, name=name):
+        def inspected(*args, original=original, name=name, **kwargs):
             assert exclusive_is_blocked(executor.entry_gate.lock_path)
             checked.append(name)
-            return original(*args)
+            return original(*args, **kwargs)
         monkeypatch.setattr(owner, name, inspected)
     executor.tick(ready())
     assert {'account', 'reserve_trade', 'claim_operation', 'submit'} <= set(checked)

@@ -8,12 +8,15 @@ from datetime import timedelta
 from hashlib import sha256
 import json
 from .models import MAG7, timestamp
+from .market_context import market_context
 from .strategy import closed, leader_diagnostics, reaction, vix_candles_fresh, zones
 
-VERSION = 'decision-trace-v2'
+VERSION = 'decision-trace-v3'
 SOURCES = {'alpaca_iex', 'alpaca_sip', 'insightsentry', 'massive_indices'}
 SETUP_KEYS = ('state', 'strategy_id', 'direction', 'entry', 'stop', 'target', 'event', 'event_at',
-              'event_id', 'event_origin_at', 'event_expires_at', 'latest_evidence_at', 'policy_version')
+              'event_id', 'event_origin_at', 'event_expires_at', 'latest_evidence_at', 'policy_version',
+              'leader_observation_at', 'leader_observations_synchronized', 'leader_evidence_valid_until',
+              'leader_observation_valid_until', 'leader_rule')
 ZONE_KEYS = ('low', 'high', 'established_at', 'touches')
 CHECK_NAMES = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
                'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
@@ -37,7 +40,8 @@ def _zone(zone):
 def _leader_summary(rows):
     """Branch evidence without duplicating entire historical area lists per method."""
     keys = ('vote', 'reason', 'timeframe_minutes', 'observational_only', 'latest_bar_at',
-            'latest_close', 'reaction_at', 'age_minutes', 'conflicting_reactions')
+            'latest_close', 'reaction_at', 'age_minutes', 'conflicting_reactions', 'evidence_valid_until',
+            'observation_valid_until')
     result = {}
     for symbol in MAG7:
         row = rows.get(symbol) or {}
@@ -71,9 +75,10 @@ def _health(health):
         if row.get('symbol') not in ('QQQ', *MAG7):
             continue
         frames = [{key: f.get(key) for key in ('minutes', 'count', 'missing_count')} |
-                  {key: _time(f.get(key)) for key in ('latest_at', 'expected_at', 'first_missing_at')} |
+                  {key: _time(f.get(key)) for key in ('latest_at', 'expected_at', 'first_missing_at', 'valid_until')} |
                   {'status': status(f.get('status'))} for f in row.get('frames', [])]
-        instruments.append({'symbol': row['symbol'], 'status': status(row.get('status')), 'frames': frames})
+        instruments.append({'symbol': row['symbol'], 'status': status(row.get('status')), 'frames': frames,
+                            'valid_until': _time(row.get('valid_until'))})
     verification = vix.get('verification') or {}
     # No raw verification object or error text is retained.
     public_verification = {key: verification.get(key) for key in ('delay_seconds', 'market_open') if key in verification}
@@ -85,6 +90,7 @@ def _health(health):
                                      if isinstance(budget.get(key), (int, float)) and not isinstance(budget.get(key), bool)}
     return {'ready': health.get('ready') is True,
             'stocks': {'status': status(stocks.get('status')), 'instruments': instruments,
+                       'valid_until': _time(stocks.get('valid_until')),
                        'error_present': bool(stocks.get('error'))},
             'vix': {'status': status(vix.get('status')), 'latest_at': _time(vix.get('latest_at')),
                     'valid_until': _time(vix.get('valid_until')), 'bar_count': vix.get('bar_count'),
@@ -112,7 +118,7 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
     event_at = timestamp(setup['event_origin_at']) if setup.get('event_origin_at') else None
     leaders = deepcopy(setup.get('leader_evidence')) or leader_diagnostics(markets, now, setup_at=event_at)
     for symbol, row in leaders.items():
-        row['input'] = _market(markets.get(symbol), now, (5, 15, 240))
+        row['input'] = _market(markets.get(symbol), now, (5,))
         row['age_at_observation_minutes'] = ((now - timestamp(row['reaction_at'])).total_seconds() / 60
                                              if row.get('reaction_at') else None)
     vix_bars = closed(vix, 15, now) if vix else []
@@ -137,6 +143,7 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
              'entry_candidates': [{key: deepcopy(candidate.get(key)) for key in SETUP_KEYS}
                                   for candidate in setup.get('entry_candidates', [])],
              'signal_qualifies': signal_qualifies, 'first_blocker': first,
+             'market_context': market_context(qqq, now),
              'nasdaq': {'input': _market(qqq, now, (15, 60, 240, 1440)),
                        'eligible_zones': [{key: z.get(key) for key in (*ZONE_KEYS, 'source')}
                                           for z in setup.get('levels', [])]},
@@ -173,11 +180,13 @@ def evidence_fingerprint(trace):
     Stored body is refreshed on every observation, so newest source receipt times
     remain visible even when the same candle/evidence state is counted once.
     """
-    ignored = {'captured_at', 'observed_at', 'age_at_observation_minutes', 'account_observed_at', 'clock_at'}
-    def stable(value):
+    ignored = {'captured_at', 'observed_at', 'as_of', 'age_at_observation_minutes', 'account_observed_at', 'clock_at'}
+    receipt_deadline_paths = {('data_health', 'stocks'), ('data_health', 'stocks', 'instruments', '[]')}
+    def stable(value, path=()):
         if isinstance(value, dict):
-            return {key: stable(item) for key, item in value.items() if key not in ignored}
+            return {key: stable(item, (*path, key)) for key, item in value.items()
+                    if key not in ignored and not (key == 'valid_until' and path in receipt_deadline_paths)}
         if isinstance(value, list):
-            return [stable(item) for item in value]
+            return [stable(item, (*path, '[]')) for item in value]
         return value
     return sha256(json.dumps(stable(trace), sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
