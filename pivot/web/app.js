@@ -3,6 +3,15 @@ const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].inclu
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
 let snapshot=null, dirty=false, saving=false, fetching=false, generation=0, saveError="", toggling=false, liveError='';
+let pendingLive=null;
+const LIVE_RECONCILE_MS=60000;
+function reconcileLive(next) {
+  if(!pendingLive)return;
+  if(Date.now()>pendingLive.expiresAt){pendingLive=null;return;}
+  if(typeof next.live_enabled==='boolean' && next.live_enabled===pendingLive.enabled){
+    pendingLive=null;liveError='';$('live-error').textContent='';$('live-dialog').close();
+  }
+}
 function formSettings() { return {sizing_mode:'target',target_dollars:$('amount').value}; }
 function formChanged() {
   const settings=formSettings();
@@ -106,19 +115,20 @@ function render() {
 }
 async function refresh() {
   if(fetching||saving||toggling)return; fetching=true; const version=generation;
-  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;render();}}
-  catch { $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
-  finally{fetching=false;}
+  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;reconcileLive(next);render();}}
+  catch { if(version!==generation||saving||toggling)return; $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
+  finally{fetching=false;if(version!==generation&&!saving&&!toggling)refresh();}
 }
 async function changeLive(enabled) {
   if(toggling)return;
-  liveError='';toggling=true;generation++;$('live-status').disabled=true;$('confirm-live').disabled=true;$('cancel-live').disabled=true;
+  liveError='';toggling=true;generation++;pendingLive={enabled,expiresAt:Date.now()+LIVE_RECONCILE_MS};$('live-status').disabled=true;$('confirm-live').disabled=true;$('cancel-live').disabled=true;
   $('live-error').textContent='';
   try {
     const response=await fetch(new URL('live',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'live-control'},body:JSON.stringify({enabled,policy_version:snapshot.execution_policy.version}),signal:AbortSignal.timeout(30000)});
     const result=await response.json();
     if(!response.ok)throw Error(result.detail || 'Could not update live money');
-    snapshot=result;$('live-dialog').close();
+    snapshot=result;reconcileLive(result);
+    if(pendingLive)throw Error('Live money change is not confirmed. Checking the saved setting.');
   } catch(error) {
     const message=error.name==='TimeoutError'?'The result is uncertain. Check the refreshed switch before retrying.':error.message;
     liveError=message;$('live-error').textContent=message;
@@ -130,6 +140,7 @@ async function changeLive(enabled) {
 $('live-status').addEventListener('click',()=>{
   if(!snapshot||toggling)return;
   if(snapshot.live_enabled){changeLive(false);return;}
+  pendingLive=null;
   $('live-summary').textContent=`Real Alpaca account · ${money(snapshot.settings.target_dollars)} target per purchase.`;
   $('live-policy').innerHTML=snapshot.execution_policy.summary.map(line=>`<li>${esc(line)}</li>`).join('');
   $('live-data-note').textContent='Turning on permits orders only after the full strategy, completed VIX candles, a fresh VIX quote and broker checks pass. The free-data request limit can pause new entries; the app will not buy extra data.';

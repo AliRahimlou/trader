@@ -35,18 +35,21 @@ export function operationStatus(snapshot, now=Date.now()) {
   const issues=workers.filter(row=>row.status!=='running');
   const partial=snapshot.execution?.trade?.partial_entry;
   const activePartial=partial?.raised_at && !partial.resolved_at;
+  const exit=snapshot.execution?.trade?.exit_pending;
+  const activeExit=exit?.raised_at && !exit.resolved_at;
   const archive=snapshot.input_archive;
   const archiveCurrent=archive?.status==='recording' && age(archive.captured_at,now)<=90;
   const quote=snapshot.quote_health;
   const price=Number(quote?.ask);
   const target=Number(snapshot.settings?.target_dollars);
   const smallTarget=Number.isFinite(price)&&price>0&&Number.isFinite(target)&&target>0&&target<price;
+  const directionNote=smallTarget?`${money(target)} can support fractional QQQ buys. QQQ shorts require whole shares, so this target cannot open a short at the displayed price.`:'QQQ shorts require whole shares and broker approval. Purchase and stop-distance loss are different amounts.';
   return {
     workerLabel:!health?'Checking':health.ready?'Running':issues.some(row=>['stalled','stopped','error'].includes(row.status))?'Needs attention':'Starting',
     workerDetail:workers.map(row=>`${row.name}: ${row.status.replaceAll('_',' ')}`).join(' · '),
-    incident:activePartial?`Partial entry needs attention: ${partial.filled_qty || 'some'} shares filled while cancellation is unconfirmed. New entries are paused. Check the position and orders in Alpaca.`:'',
+    incident:activeExit?'Exit needs attention: broker cancellation or the remaining exit is unconfirmed. New entries are paused. Check the QQQ position and orders in Alpaca. The app continues reconciliation without sending a competing order.':activePartial?`Partial entry needs attention: ${partial.filled_qty || 'some'} shares filled while cancellation is unconfirmed. New entries are paused. Check the position and orders in Alpaca.`:'',
     archiveLabel:archiveCurrent?'Recording inputs':archive?.status==='unavailable'?'Needs attention':'Waiting for inputs',
-    directionNote:smallTarget?`${money(target)} can support fractional QQQ buys. QQQ shorts require whole shares, so this target cannot open a short at the displayed price.`:'QQQ shorts require whole shares and broker approval. Purchase and stop-distance loss are different amounts.',
+    directionNote:directionNote+(snapshot.account?.shorting_enabled===false?' Short selling is also disabled on this Alpaca account.':''),
     timingNote:'Current hourly methods: earliest same-day sweep confirmation 10:30 a.m. ET; break-and-retest 11:30 a.m. ET. These are eligibility times, not scheduled trades.',
   };
 }

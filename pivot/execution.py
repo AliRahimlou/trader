@@ -28,6 +28,7 @@ UNAVAILABLE_PROTECTION = {'suspended', 'done_for_day', 'pending_cancel', 'pendin
 # this interval. This is not a promise about venue latency or a maximum loss.
 PROTECTION_CONFIRM_SECONDS = 30
 PARTIAL_ENTRY_CONFIRM_SECONDS = 30
+EXIT_CONFIRM_SECONDS = 30
 MANUAL_FLAT_CONFIRM_SECONDS = 30
 SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v3'
 PAPER_SIGNAL_POLICY_VERSION = 'synthetic-paper-commissioning-v1'
@@ -342,7 +343,7 @@ class Executor:
                 **self._execution_diagnostics_snapshot(),
                 'execution': {'message': self.message, 'at': self.last_at,
                     'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'amount', 'stop', 'target', 'reason',
-                                                      'partial_entry', 'flat_reconciliation_started_at')} if trade else None}}
+                                                      'partial_entry', 'exit_pending', 'flat_reconciliation_started_at')} if trade else None}}
 
     def tick(self, snapshot):
         if not self.tick_lock.acquire(blocking=False):
@@ -358,6 +359,8 @@ class Executor:
             self._diagnostic_trade = trade
             if trade:
                 self._manage(trade)
+                if self._check_exit_incident(trade):
+                    self.message = trade['exit_pending']['reason']
             elif not self.enabled():
                 self._gate('live_permission')
                 outcome = 'disabled'
@@ -390,6 +393,12 @@ class Executor:
                         self._check_unknown_protection(saved)
                     except Waiting as uncertainty:
                         self.message = str(uncertainty)
+            # Failed reads and reconciliation waits cannot repeatedly grant an
+            # unresolved exit a fresh deadline. Keep its known incident visible
+            # while management continues to reconcile the existing orders.
+            saved = self.store.active_trade()
+            if saved and self._check_exit_incident(saved):
+                self.message = saved['exit_pending']['reason']
         except Exception as exc:
             outcome, exception_kind = 'unexpected_error', UNEXPECTED_EXCEPTION_KINDS.get(type(exc), 'unexpected')
             self.message = 'Execution needs attention: broker state could not be validated. An order may already have been attempted; waiting for reconciliation.'
@@ -596,7 +605,7 @@ class Executor:
         if persist:
             self.store.save_trade(trade)
 
-    def _prepared_entry_expired(self, trade, clock):
+    def _prepared_entry_locally_expired(self, trade):
         # Exact control/settings generation, not merely a currently enabled
         # switch. Off -> resize -> On cannot revive a plan using the old amount.
         if not trade.get('authorization') or trade['authorization'] != self.store.entry_authorization():
@@ -608,8 +617,13 @@ class Executor:
             # Only unsent entry intents need the current signal contract. An
             # already attempted entry or held position still needs management.
             return True
-        return (not self.enabled() or not session_open(clock, now) or closing(clock, now, 600)
-                or elapsed(trade['created_at'], now) > 10 or not data_unexpired(trade.get('data_valid_until'), now))
+        return (not self.enabled() or elapsed(trade['created_at'], now) > 10
+                or not data_unexpired(trade.get('data_valid_until'), now))
+
+    def _prepared_entry_expired(self, trade, clock):
+        now = self.now()
+        return (self._prepared_entry_locally_expired(trade)
+                or not session_open(clock, now) or closing(clock, now, 600))
 
     def _order(self, trade, name):
         if name == 'entry' and trade['ops'][name]['state'] == 'prepared':
@@ -617,7 +631,31 @@ class Executor:
             # before entry_lock; live-off keeps its existing entry_lock ordering.
             with self.entry_gate.admit() if self.entry_gate else nullcontext():
                 with self.entry_lock:
+                    # Local proof of an expired never-submitted intent does not
+                    # depend on a reachable/unchanged broker account. Retiring it
+                    # is conditional on its exact durable prepared state.
+                    if self._prepared_entry_locally_expired(trade):
+                        self._expire_entry(trade)
+                        return None
+                    if self.store.active_trade() != trade:
+                        raise Waiting('Entry state changed; waiting for durable order reconciliation')
                     self._gate('broker_snapshot')
+                    # A durable but unsent intent can be recovered after the
+                    # account changed or another order/position appeared. Only
+                    # attempted operations may skip these entry-only reads.
+                    account = self.broker.account()
+                    self._gate('account_status')
+                    self._account_ready(account)
+                    self._gate('account_identity')
+                    if account.get('account_ref') != trade['account_ref']:
+                        raise Waiting('The connected account changed before entry submission')
+                    self._gate('account_mode')
+                    if account.get('mode') != self.expected_account_mode:
+                        raise Waiting('The account environment changed before entry submission')
+                    self._gate('existing_exposure')
+                    if self.broker.positions() or self.broker.orders():
+                        raise Waiting('Waiting for existing broker positions and orders to finish before entry submission')
+                    self._gate('market_session')
                     clock = self.broker.clock()
                     if self._prepared_entry_expired(trade, clock):
                         self._expire_entry(trade)
@@ -734,8 +772,14 @@ class Executor:
         self._gate('trade_finish')
         self._diagnostic_trade = trade
         self._diagnostic_outcome = self._diagnostic_outcome or 'completed'
+        pending = trade.get('exit_pending')
+        if pending and not pending.get('resolved_at'):
+            pending['resolved_at'] = self.now().isoformat()
         trade.update(stage='finished', reason=reason, completed_at=self.now().isoformat())
         self.store.save_trade(trade, finished=True)
+        if pending and pending.get('raised_at'):
+            self.store.event('exit_reconciled', {'symbol': trade['symbol'],
+                'first_observed_at': pending['first_observed_at'], 'reason': reason})
         self.store.event('trade_finished', {'symbol': trade['symbol'], 'reason': reason})
         self.message = reason
 
@@ -834,8 +878,14 @@ class Executor:
     def _manage(self, trade):
         self._gate('trade_management')
         self._diagnostic_trade = trade
+        self._check_exit_incident(trade)
         if trade.get('execution_mode', 'live') != self.expected_account_mode:
             raise Waiting('This trade belongs to a different execution environment; restore its isolated runtime')
+        if trade['stage'] == 'entering' and trade['ops']['entry']['state'] == 'prepared':
+            with self.entry_lock:
+                if self._prepared_entry_locally_expired(trade):
+                    self._expire_entry(trade)
+                    return
         if self.broker.account().get('account_ref') != trade['account_ref']:
             raise Waiting('This position belongs to a different Alpaca connection; restore its account to manage it')
         clock = self.broker.clock()
@@ -1013,8 +1063,42 @@ class Executor:
 
     def _start_exit(self, trade, reason):
         trade.update(stage='exiting', reason=reason)
+        if not trade.get('exit_pending'):
+            now = self.now()
+            trade['exit_pending'] = {'first_observed_at': now.isoformat(),
+                'confirmation_deadline': (now + timedelta(seconds=EXIT_CONFIRM_SECONDS)).isoformat()}
         self.store.save_trade(trade)
         self.store.event('exit_started', {'symbol': 'QQQ', 'reason': reason})
+
+    def _check_exit_incident(self, trade):
+        """Escalate a stalled close without replacing, racing or abandoning it."""
+        if trade.get('stage') != 'exiting':
+            return False
+        pending = trade.get('exit_pending')
+        now = self.now()
+        if not pending:
+            # Migrate an older in-progress close once. A restart cannot reset
+            # this persisted grace period, including while broker reads fail.
+            pending = trade['exit_pending'] = {'first_observed_at': now.isoformat(),
+                'confirmation_deadline': (now + timedelta(seconds=EXIT_CONFIRM_SECONDS)).isoformat()}
+            self.store.save_trade(trade)
+        if now < timestamp(pending['confirmation_deadline']):
+            return False
+        if self.store.control().get('enabled') is True:
+            self.store.set_control(False)
+        reason = ('Exit or protective-stop cancellation is still unconfirmed. New entries paused; '
+                  'existing orders continue to be reconciled without a competing closing order. '
+                  'Check the QQQ position and orders in Alpaca now.')
+        if not pending.get('raised_at'):
+            pending.update(raised_at=now.isoformat(), reason=reason)
+            trade['reason'] = reason
+            self.store.save_trade(trade)
+            self.store.event('exit_needs_attention', {'symbol': trade['symbol'],
+                'first_observed_at': pending['first_observed_at'], 'reason': reason})
+        self._diagnostic_trade = trade
+        self._diagnostic_outcome = 'attention'
+        self._gate('owner_attention')
+        return True
 
     def _exit(self, trade, position):
         self._gate('exit_management')

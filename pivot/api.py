@@ -8,6 +8,7 @@ import re
 import stat
 from urllib.parse import urlsplit
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -248,7 +249,9 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise ValueError('Invalid settings')
-            return service.save_settings(payload)
+            # Settings may wait for the entry lock or SQLite. Keep those waits
+            # off the API event loop so health checks and Live controls respond.
+            return await run_in_threadpool(service.save_settings, payload)
         except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
             raise HTTPException(422, detail=str(exc)) from None
 
