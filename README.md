@@ -8,7 +8,7 @@ See [execution behavior and remaining limits](docs/live-execution.md).
 
 ## Hosted app
 
-Open [Pivot on AllSpark](https://media.mytap.net/pivot/) using the existing login. AllSpark runs independently of the laptop. The [hosting guide](docs/allspark-hosting.md) explains remote updates: commit to GitHub `main`, let the release build pass, and turn Live money Off with no open positions/orders so the updater can install it. Update status appears in the app footer. Credentials and runtime databases stay on the server.
+Open [Pivot on AllSpark](https://media.mytap.net/pivot/) using the existing login. AllSpark runs independently of the laptop. The [hosting guide](docs/allspark-hosting.md) explains remote updates: commit to GitHub `main`, and the installed updater builds and tests the release, briefly holds new entries, and verifies that there are no open positions, orders or active trade before switching versions. Routine updates preserve the saved Live money setting; a changed execution policy requires owner review in the app. Update status appears in the app footer. Credentials and runtime databases stay on the server.
 
 See the [deployment verification](docs/allspark-deployment-audit.md) for the installed runtime, migration and test evidence.
 
@@ -24,7 +24,8 @@ These are related source variants in one workflow. The app does not add opening-
 - [Data collection audit and free-source findings](docs/data-feed-audit.md)
 - [Latest completion audit and outstanding dependencies](docs/completion-audit.md)
 - [Creator channel review and exact-rule limits](docs/research/socrates-channel-review-20260918.md)
-- [Local 3.1.0 leader/context candidate and validation](docs/research/leader-context-implementation-20260918.md)
+- [Version 3.1 release notes and latest visual findings](docs/production-v3.1.md)
+- [3.1.0 leader/context implementation and validation](docs/research/leader-context-implementation-20260918.md)
 
 ## Run locally
 
