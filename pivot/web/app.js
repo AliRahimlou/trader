@@ -1,4 +1,4 @@
-import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview} from './model.mjs';
+import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview} from './model.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -37,6 +37,18 @@ function render() {
   $('live-status').disabled=toggling || !s.execution_available;
   $('live-status').setAttribute('aria-label', s.live_enabled?'Live money on. Turn off new entries':'Live money off. Review and turn on');
   $('status-text').textContent=liveError || status.text;
+  const operations=operationStatus(s), session=sessionReview(s);
+  if(operations.workerLabel==='Needs attention' && !s.execution?.trade){
+    $('status-title').textContent='App worker needs attention';
+    $('status-text').textContent=operations.workerDetail+'. Data and order progress must be checked.';
+  }
+  $('operation-incident').hidden=!operations.incident;
+  $('operation-incident').textContent=operations.incident;
+  $('direction-capability').textContent=operations.directionNote;
+  $('method-timing').textContent=operations.timingNote;
+  const sessionOpen=$('session-review').querySelector('details')?.open;
+  $('session-review').innerHTML=`<div class="section-heading"><h2>${session.orders?.confirmed_entries?'Today’s trade checks':'Why no trade today?'}</h2><span>${esc(session.day || 'Waiting for records')} · ET</span></div><p class="help">${esc(session.detail)}</p>${session.available?`<div class="session-counts"><div><strong>${esc(session.events)}</strong><span>Level events</span></div><div><strong>${esc(session.orders.submission_attempts || 0)}</strong><span>Entry attempts</span></div><div><strong>${esc(session.orders.confirmed_entries || 0)}</strong><span>Confirmed entries</span></div></div><details class="evidence"><summary>See checks and blockers</summary><p>${esc(session.checkpoints)} recorded checkpoints. Passing a signal check does not authorize an order. This summary refreshes every 30 seconds.</p>${session.stages.map(row=>`<p><b>${esc(row.label)}</b><span>${esc(row.count)} distinct events passed</span></p>`).join('')}${session.blockers.map(row=>`<p><b>${esc(row.scope)} · ${esc(row.name)}</b><span>Latest recorded result for ${esc(row.count)} events</span></p>`).join('')}<h3>Recent observations</h3>${session.checks.map(row=>`<p><b>${esc(new Date(row.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}</b><span>${esc(row.blocker)}</span></p>`).join('') || '<p>No analysis recorded today.</p>'}</details>`:''}`;
+  if(sessionOpen && $('session-review').querySelector('details'))$('session-review').querySelector('details').open=true;
   const views=strategyViews(s), leaders=leaderOverview(s), overview=marketOverview(s);
   const overviewOpen=$('market-overview').querySelector('details')?.open;
   $('market-overview').innerHTML=`<article class="card"><div class="section-heading"><h3>Nasdaq overview</h3><span>Broader price structure</span></div><div class="context-frames">${overview.frames.map(frame=>`<div><span class="help">${esc(frame.label)}</span><strong>${esc(frame.value)}</strong><span class="help">${frame.latestAt?`Candle ${esc(new Date(frame.latestAt).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))}`:'Waiting for candles'}</span></div>`).join('')}</div><p class="help">${esc(overview.detail)}</p><details class="evidence"><summary>How to read the overview</summary><p>${esc(overview.explanation)}</p>${overview.frames.map(frame=>`<p><b>${esc(frame.label)}</b><span>${esc(frame.detail)}</span></p>`).join('')}</details></article>`;
@@ -69,6 +81,9 @@ function render() {
     ${quote?.error?`<p class="help error">${esc(quote.error)}</p>`:''}
     <div><span>Decision logging</span><b id="logging-status" class="${logging.tone}">${logging.label}</b></div>
     <p id="logging-detail" class="help">${esc(logging.detail)}</p>
+    <div><span>App workers</span><b>${esc(operations.workerLabel)}</b></div><p class="help">${esc(operations.workerDetail)}</p>
+    <div><span>Complete input history</span><b>${esc(operations.archiveLabel)}</b></div>
+    ${s.input_archive?.status==='unavailable'?`<p class="help error">${esc(s.input_archive.detail)}</p>`:''}
     <details class="feed-details"><summary>Check every data input</summary>
       ${stocks?.instruments.map(i=>`<article><b>${esc(i.symbol)}</b><span class="${i.status==='current'&&!healthStale?'pass':'wait'}">${healthStale?'Refresh overdue':esc(i.status.replaceAll('_',' '))}</span>
         <ul>${i.frames.map(f=>`<li><span>${esc(f.label)} · ${f.count} candles</span><span>${esc(candleTime(f.latest_at))}${f.status!=='current'?` · ${esc(f.reason)}`:''}</span></li>`).join('')}</ul></article>`).join('') || '<p>Waiting for the first validated update.</p>'}
@@ -76,6 +91,8 @@ function render() {
         ${vixDisplay.lastQuote?`<p class="help">${esc(vixDisplay.lastQuote)}</p>`:''}
         ${vixDisplay.budgetText?`<p class="help">${esc(vixDisplay.budgetText)}</p>`:''}
         ${vixDisplay.nextRefreshAt?`<p class="help">Next candle check: ${esc(candleTime(vixDisplay.nextRefreshAt))}</p>`:''}
+        ${vixDisplay.retryAt?`<p class="help">Candle recovery eligible: ${esc(candleTime(vixDisplay.retryAt))}</p>`:''}
+        ${vixDisplay.quoteRetryAt?`<p class="help">Entry quote recovery eligible: ${esc(candleTime(vixDisplay.quoteRetryAt))}</p>`:''}
         ${vix?.verification?.history_received_at?`<p class="help">History received: ${esc(candleTime(vix.verification.history_received_at))}</p>`:''}
       </article>
       <p class="help">Last stock refresh: ${stocks?.fetch_seconds!=null?stocks.fetch_seconds.toFixed(1)+'s':'—'} · ${esc(stocks?.refresh_mode || 'starting')}. Updated ${ago(stocks?.checked_at)}.</p>

@@ -27,7 +27,11 @@ UNAVAILABLE_PROTECTION = {'suspended', 'done_for_day', 'pending_cancel', 'pendin
 # Proposed release safety policy: a submitted stop must become executable within
 # this interval. This is not a promise about venue latency or a maximum loss.
 PROTECTION_CONFIRM_SECONDS = 30
+PARTIAL_ENTRY_CONFIRM_SECONDS = 30
+MANUAL_FLAT_CONFIRM_SECONDS = 30
 SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v3'
+PAPER_SIGNAL_POLICY_VERSION = 'synthetic-paper-commissioning-v1'
+PAPER_SIGNAL_PURPOSE = 'broker_order_lifecycle_only'
 SIGNAL_METHODS = {'four_hour_retest', 'prior_day_sweep'}
 SIGNAL_FIELDS = ('policy_version', 'strategy_id', 'event_id', 'event_origin_at',
                  'event_at', 'event_expires_at', 'latest_evidence_at', 'event_zone',
@@ -79,17 +83,26 @@ def data_unexpired(until, now):
     return bool(until and 0 < (timestamp(until) - now).total_seconds() <= 90)
 
 
-def signal_expiry(setup, now):
+def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
     """Validate the versioned event window, independently of trade direction.
 
     A later retest may refresh hourly evidence but cannot extend the originating
     event's lifetime or create a second opportunity after an order attempt.
     """
     try:
-        if (not isinstance(setup, dict) or setup.get('policy_version') != SIGNAL_POLICY_VERSION
+        paper = expected_policy_version == PAPER_SIGNAL_POLICY_VERSION
+        prefix = 'paper_ev1_' if paper else 'ev2_'
+        if (expected_policy_version not in (SIGNAL_POLICY_VERSION, PAPER_SIGNAL_POLICY_VERSION)
+                or not isinstance(setup, dict) or setup.get('policy_version') != expected_policy_version
                 or setup.get('strategy_id') not in SIGNAL_METHODS
                 or not isinstance(setup.get('event_id'), str)
-                or not re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id'])):
+                or not re.fullmatch(prefix + r'[a-f0-9]{64}', setup['event_id'])):
+            raise ValueError
+        if paper:
+            if setup.get('commissioning_purpose') != PAPER_SIGNAL_PURPOSE:
+                raise ValueError
+        elif (setup.get('commissioning_purpose') is not None
+                or setup.get('commissioning_only') or setup.get('synthetic_evidence')):
             raise ValueError
         origin, event, expires, evidence = (
             timestamp(setup[key]) for key in ('event_origin_at', 'event_at', 'event_expires_at', 'latest_evidence_at'))
@@ -105,7 +118,9 @@ def signal_expiry(setup, now):
         established = timestamp(zone['established_at'])
         identity = ['QQQ', setup['strategy_id'], float(zone['low']).hex(), float(zone['high']).hex(),
                     established.astimezone(timezone.utc).isoformat(), origin.astimezone(timezone.utc).isoformat()]
-        expected_id = 'ev2_' + sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
+        if paper:
+            identity = [PAPER_SIGNAL_POLICY_VERSION, PAPER_SIGNAL_PURPOSE, *identity]
+        expected_id = prefix + sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
         if setup['event_id'] != expected_id:
             raise ValueError
         if (established >= origin - timedelta(minutes=60)
@@ -154,7 +169,15 @@ def checked_quote(quote, now):
 
 
 class Executor:
-    def __init__(self, broker, store, now=None, *, revision=None):
+    def __init__(self, broker, store, now=None, *, revision=None, expected_account_mode='live'):
+        if expected_account_mode not in ('live', 'paper'):
+            raise ValueError('Unsupported execution account mode')
+        if expected_account_mode == 'paper':
+            from .paper_broker import PaperAlpacaBroker
+            if not isinstance(broker, PaperAlpacaBroker):
+                raise ValueError('Paper execution requires the fixed paper-only broker adapter')
+            broker.assert_paper_only()
+        self.expected_account_mode = expected_account_mode
         self.broker, self.store = broker, store
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.tick_lock, self.entry_lock = Lock(), Lock()
@@ -179,6 +202,10 @@ class Executor:
         """An observational marker only; it never permits, skips or changes a broker action."""
         self._diagnostic_gate = code
 
+    def _signal_expiry(self, setup, now):
+        return signal_expiry(setup, now, expected_policy_version=(
+            PAPER_SIGNAL_POLICY_VERSION if self.expected_account_mode == 'paper' else SIGNAL_POLICY_VERSION))
+
     @staticmethod
     def _diagnostic_time(value):
         try:
@@ -202,10 +229,10 @@ class Executor:
             'leader_observation_at': self._diagnostic_time(setup.get('leader_observation_at')),
             'leader_observation_valid_until': self._diagnostic_time(setup.get('leader_observation_valid_until')),
             'leader_observations_synchronized': setup.get('leader_observations_synchronized') is True,
-            'event_id': setup.get('event_id') if isinstance(setup.get('event_id'), str) and re.fullmatch(r'ev2_[a-f0-9]{64}', setup['event_id']) else None,
+            'event_id': setup.get('event_id') if isinstance(setup.get('event_id'), str) and re.fullmatch(r'(?:ev2_|paper_ev1_)[a-f0-9]{64}', setup['event_id']) else None,
             'strategy_id': setup.get('strategy_id') if isinstance(setup.get('strategy_id'), str) and setup['strategy_id'] in SIGNAL_METHODS else None,
             'event': setup.get('event') if setup.get('event') in ('break and retest', 'sweep and reclaim', 'previous-day level sweep') else None,
-            'policy_version': setup.get('policy_version') if setup.get('policy_version') == SIGNAL_POLICY_VERSION else None,
+            'policy_version': setup.get('policy_version') if setup.get('policy_version') in (SIGNAL_POLICY_VERSION, PAPER_SIGNAL_POLICY_VERSION) else None,
             'direction': setup.get('direction') if setup.get('direction') in ('long', 'short') else None,
             'state': setup.get('state') if setup.get('state') in ('WATCHING', 'AT_LEVEL', 'WAITING_FOR_RETEST', 'CONFIRMING', 'SETUP_READY') else None,
             'first_failed_gate': first_failed,
@@ -228,7 +255,7 @@ class Executor:
                 evidence = operation.get('last_seen') if isinstance(operation.get('last_seen'), dict) else {}
                 status = evidence.get('status')
                 operations[name] = {
-                    'state': state if state in ('prepared', 'attempted', 'rejected') else 'unknown',
+                    'state': state if state in ('prepared', 'attempted', 'rejected', 'aborted_before_submit') else 'unknown',
                     'broker_status': status if isinstance(status, str) and status in ORDER_STATUSES else None,
                 }
             identity = trade.get('id')
@@ -239,6 +266,8 @@ class Executor:
                 'app_version': APP_VERSION,
                 'revision': self.revision if isinstance(self.revision, str) and re.fullmatch(r'[a-f0-9]{40}', self.revision) else None,
                 'execution_policy': POLICY_VERSION,
+                'account_mode': self.expected_account_mode,
+                'evidence_kind': 'synthetic_commissioning' if self.expected_account_mode == 'paper' else 'strategy_observation',
                 'outcome': outcome if outcome in EXECUTION_OUTCOMES else 'unexpected_error',
                 'gate': self._diagnostic_gate if self._diagnostic_gate in EXECUTION_GATES else 'runtime_state',
                 'exception_kind': exception_kind,
@@ -285,8 +314,8 @@ class Executor:
             if payload['policy_version'] != POLICY_VERSION:
                 raise ValueError('Review the current execution rules before turning on')
             account = self.broker.account()
-            if account.get('mode') != 'live':
-                raise ValueError('This connection is not a live Alpaca account')
+            if account.get('mode') != self.expected_account_mode:
+                raise ValueError(f'This connection is not a {self.expected_account_mode} Alpaca account')
             self._account_ready(account)
             if not account.get('account_ref'):
                 raise ValueError('The connected account identity could not be verified')
@@ -308,11 +337,12 @@ class Executor:
         trade = self.store.active_trade()
         control = self.store.control()
         review_required = control.get('enabled') is True and control.get('policy') != POLICY_VERSION
-        return {'live_enabled': self.enabled(), 'execution_available': True,
+        return {'live_enabled': self.enabled(), 'execution_available': True, 'execution_account_mode': self.expected_account_mode,
                 'review_required': review_required,
                 **self._execution_diagnostics_snapshot(),
                 'execution': {'message': self.message, 'at': self.last_at,
-                    'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'amount', 'stop', 'target', 'reason')} if trade else None}}
+                    'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'amount', 'stop', 'target', 'reason',
+                                                      'partial_entry', 'flat_reconciliation_started_at')} if trade else None}}
 
     def tick(self, snapshot):
         if not self.tick_lock.acquire(blocking=False):
@@ -349,6 +379,9 @@ class Executor:
                 # its protection check. Preserve the deadline for a stop already
                 # known to be unconfirmed, using only durable local evidence.
                 saved = self.store.active_trade()
+                if saved and saved.get('stage') == 'entering':
+                    if self._check_partial_entry_incident(saved):
+                        self.message = saved['reason']
                 op = (saved or {}).get('ops', {}).get('stop')
                 status = ((op or {}).get('last_seen') or {}).get('status')
                 if (saved and saved['stage'] in ('open', 'exiting') and op
@@ -399,7 +432,7 @@ class Executor:
         if not (0 < stop < reference < target if setup['direction'] == 'long' else 0 < target < reference < stop):
             raise Waiting('Waiting for valid setup entry, stop and target prices')
         self._gate('signal_age_policy')
-        return signal_expiry(setup, now)
+        return self._signal_expiry(setup, now)
 
     @staticmethod
     def _event_key(setup):
@@ -437,6 +470,11 @@ class Executor:
 
     def _entry(self, snapshot):
         now = self.now()
+        if self.expected_account_mode == 'paper':
+            if snapshot.get('commissioning_only') is not True or snapshot.get('synthetic_evidence') is not True:
+                raise Waiting('Paper commissioning requires its explicitly labeled workflow fixture')
+        elif snapshot.get('commissioning_only') or snapshot.get('synthetic_evidence'):
+            raise Waiting('Synthetic commissioning evidence cannot authorize a live entry')
         self._gate('vix_candles')
         if snapshot.get('feeds', {}).get('vix') != 'current':
             raise Waiting('Live money is on — waiting for actual VIX data. No entry can be sent yet.')
@@ -448,16 +486,17 @@ class Executor:
             raise Waiting('Live money is on — data verification expired; waiting for a fresh update')
         setup = snapshot.get('setup') if isinstance(snapshot.get('setup'), dict) else {}
         setup, expires, key = self._entry_candidate(setup, now)
+        authorization = self.store.entry_authorization()
         self._gate('broker_snapshot')
         account, positions, orders, clock = (self.broker.account(), self.broker.positions(), self.broker.orders(), self.broker.clock())
         self._gate('account_status')
         self._account_ready(account)
         self._gate('account_identity')
-        if account.get('account_ref') != self.store.control().get('account_ref'):
+        if account.get('account_ref') != authorization['control'].get('account_ref'):
             raise Waiting('The connected account changed. Turn off, review the account and enable again.')
         self._gate('account_mode')
-        if account.get('mode') != 'live':
-            raise Waiting('Execution requires the reviewed live account connection')
+        if account.get('mode') != self.expected_account_mode:
+            raise Waiting(f'Execution requires the reviewed {self.expected_account_mode} account connection')
         self._gate('market_session')
         if not session_open(clock, self.now()):
             raise Waiting('Live money is on — waiting for the regular market session')
@@ -489,7 +528,7 @@ class Executor:
         if abs(price / reference - 1) > decimal('.01'):
             raise Waiting('Price has moved more than 1% from the signal; skipping this entry')
         self._gate('purchase_size')
-        amount = self.store.settings()['target_dollars']
+        amount = authorization['settings']['target_dollars']
         plan = purchase_plan(amount, price, account['buying_power'], direction, asset.get('fractionable') is True)
         if direction == 'short':
             self._gate('short_eligibility')
@@ -514,7 +553,7 @@ class Executor:
         if not 0 <= elapsed(snapshot['analysis_at'], self.now()) <= 90:
             raise Waiting('Strategy data aged during broker checks; waiting for the next analysis')
         self._gate('final_data_expiry')
-        signal_expiry(setup, self.now())
+        self._signal_expiry(setup, self.now())
         if not data_unexpired(entry_valid_until, self.now()):
             raise Waiting('Data verification expired during broker checks; waiting for a fresh update')
         # One attempt per underlying event, including a rejected or completed
@@ -525,18 +564,22 @@ class Executor:
             payload['notional'] = plan['target_dollars']
         else:
             payload['qty'] = plan['quantity']
+        fields = SIGNAL_FIELDS + (('commissioning_purpose',) if self.expected_account_mode == 'paper' else ())
         trade = {'id': key, 'stage': 'entering', 'symbol': 'QQQ', 'direction': direction,
-                 'signal': {field: setup[field] for field in SIGNAL_FIELDS},
+                 'signal': {field: setup[field] for field in fields},
                  'amount': plan['target_dollars'], 'stop': str(stop), 'target': str(target),
-                 'created_at': self.now().isoformat(), 'data_valid_until': entry_valid_until, 'ops': {}, 'exit_number': 0, 'account_ref': account['account_ref']}
+                 'created_at': self.now().isoformat(), 'data_valid_until': entry_valid_until, 'ops': {}, 'exit_number': 0, 'account_ref': account['account_ref'],
+                 'authorization': authorization, 'execution_mode': self.expected_account_mode}
         self._prepare(trade, 'entry', payload, persist=False)
         with self.entry_lock:
             self._gate('live_permission')
             if not self.enabled():
                 self._diagnostic_outcome = 'disabled'
                 return
+            if self.store.entry_authorization() != authorization:
+                raise Waiting('Purchase settings or live permission changed during entry checks; waiting for a fresh plan')
             self._gate('entry_reservation')
-            if not self.store.reserve_trade(trade):
+            if not self.store.reserve_trade(trade, expected_authorization=authorization):
                 raise Waiting('This setup has already been handled; waiting for the next event')
         self._diagnostic_trade = trade
         self.store.event('entry_planned', {k: trade[k] for k in ('symbol', 'direction', 'amount', 'stop', 'target')})
@@ -554,9 +597,13 @@ class Executor:
             self.store.save_trade(trade)
 
     def _prepared_entry_expired(self, trade, clock):
+        # Exact control/settings generation, not merely a currently enabled
+        # switch. Off -> resize -> On cannot revive a plan using the old amount.
+        if not trade.get('authorization') or trade['authorization'] != self.store.entry_authorization():
+            return True
         now = self.now()
         try:
-            signal_expiry(trade.get('signal') or {}, now)
+            self._signal_expiry(trade.get('signal') or {}, now)
         except Waiting:
             # Only unsent entry intents need the current signal contract. An
             # already attempted entry or held position still needs management.
@@ -592,12 +639,20 @@ class Executor:
                     if name == 'entry':
                         # Waiting for the durable claim can cross an evidence
                         # deadline. Keep the claim consumed, but do not POST an
-                        # entry whose saved authorization has now expired.
+                        # entry whose saved authorization has now expired. This
+                        # process knows submit has not been called: retire the
+                        # consumed event without blocking all later events.
                         self._gate('final_data_expiry')
+                        authorized = trade.get('authorization') == self.store.entry_authorization()
                         now = self.now()
-                        signal_expiry(trade.get('signal') or {}, now)
-                        if elapsed(trade['created_at'], now) > 10 or not data_unexpired(trade.get('data_valid_until'), now):
-                            raise Waiting('Entry admission expired before the broker request. Durable claim retained; no retry will be sent.')
+                        try:
+                            self._signal_expiry(trade.get('signal') or {}, now)
+                            valid = authorized and elapsed(trade['created_at'], now) <= 10 and data_unexpired(trade.get('data_valid_until'), now)
+                        except Waiting:
+                            valid = False
+                        if not valid:
+                            self._abort_claimed_entry(trade)
+                            return None
                     try:
                         self._gate('order_submit')
                         self._submission_attempted = True
@@ -665,6 +720,16 @@ class Executor:
         self._diagnostic_outcome = self._diagnostic_outcome or 'completed'
         self.message = trade['reason']
 
+    def _abort_claimed_entry(self, trade):
+        """Only called by the claiming process before its broker submit call."""
+        finished = self.store.abort_claimed_entry(trade, self.now().isoformat())
+        if finished is None:
+            raise Waiting('Entry state changed; waiting for durable order reconciliation')
+        trade.update(finished)
+        self._diagnostic_trade = trade
+        self._diagnostic_outcome = 'completed'
+        self.message = trade['reason']
+
     def _finish(self, trade, reason):
         self._gate('trade_finish')
         self._diagnostic_trade = trade
@@ -730,9 +795,47 @@ class Executor:
             self._attention(trade,'A QQQ order outside this app needs review before automated position changes')
         return position
 
+    def _check_partial_entry_incident(self, trade, order=None):
+        """Persist an incident while cancellation is uncertain, without competing exits."""
+        if trade.get('stage') != 'entering':
+            return False
+        order = order or trade.get('ops', {}).get('entry', {}).get('last_seen') or {}
+        if order.get('status') in TERMINAL or decimal(order.get('filled_qty') or '0') <= 0:
+            return False
+        now = self.now()
+        incident = trade.get('partial_entry')
+        if incident is None:
+            incident = trade['partial_entry'] = {
+                'first_observed_at': now.isoformat(),
+                'confirmation_deadline': (now + timedelta(seconds=PARTIAL_ENTRY_CONFIRM_SECONDS)).isoformat(),
+                'filled_qty': str(decimal(order['filled_qty'])),
+            }
+            self.store.save_trade(trade)
+        elif decimal(order['filled_qty']) > decimal(incident['filled_qty']):
+            incident['filled_qty'] = str(decimal(order['filled_qty']))
+            self.store.save_trade(trade)
+        if now < timestamp(incident['confirmation_deadline']):
+            return False
+        if self.store.control().get('enabled') is True:
+            self.store.set_control(False)
+        reason = ('Entry partially filled, but cancellation is still unconfirmed. New entries paused; '
+                  'no competing exit will be sent. Check the QQQ position and orders in Alpaca now.')
+        if not incident.get('raised_at'):
+            incident['raised_at'] = now.isoformat()
+            trade['reason'] = reason
+            self.store.save_trade(trade)
+            self.store.event('partial_entry_needs_attention', {
+                'symbol': trade['symbol'], 'filled_qty': incident['filled_qty'],
+                'first_observed_at': incident['first_observed_at'], 'reason': reason})
+        self._diagnostic_outcome = 'attention'
+        self._gate('owner_attention')
+        return True
+
     def _manage(self, trade):
         self._gate('trade_management')
         self._diagnostic_trade = trade
+        if trade.get('execution_mode', 'live') != self.expected_account_mode:
+            raise Waiting('This trade belongs to a different execution environment; restore its isolated runtime')
         if self.broker.account().get('account_ref') != trade['account_ref']:
             raise Waiting('This position belongs to a different Alpaca connection; restore its account to manage it')
         clock = self.broker.clock()
@@ -750,14 +853,29 @@ class Executor:
             if order['status']=='replaced':
                 self._attention(trade,'Entry order was replaced outside the app. Check the QQQ position and orders in Alpaca now.')
             if order['status'] not in TERMINAL:
+                incident = self._check_partial_entry_incident(trade, order)
                 if decimal(order.get('filled_qty') or '0') > 0 or not self.enabled() or elapsed(trade['created_at'], now) > 20 or (opened and closing(clock, now)):
                     self._gate('order_cancel')
-                    self.broker.cancel(order['id'])
-                    self.message = 'Canceling the unfinished entry before managing filled shares'
+                    try:
+                        self.broker.cancel(order['id'])
+                    except FeedError:
+                        if incident:
+                            raise Waiting(trade['reason']) from None
+                        raise
+                    self.message = trade['reason'] if incident else 'Canceling the unfinished entry before managing filled shares'
                 else:
                     self.message = 'Entry submitted; waiting for the broker fill'
                 return
             qty = decimal(order.get('filled_qty') or '0')
+            partial = trade.get('partial_entry')
+            if partial and not partial.get('resolved_at'):
+                partial.update(resolved_at=self.now().isoformat(), final_filled_qty=str(qty))
+                if partial.get('raised_at'):
+                    trade['reason'] = 'Partial entry reconciled; new entries remain paused while confirmed shares are managed.'
+                self.store.save_trade(trade)
+                if partial.get('raised_at'):
+                    self.store.event('partial_entry_reconciled', {
+                        'symbol': trade['symbol'], 'filled_qty': str(qty), 'status': order['status']})
             if not qty:
                 self._finish(trade, 'Entry ended without a fill')
                 return
@@ -775,6 +893,15 @@ class Executor:
             if total < decimal(trade['filled_qty']):
                 if exits and all(order['status'] in TERMINAL for order in exits):
                     self._attention(trade,'QQQ is flat but the app’s exit fills do not reconcile. Checking for manual resolution; results remain unverified.')
+                if not exits:
+                    entry = self._order(trade, 'entry')
+                    if entry['status'] in TERMINAL:
+                        since = trade.get('flat_reconciliation_started_at')
+                        if since is None:
+                            trade['flat_reconciliation_started_at'] = self.now().isoformat()
+                            self.store.save_trade(trade)
+                        elif elapsed(since, self.now()) >= MANUAL_FLAT_CONFIRM_SECONDS:
+                            self._attention(trade, 'QQQ is flat but no app exit was recorded. Checking for manual resolution; results remain unverified.')
                 raise Waiting('Waiting for the broker position to reconcile with confirmed fills')
             for name, op in trade['ops'].items():
                 if name == 'entry' or op['state'] == 'prepared': continue
@@ -785,6 +912,8 @@ class Executor:
                     raise Waiting('Position closed; confirming remaining owned orders are canceled')
             self._finish(trade, 'Position closed; waiting for the next video setup')
             return
+        if trade.pop('flat_reconciliation_started_at', None) is not None:
+            self.store.save_trade(trade)
         stop_order = None
         stop_op = trade['ops'].get('stop')
         if stop_op and (stop_op['state'] != 'prepared' or (opened and trade['stage'] != 'exiting')):

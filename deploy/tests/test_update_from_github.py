@@ -75,6 +75,19 @@ def test_missing_snapshot_fields_are_not_treated_as_flat_or_off():
         assert updater.ready_to_replace(health(), value, NOW)[0] is False
 
 
+def test_replacement_waits_for_worker_readiness_even_when_http_is_healthy(monkeypatch):
+    calls=[]
+    def read(path):
+        calls.append(path)
+        return {**health(NEW), 'ready':False, 'deployment_protocol':'entry-gate-v1'}
+    monkeypatch.setattr(updater, 'read_local', read)
+    ticks=iter([0,0,121])
+    with pytest.raises(updater.UpdateError, match='replacement'):
+        updater.wait_healthy(NEW,hold=hold_record(),locked_at=NOW,timeout=120,
+                             sleep=lambda _:None,monotonic=lambda:next(ticks))
+    assert calls == ['/api/health']
+
+
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
     release = tmp_path / 'releases' / NEW

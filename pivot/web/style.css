@@ -11,3 +11,5 @@ body{padding-bottom:90px}.release-badge{position:fixed;z-index:20;right:max(16px
 .leader-summary{margin:0 0 12px}.leader-chips{display:flex;flex-wrap:wrap;gap:8px}.leader-chip{font-size:11px;border:1px solid #e3e8de;border-radius:8px;padding:6px 9px}.leader-chip b{margin-right:4px;font-weight:600}
 
 .context-frames{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}.context-frames>div{display:flex;flex-direction:column;gap:5px;padding:14px;background:var(--surface-soft,#f6f7f3);border-radius:12px}.context-frames strong{font-size:16px}.leader-chip small{display:block;font-size:10px;font-weight:400;color:var(--muted,#667064);margin-top:4px}@media(max-width:420px){.context-frames{grid-template-columns:1fr}}
+
+.session-counts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:18px 0}.session-counts>div{display:flex;flex-direction:column;padding:12px;background:#f6f7f3;border-radius:10px}.session-counts strong{font-size:22px}.session-counts span{font-size:10px;color:#697b66}#method-timing{margin-bottom:16px}#direction-capability{color:#697b66}

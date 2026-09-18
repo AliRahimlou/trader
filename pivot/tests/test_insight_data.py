@@ -169,3 +169,15 @@ def test_analysis_waits_for_stock_calendar_and_accepts_post_download_receipt(tmp
     assert state['data_health']['vix']['status'] == 'current'
     assert not state['data_errors'] and not state['live_enabled']
     assert not state['data_health']['ready']  # Missing equities still block entries.
+
+
+def test_recovery_details_are_exposed_without_raw_provider_errors(tmp_path):
+    import requests
+    provider=cache(tmp_path,Session(requests.Timeout('private-secret')))
+    report={}
+    with pytest.raises(FeedError):
+        load_history(provider,NOW,SESSIONS,clock=lambda:NOW,report=report)
+    assert report['retry_at']==(NOW+timedelta(seconds=30)).isoformat()
+    assert 'bounded recovery' in report['retry_reason']
+    assert 'private-secret' not in str(report)
+    assert report['budget']['recovery_day_used']==0

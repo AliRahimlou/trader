@@ -168,3 +168,17 @@ def test_frozen_engine_uses_committed_sources_without_git_or_runtime_files(monke
     assert frozen.strategy.ANALYSIS_VERSION == strategy.ANALYSIS_VERSION
     assert len(frozen.identity['files_sha256']) == 5
     assert frozen.data_health.closed is frozen.strategy.closed
+
+
+def test_current_replay_ignores_unused_leader_context_but_legacy_requires_it(inputs):
+    changed = deepcopy(inputs)
+    changed.stocks15['AAPL'] = []
+    current = checkpoint(changed, AT, engine())
+    assert current['coverage']['stock_health'] == 'current'
+    assert current['coverage']['complete']
+    assert current['evaluation'] == 'retrospective_candle_rules'
+    legacy = engine()
+    legacy.strategy = SimpleNamespace(ANALYSIS_VERSION='nasdaq-video-interpretation-v2')
+    old = checkpoint(changed, AT, legacy)
+    assert old['evaluation'] == 'unknown_incomplete_history'
+    assert {r['minutes'] for r in old['coverage']['missing_frames']} == {15, 240}

@@ -332,7 +332,7 @@ def test_calendar_data_deadline_is_exclusive_even_when_analysis_is_recent(runtim
 
 
 @pytest.mark.parametrize('expiry', ['input', 'reaction', 'observation', 'intent'])
-def test_entry_claim_wait_cannot_post_after_known_deadline_or_rearm(runtime, expiry):
+def test_entry_claim_wait_consumes_expired_event_but_releases_slot_for_new_event(runtime, expiry):
     executor, broker, store = runtime
     snapshot = ready()
     if expiry == 'input':
@@ -350,12 +350,16 @@ def test_entry_claim_wait_cannot_post_after_known_deadline_or_rearm(runtime, exp
         return result
     store.claim_operation = delayed_claim
     executor.tick(snapshot)
-    trade = store.active_trade()
-    assert not broker.sent and trade['ops']['entry']['state'] == 'attempted'
-    assert store.entry_consumed(trade['id'])
+    identity = executor._event_key(snapshot['setup'])
+    assert not broker.sent and store.active_trade() is None
+    assert store.entry_consumed(identity)
+    assert executor.execution_check['trade']['operation_states']['entry']['state'] == 'aborted_before_submit'
     assert executor.execution_check['gate'] == 'final_data_expiry'
-    # A durable claim is never converted back to a retryable reservation.
+    # A proven no-POST abort consumes this event, without stranding later ones.
     restarted = Executor(broker, Store(store.path), now=lambda: broker.at)
     restarted.tick(refreshed(snapshot, broker.at))
-    assert not broker.sent and store.active_trade()['ops']['entry']['state'] == 'attempted'
-    assert store.entry_consumed(trade['id'])
+    assert not broker.sent and store.active_trade() is None
+    assert store.entry_consumed(identity)
+    restarted.tick(ready(broker.at))
+    assert len(broker.sent) == 2 and broker.sent[1]['type'] == 'stop'
+    assert store.active_trade()['id'] != identity

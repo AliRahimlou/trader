@@ -14,7 +14,9 @@ MAX_BYTES = 2_000_000
 
 
 class ProbeError(ValueError):
-    pass
+    def __init__(self, message, *, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 def _reject_constant(value):
@@ -27,7 +29,8 @@ def _get(session, key, path, params=None):
                          headers={'Authorization': 'Bearer ' + key},
                          timeout=(3, 10), allow_redirects=False, stream=True) as response:
             if response.status_code != 200:
-                raise ProbeError(f'InsightSentry returned HTTP {response.status_code}; verification stopped.')
+                raise ProbeError(f'InsightSentry returned HTTP {response.status_code}; verification stopped.',
+                                 retryable=response.status_code == 429 or 500 <= response.status_code <= 599)
             chunks, size = [], 0
             for chunk in response.iter_content(chunk_size=16384):
                 size += len(chunk)
@@ -43,7 +46,9 @@ def _get(session, key, path, params=None):
             return result
     except ProbeError:
         raise
-    except (requests.RequestException, ValueError, UnicodeError, TypeError):
+    except requests.RequestException:
+        raise ProbeError('InsightSentry transport is temporarily unavailable.', retryable=True) from None
+    except (ValueError, UnicodeError, TypeError):
         raise ProbeError('InsightSentry response could not be retrieved or decoded.') from None
 
 

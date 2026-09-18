@@ -24,8 +24,41 @@ export function vixStatus(vix, now=Date.now()) {
     lastQuote: quoteValid?`Last quote check: ${value.toFixed(2)} · ${quoteAge<60?`${Math.floor(quoteAge)}s`:`${Math.floor(quoteAge/60)}m`} ago`:'',
     budgetText: countsValid?`${budget.actual_requests.toLocaleString('en-US')} app requests used · ${budget.reserved.toLocaleString('en-US')} reserved · ${remaining} available`:budgetValid?`${remaining} requests available within the app limit`:'',
     nextRefreshAt: Number.isFinite(next)?new Date(next).toISOString():null,
+    retryAt: Number.isFinite(Date.parse(verification.retry_at))?verification.retry_at:null,
+    quoteRetryAt: Number.isFinite(Date.parse(verification.entry_quote_retry_at))?verification.entry_quote_retry_at:null,
     error: vix?.error || (!closed && vix?.status==='current' && !ready?'VIX candle verification expired; waiting for the next update.':null),
   };
+}
+export function operationStatus(snapshot, now=Date.now()) {
+  const health=snapshot.worker_health;
+  const workers=health?.workers || [];
+  const issues=workers.filter(row=>row.status!=='running');
+  const partial=snapshot.execution?.trade?.partial_entry;
+  const activePartial=partial?.raised_at && !partial.resolved_at;
+  const archive=snapshot.input_archive;
+  const archiveCurrent=archive?.status==='recording' && age(archive.captured_at,now)<=90;
+  const quote=snapshot.quote_health;
+  const price=Number(quote?.ask);
+  const target=Number(snapshot.settings?.target_dollars);
+  const smallTarget=Number.isFinite(price)&&price>0&&Number.isFinite(target)&&target>0&&target<price;
+  return {
+    workerLabel:!health?'Checking':health.ready?'Running':issues.some(row=>['stalled','stopped','error'].includes(row.status))?'Needs attention':'Starting',
+    workerDetail:workers.map(row=>`${row.name}: ${row.status.replaceAll('_',' ')}`).join(' · '),
+    incident:activePartial?`Partial entry needs attention: ${partial.filled_qty || 'some'} shares filled while cancellation is unconfirmed. New entries are paused. Check the position and orders in Alpaca.`:'',
+    archiveLabel:archiveCurrent?'Recording inputs':archive?.status==='unavailable'?'Needs attention':'Waiting for inputs',
+    directionNote:smallTarget?`${money(target)} can support fractional QQQ buys. QQQ shorts require whole shares, so this target cannot open a short at the displayed price.`:'QQQ shorts require whole shares and broker approval. Purchase and stop-distance loss are different amounts.',
+    timingNote:'Current hourly methods: earliest same-day sweep confirmation 10:30 a.m. ET; break-and-retest 11:30 a.m. ET. These are eligibility times, not scheduled trades.',
+  };
+}
+
+export function sessionReview(snapshot) {
+  const review=snapshot.session_review;
+  if(review?.status!=='available')return {available:false,detail:'Session history is not available yet.',stages:[],blockers:[],checks:[]};
+  const blockers=Object.entries(review.latest_execution_blockers || {}).map(([name,count])=>({name:name.replaceAll('_',' '),count,scope:'Execution'}));
+  blockers.push(...Object.entries(review.latest_signal_blockers || {}).map(([name,count])=>({name,count,scope:'Strategy'})));
+  return {available:true,day:review.day,events:review.events_seen,checkpoints:review.checkpoints,
+    stages:review.stages || [], orders:review.orders || {}, blockers, checks:review.latest_checks || [],
+    detail:review.complete_candidate_coverage?'Distinct recorded events; repeated checks are not extra opportunities.':'Earlier records contain partial candidate history. Counts cover retained observations only.'};
 }
 export function appStatus(snapshot, now=Date.now()) {
   const trade=snapshot.execution?.trade;
