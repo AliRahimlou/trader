@@ -205,6 +205,21 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
         except ValueError:
             raise HTTPException(422, detail='Use a valid session date in YYYY-MM-DD format') from None
 
+    @app.get('/api/native-history')
+    def native_history():
+        collector = getattr(service, 'native_capture', None)
+        return collector.status() if collector else {'status':'unavailable', 'research_only':True, 'live_entry_ready':False}
+
+    @app.get('/api/native-history/export')
+    def native_history_export():
+        collector = getattr(service, 'native_capture', None)
+        try:
+            if collector is None:
+                raise ValueError('Not configured')
+            return JSONResponse(collector.export())
+        except (ValueError, OSError, KeyError, TypeError):
+            raise HTTPException(404, detail='Validated native history is not available for export yet') from None
+
     @app.get('/api/deployment-readiness')
     def readiness():
         return deployment_readiness(service.executor, service.store, hosting.revision)

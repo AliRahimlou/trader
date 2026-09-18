@@ -27,6 +27,7 @@ These are related source variants in one workflow. The app does not add opening-
 - [Version 3.1 release notes and latest visual findings](docs/production-v3.1.md)
 - [3.1.0 leader/context implementation and validation](docs/research/leader-context-implementation-20260918.md)
 - [Version 3.2 fixes, monitoring and remaining validation](docs/production-v3.2.md)
+- [Version 3.2.1 native data collection for strategy validation](docs/production-v3.2.1.md)
 - [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
 - [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
 

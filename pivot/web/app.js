@@ -95,6 +95,7 @@ function render() {
         ${vixDisplay.quoteRetryAt?`<p class="help">Entry quote recovery eligible: ${esc(candleTime(vixDisplay.quoteRetryAt))}</p>`:''}
         ${vix?.verification?.history_received_at?`<p class="help">History received: ${esc(candleTime(vix.verification.history_received_at))}</p>`:''}
       </article>
+      <article><b>Five-minute validation history</b><p>${esc(({captured:'Saved for validation',incomplete:'Incomplete',collecting:'Collecting',waiting:'Waiting',unavailable:'Unavailable'})[s.native_history?.status] || 'Not collected')}</p><p class="help">${esc(s.native_history?.detail || 'Separate historical evidence has not been collected.')}</p><p class="help">This is historical research data, not a continuously updated five-minute trading feed.</p></article>
       <p class="help">Last stock refresh: ${stocks?.fetch_seconds!=null?stocks.fetch_seconds.toFixed(1)+'s':'—'} · ${esc(stocks?.refresh_mode || 'starting')}. Updated ${ago(stocks?.checked_at)}.</p>
       <p class="help">${esc(stocks?.frame_policy || '')}</p>
     </details>`+s.data_errors.filter(e=>!e.startsWith('VIX:')).map(e=>`<p class="help error">${esc(e)}</p>`).join('');

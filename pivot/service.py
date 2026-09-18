@@ -66,10 +66,18 @@ class Service:
         self.executor = Executor(broker, store) if broker else None
         self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else []))
         self.archive = None
+        self.native_capture = None
         try:
             self.archive = ObservationArchive(str(store.path) + '.observations.sqlite3')
         except Exception:
             pass  # Observation failure is visible below, independent of trading permission.
+        from .feeds import ReadOnlyFeeds
+        if isinstance(feeds, ReadOnlyFeeds) and feeds.vix_provider == 'insightsentry':
+            try:
+                from .native_capture import NativeCapture
+                self.native_capture = NativeCapture(feeds, str(store.path) + '.native-history')
+            except Exception:
+                pass  # Optional historical evidence cannot disable production workers.
         self.state = {'account':None, 'positions':[], 'orders':[], 'clock':None, 'account_at':None,
                       'analysis_at':None, 'setup':None, 'account_error':None, 'data_errors':[], 'observations':[], 'feeds':{},
                       'live_enabled':False, 'execution_available':False, 'data_health':None, 'data_valid_until':None, 'quote':None, 'quote_at':None, 'quote_error':None,
@@ -98,6 +106,8 @@ class Service:
         self.stop_event.set()
         for thread in self.threads:
             thread.join(timeout=1)
+        if self.native_capture and self.native_capture.thread:
+            self.native_capture.thread.join(timeout=1)
 
     def _loop(self,name,function,delay):
         due = monotonic()
@@ -217,6 +227,13 @@ class Service:
                 feeds={'stocks':qqq.source if qqq else 'unavailable',
                        'vix':'current' if index['status']=='current' else 'unavailable or delayed'})
         self._record_decision(markets, vix, checked_at)
+        if ready and self.threads and not self.stop_event.is_set() and self.native_capture:
+            # Optional history collection has its own bounded daemon and budget;
+            # it never delays the account, strategy or order-management loops.
+            try:
+                self.native_capture.start(getattr(self.feeds, 'stock_sessions', {}), checked_at)
+            except Exception:
+                pass
 
     def _record_decision(self, markets, vix, checked_at):
         """Observational only: failures cannot modify the setup or execution permission."""
@@ -295,6 +312,9 @@ class Service:
         from .policy import POLICY
         if self.executor: result.update(self.executor.snapshot())
         result['worker_health'] = self.worker_health()
+        result['native_history'] = self.native_capture.status() if self.native_capture else {
+            'status':'unavailable', 'research_only':True, 'live_entry_ready':False,
+            'detail':'Separate native validation history is not configured.'}
         try:
             result['session_review'] = self.store.session_review()
         except Exception:
