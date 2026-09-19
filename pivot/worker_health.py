@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from time import monotonic
 
-LIMITS = {'account': 90, 'data': 180, 'execution': 30}
+LIMITS = {'account': 90, 'data': 180, 'execution': 30, 'crypto_execution': 45}
 
 
 class WorkerHealth:

@@ -43,12 +43,13 @@ def test_outside_then_inside_records_exact_first_candle_stop_and_two_r(closes, d
     result = run(closes)
     event = result['current_event']
     assert result['state'] == 'SETUP_OBSERVED'
-    assert result['can_enter'] is False and result['execution_status'] == 'validation'
+    assert result['signal_ready'] is True and result['execution_status'] == 'signal'
     assert event['direction'] == direction
     assert (event['entry'], event['stop'], event['target']) == (closes[-1], stop, target)
     assert event['reward_to_risk'] == 2
     assert event['breakout_at'] < event['confirmation_at']
-    assert event['can_enter'] is False
+    assert event['signal_ready'] is True
+    assert event['entry_valid_until'] == result['signal_valid_until']
     assert result['candidates'] == [event]
     assert result['range']['native_candle_count'] == 48
     assert result['rule_version'] == RULE_VERSION
@@ -241,7 +242,7 @@ def test_extreme_short_geometry_cannot_show_a_negative_price_target():
 
 
 @pytest.mark.parametrize('change', ['not_realtime', 'invalid_source', 'invalid_bar', 'naive_receipt'])
-def test_unvalidated_data_always_retains_research_only_status(change):
+def test_unvalidated_data_never_qualifies_a_signal(change):
     market, now, provenance = sample([111, 105])
     if change == 'not_realtime':
         market.realtime = False
@@ -253,15 +254,32 @@ def test_unvalidated_data_always_retains_research_only_status(change):
         market.observed_at = now.replace(tzinfo=None)
     result = analyze(market, now, provenance=provenance)
     assert result['state'] == 'DATA_WAITING'
-    assert result['can_enter'] is False and result['execution_status'] == 'validation'
+    assert result['signal_ready'] is False and result['execution_status'] == 'signal'
     assert result['interpretation_warnings']
 
 
 def test_missing_market_is_a_visible_data_wait():
     result = analyze(None, start())
-    assert result['state'] == 'DATA_WAITING' and result['can_enter'] is False
+    assert result['state'] == 'DATA_WAITING' and result['signal_ready'] is False
 
 
 def test_naive_analysis_clock_is_rejected():
     with pytest.raises(ValueError, match='timezone'):
         analyze(None, datetime(2026, 9, 19))
+
+
+def test_fresh_receipt_cannot_extend_confirmation_entry_deadline():
+    market, now, provenance = sample([89, 95])
+    confirmation = market.bars[5][-1].end
+    before = confirmation + timedelta(seconds=89)
+    market.observed_at = before
+    ready = analyze(market, before, provenance=provenance)
+    assert ready['signal_ready'] is True
+    assert ready['signal_valid_until'] == (confirmation + timedelta(seconds=90)).isoformat()
+    expired = confirmation + timedelta(seconds=90)
+    market.observed_at = expired
+    result = analyze(market, expired, provenance=provenance)
+    assert result['state'] == 'SETUP_OBSERVED'
+    assert result['signal_ready'] is False
+    assert result['current_event']['signal_ready'] is False
+    assert 'expired' in result['detail']

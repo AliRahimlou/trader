@@ -177,7 +177,7 @@ def test_archive_deduplicates_identical_bars_and_preserves_provider_corrections(
     assert len(rows) == 2
     assert {json.loads(row[0])['bars'][0]['high'] for row in rows} == {110, 111}
     assert all(json.loads(row[0])['provenance'] == PROVENANCE for row in rows)
-    assert all(json.loads(row[1])['can_enter'] is False for row in rows)
+    assert all(json.loads(row[1])['execution_status'] == 'signal' for row in rows)
     assert watch.archive_path.stat().st_mode & 0o777 == 0o600
     assert watch.snapshot()['archive_status'] == 'Recording observations'
 
@@ -187,7 +187,7 @@ def test_snapshot_expires_without_refetch_and_failure_cannot_reuse_old_candidate
     watch.refresh()
     snapshot = watch.snapshot()
     assert snapshot['state'] == 'SETUP_OBSERVED'
-    assert snapshot['can_enter'] is False and snapshot['execution_status'] == 'validation'
+    assert snapshot['signal_ready'] is True and snapshot['execution_status'] == 'signal'
     snapshot['range']['high'] = 100000
     assert watch.snapshot()['range']['high'] == 110
     clock[0] += timedelta(seconds=91)
@@ -202,7 +202,7 @@ def test_snapshot_expires_without_refetch_and_failure_cannot_reuse_old_candidate
     reader.failure = None
     watch.refresh()
     assert watch.snapshot()['state'] == 'SETUP_OBSERVED'
-    assert watch.snapshot()['can_enter'] is False
+    assert watch.snapshot()['signal_ready'] is False
 
 
 def test_archive_failure_leaves_current_analysis_observational_and_visible(tmp_path, monkeypatch):
@@ -210,7 +210,7 @@ def test_archive_failure_leaves_current_analysis_observational_and_visible(tmp_p
     monkeypatch.setattr(watch_module, 'ARCHIVE_LIMIT', 1)
     watch.refresh()
     result = watch.snapshot()
-    assert result['state'] == 'SETUP_OBSERVED' and result['can_enter'] is False
+    assert result['state'] == 'SETUP_OBSERVED' and result['signal_ready'] is True
     assert result['archive_status'] == 'Observation archive needs attention'
 
 
@@ -270,6 +270,6 @@ def test_observer_thread_stops_after_current_read_and_cannot_be_started_twice(tm
     watch.start(stopped)
     watch.thread.join(timeout=2)
     assert not watch.thread.is_alive() and reader.calls == 1
-    assert watch.snapshot()['can_enter'] is False
+    assert watch.snapshot()['signal_ready'] is True
     with pytest.raises(RuntimeError, match='already started'):
         watch.start(stopped)

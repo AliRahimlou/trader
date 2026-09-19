@@ -71,7 +71,7 @@ def live_enable_guard(path, enabled):
         try:
             fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise HTTPException(409, detail='Update in progress; wait before enabling Live money') from None
+            raise HTTPException(409, detail='Update in progress; wait for installation to finish') from None
         try:
             yield
         finally:
@@ -139,6 +139,11 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
         service.executor.revision = hosting.revision
         if deployment_lock is not None:
             service.executor.entry_gate = EntryGate(deployment_lock)
+    crypto_executor = getattr(service, 'crypto_executor', None)
+    if crypto_executor is not None:
+        crypto_executor.revision = hosting.revision
+        if deployment_lock is not None:
+            crypto_executor.entry_gate = EntryGate(deployment_lock)
     def decorate_snapshot(payload):
         result = {**payload, 'hosting': hosting.describe(), 'revision': hosting.revision, 'app_version': APP_VERSION}
         entry_gate = getattr(service.executor, 'entry_gate', None) if service.executor is not None else None
@@ -161,7 +166,7 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
                        ['http://127.0.0.1:5173', 'http://localhost:5173'])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
-                       allow_methods=['GET', 'PUT'], allow_headers=['Content-Type', 'X-Pivot-Intent'])
+                       allow_methods=['GET', 'PUT', 'POST'], allow_headers=['Content-Type', 'X-Pivot-Intent'])
 
     @app.middleware('http')
     async def protect(request: Request, call_next):
@@ -186,7 +191,9 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
 
     @app.get('/api/health')
     def health():
-        result = {'ok': True, 'version': 'video-execution-v3', 'live_enabled': service.executor.enabled() if service.executor else False,
+        control = service.store.control() if service.executor else {}
+        from .policy import POLICY_VERSION
+        result = {'ok': True, 'version': 'video-execution-v3', 'live_enabled': control.get('enabled') is True and control.get('policy') == POLICY_VERSION if service.executor else False,
                   'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION}
         result['worker_health'] = service.worker_health()
         result['ready'] = result['worker_health']['ready']
@@ -265,6 +272,30 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
             raise HTTPException(422, detail=str(exc)) from None
         except FeedError:
             raise HTTPException(503, detail='Cannot verify the Alpaca account. Try again when the connection returns.') from None
+
+    @app.put('/api/strategies')
+    def strategies(payload: dict):
+        from .feeds import FeedError
+        try:
+            # New-only family settings cannot race a rollback to the old worker,
+            # which would not honor them. Global Live Off remains independently
+            # available through /api/live while installation holds this lock.
+            with live_enable_guard(deployment_lock, True):
+                return decorate_snapshot(service.save_strategies(payload))
+        except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            raise HTTPException(422, detail=str(exc)) from None
+        except FeedError:
+            raise HTTPException(503, detail='Cannot verify the crypto account. Try again when the connection returns.') from None
+
+    @app.post('/api/crypto/reconcile')
+    def reconcile_crypto(payload: dict):
+        from .feeds import FeedError
+        try:
+            return decorate_snapshot(service.reconcile_crypto(payload))
+        except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
+            raise HTTPException(422, detail=str(exc)) from None
+        except FeedError:
+            raise HTTPException(503, detail='Crypto recovery could not be verified. Recorded incidents remain available.') from None
 
     # No generic order-submission or legacy controls route.
     root = Path(__file__).resolve().parent / 'web'

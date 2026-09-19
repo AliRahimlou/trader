@@ -1,6 +1,6 @@
 # 4H Range Reversal: source review and executable observation rules
 
-Reviewed September 19, 2026. Source: the owner's 7:14.857 screen recording ending `07-59-36_1.MP4`. The visible repost is labeled Hous Bennett; that label does not establish the original narrator's identity. The displayed title is “The Best 5 Minute Scalping Strategy That Works Daily (Tested).”
+Reviewed September 19, 2026. **This document records the v3.3 observation baseline. The subsequent executable baseline and resolved application choices are documented in [v4.0.0](../production-v4.0.0.md); its original source ambiguities remain disclosed.** Source: the owner's 7:14.857 screen recording ending `07-59-36_1.MP4`. The visible repost is labeled Hous Bennett; that label does not establish the original narrator's identity. The displayed title is “The Best 5 Minute Scalping Strategy That Works Daily (Tested).”
 
 The complete available audio was transcribed locally with whisper.cpp base.en, followed by transcript review, 29 overview images and selected exact-timestamp chart frames. This is machine-assisted transcription and chart inspection, not a claim of certified verbatim accuracy or continuous manual playback. The recording starts and ends mid-sentence. Full transcript, raw ASR, original file hash and inspected images stay in the owner's private research directory; they are not published with this public repository.
 

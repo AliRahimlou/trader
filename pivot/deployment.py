@@ -57,7 +57,7 @@ class EntryGate:
             raise OSError('Deployment lock must be a regular file')
         return fd
 
-    def _hold(self):
+    def _hold(self, *, permission_details=False):
         result = {'hold_present': True, 'hold_id': None, 'hold_valid': False}
         try:
             fd = os.open(self.hold_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -92,6 +92,9 @@ class EntryGate:
                      and (value.get('permission_token') is None or _hex(value['permission_token'], 64))
                      and all(key not in value or type(value[key]) is bool for key in ('saved_live_enabled', 'legacy_bootstrap')))
             result['hold_valid'] = bool(valid)
+            if valid and permission_details:
+                result.update(permission_token=value.get('permission_token'),
+                              candidate_revision=value['candidate_revision'])
         except (OSError, ValueError, TypeError, OverflowError):
             pass
         return result
@@ -154,6 +157,70 @@ def _control_token(control):
     return sha256(json.dumps(control, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
+def _deployment_permission(store):
+    """One atomic permission snapshot, reduced to an opaque comparison token.
+
+    Older stores keep the original control-only protocol. New stores include
+    family selection and crypto permission so neither can change unnoticed
+    while the updater checks broker exposure or swaps the installed version.
+    """
+    read = getattr(store, 'deployment_permission', None)
+    if read is None:
+        control = store.control()
+        return control, _control_token(control)
+    value = read()
+    if (not isinstance(value, dict)
+            or not {'control', 'strategy_selection', 'crypto_control'} <= value.keys()
+            or value.keys() - {'control', 'strategy_selection', 'crypto_control', 'generation', 'settings'}):
+        raise ValueError('Invalid deployment permission snapshot')
+    control = value['control']
+    _control_token(control)
+    selection = value['strategy_selection']
+    crypto = value['crypto_control']
+    if (not isinstance(selection, dict) or set(selection) != {'socrates'}
+            or type(selection['socrates']) is not bool
+            or (crypto is not None and (not isinstance(crypto, dict) or type(crypto.get('enabled')) is not bool))
+            or ('generation' in value and (type(value['generation']) is not int or value['generation'] < 0))
+            or ('settings' in value and not isinstance(value['settings'], dict))):
+        raise ValueError('Invalid deployment family permission')
+    token = sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    return control, token
+
+
+def _legacy_install_token(store, gate, revision, composite_token):
+    """Bridge the installed v3 updater's first v4 health check, under its hold.
+
+    The old updater runs from its installed config path and compares the master
+    token before it can copy the candidate's updater. Never globally downgrade
+    the new fingerprint. A candidate can echo the old token only while its new
+    family controls are untouched defaults, the durable hold names this exact
+    candidate, and the hold token proves the same master permission. Future
+    updates originate from the normal composite token and cannot use this path.
+    """
+    if gate is None or not hasattr(store, 'deployment_permission'):
+        return None
+    try:
+        hold = gate._hold(permission_details=True)
+        if (not hold.get('hold_valid') or hold.get('candidate_revision') != revision
+                or gate.status().get('locked') is not True):
+            return None
+        value = store.deployment_permission()
+        current = sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        from .crypto_store import DEFAULT_CONTROL
+        if (current != composite_token or value['strategy_selection'] != {'socrates': True}
+                or value['crypto_control'] != DEFAULT_CONTROL):
+            return None
+        # Socrates Off -> On could restore its default boolean. Its append-only
+        # setting event prevents treating that owner change as a first migration.
+        with store.connect() as db:
+            if db.execute("SELECT 1 FROM events WHERE kind='strategy_settings' LIMIT 1").fetchone():
+                return None
+        legacy = _control_token(value['control'])
+        return legacy if hold.get('permission_token') == legacy else None
+    except Exception:
+        return None
+
+
 def deployment_readiness(executor, store, revision):
     """Fresh broker reads only. No snapshot cache, permission writes or order methods."""
     gate = getattr(executor, 'entry_gate', None) if executor is not None else None
@@ -166,10 +233,10 @@ def deployment_readiness(executor, store, revision):
     if executor is None:
         return {**result, 'error': 'execution_unavailable'}
     try:
-        control = store.control()
-        token = _control_token(control)
+        control, token = _deployment_permission(store)
+        legacy_token = _legacy_install_token(store, gate, revision, token)
         from .policy import POLICY_VERSION
-        result.update(permission_token=token, saved_live_enabled=control['enabled'],
+        result.update(permission_token=legacy_token or token, saved_live_enabled=control['enabled'],
                       live_enabled=control['enabled'] and control.get('policy') == POLICY_VERSION,
                       review_required=control['enabled'] and control.get('policy') != POLICY_VERSION)
         started = _utc(executor.now())
@@ -179,7 +246,11 @@ def deployment_readiness(executor, store, revision):
         positions = executor.broker.positions()
         orders = executor.broker.orders()
         trade = store.active_trade()
-        after = store.control()
+        portfolio = getattr(executor, 'portfolio', None)
+        portfolio_trades = portfolio.active_trades() if portfolio else []
+        if not isinstance(portfolio_trades, list) or any(not isinstance(row, dict) for row in portfolio_trades):
+            raise ValueError('Strategy ledgers could not be verified')
+        _, after_token = _deployment_permission(store)
         checked = _utc(executor.now())
         result['checked_at'] = checked.isoformat()
         result['gate'] = gate.status() if gate else result['gate']
@@ -196,8 +267,9 @@ def deployment_readiness(executor, store, revision):
                       and not any(account[key] for key in ('trading_blocked', 'account_blocked', 'trade_suspended_by_user')),
                       account_identity_matches=not control['enabled'] or bool(isinstance(account.get('account_ref'), str)
                         and account['account_ref'] and account.get('account_ref') == control.get('account_ref')),
-                      positions_count=len(positions), orders_count=len(orders), active_trade=trade is not None)
-        if _control_token(after) != token:
+                      positions_count=len(positions), orders_count=len(orders), active_trade=trade is not None or bool(portfolio_trades))
+        if (after_token != token
+                or legacy_token is not None and _legacy_install_token(store, gate, revision, after_token) != legacy_token):
             return {**result, 'error': 'permission_changed'}
         result['ok'] = result['account_ready'] and result['account_identity_matches']
         if not result['ok']:

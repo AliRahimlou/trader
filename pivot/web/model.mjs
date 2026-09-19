@@ -255,8 +255,10 @@ export function settingsError(settings, snapshot, now=Date.now()) {
   const value=Number(settings.target_dollars);
   if (!Number.isFinite(value) || value<1 || value>1e12 || Math.abs(value*100-Math.round(value*100))>0.0001) return 'Enter at least $1, with up to two decimal places.';
   if (!snapshot || snapshot.account_error || age(snapshot.account_at,now)>60) return 'Wait for a current account balance.';
-  if (snapshot.live_enabled || snapshot.execution?.trade) return 'Turn Live money off and wait for the current trade to finish before changing size.';
-  if (snapshot.positions.length || snapshot.orders.length) return 'Wait until current positions and orders have finished.';
+  const stockLive=snapshot.portfolio?snapshot.portfolio.global_live_enabled===true && snapshot.portfolio.socrates?.enabled===true:snapshot.live_enabled;
+  if (stockLive || snapshot.execution?.trade) return snapshot.portfolio?'Turn Socrates Off and wait for its current trade to finish before changing its size.':'Turn Live money off and wait for the current trade to finish before changing size.';
+  if ((snapshot.positions.length || snapshot.orders.length) && snapshot.portfolio?.socrates?.settings_exposure_verified!==true)
+    return snapshot.portfolio?'Wait for open positions and orders to be verified as belonging to another strategy before changing Socrates size.':'Wait until current positions and orders have finished.';
   if (value>Number(snapshot.account.buying_power)) return 'That target exceeds your current buying power.';
   return '';
 }

@@ -1,6 +1,6 @@
 # Pivot · video strategy app
 
-Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 recording supplementary. A separate **4H Range Reversal** Bitcoin observer follows the September 19 recording. The top-left selector changes analysis views; the new family cannot send orders.
+Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 recording supplementary. A separate **4H Range Reversal** live-capable Alpaca crypto engine follows the September 19 recording. The view menu changes display only; persistent strategy controls select which engines may trade under the global Live switch.
 
 **Current state: the app connects to Alpaca and InsightSentry Free actual VIX, with protected AllSpark hosting and remote GitHub updates.** The VIX integration keeps completed candles in a durable cache and checks a fresh actual-index quote before an otherwise valid entry. Its free allowance is guarded across restarts. Live execution requires owner review through the top-right Live money switch. Order handling has passed offline simulated-broker tests; paper-account/live fills and profitability have not been established.
 
@@ -12,11 +12,17 @@ Open [Pivot on AllSpark](https://media.mytap.net/pivot/) using the existing logi
 
 See the [deployment verification](docs/allspark-deployment-audit.md) for the installed runtime, migration and test evidence.
 
-## Primary flow
+## Socrates flow
 
 Premark Nasdaq areas (previous-day extremes and repeated four-hour levels) → observe a break/retest or sweep → confirm the technology leaders at supply/demand → confirm the actual VIX at its own area → evaluate the documented trade plan and current broker checks.
 
 These are related source variants in one workflow. The app does not add opening-range/FVG, ranking scores, daily-bias heuristics, volatility ETF proxies, 5-minute tape conditions, or VWAP requirements.
+
+## 4H Range Reversal flow
+
+Build the completed first four-hour crypto range → observe a five-minute close outside → wait for a later close back inside → validate the signal, current bid/ask, shared cash and trading costs → execute an Alpaca spot long with its own stop and target. Bitcoin is the default; Ethereum is optional. Upper-range short setups cannot execute on this spot account. The global Live switch and each strategy's saved permission control entries; switching the view never changes either permission.
+
+## References
 
 - [Source rulebook and audit](docs/video-strategy-audit.md)
 - [Timestamped transcripts](docs/video-transcripts/README.md)
@@ -30,6 +36,7 @@ These are related source variants in one workflow. The app does not add opening-
 - [Version 3.2.1 native data collection for strategy validation](docs/production-v3.2.1.md)
 - [Version 3.2.2 live execution audit and recovery fixes](docs/production-v3.2.2.md)
 - [Version 3.3.0 strategy views and Bitcoin observations](docs/production-v3.3.0.md)
+- [Version 4.0.0 live strategy controls, shared capital and crypto execution](docs/production-v4.0.0.md)
 - [Detailed 4H Range Reversal source review and precise observation rules](docs/research/range-reversal-video-20260919.md)
 - [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
 - [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
@@ -50,7 +57,9 @@ Use `.venv/bin/python -m pip install -r requirements.txt` and `npm --prefix dash
 - `pivot/index_data.py`, `pivot/data_health.py`: actual VIX provenance and per-input freshness checks.
 - `pivot/insight_cache.py`, `pivot/insight_data.py`: InsightSentry collection, durable free-request allowance, exchange-calendar coverage and on-demand entry quotes.
 - `pivot/service.py`: independent account/data/execution polling, snapshots and settings validation.
-- `pivot/range_reversal.py`, `pivot/range_watch.py`: separate native-five-minute Bitcoin observation family; no order interface.
+- `pivot/range_reversal.py`, `pivot/range_watch.py`: independent BTC/ETH native-five-minute signals and evidence history.
+- `pivot/crypto_execution.py`, `pivot/crypto_broker.py`, `pivot/crypto_store.py`: durable Alpaca spot crypto entry, protection, exit, permission and incident handling.
+- `pivot/portfolio.py`: shared account admission, retained allocations and verified position/order ownership across engines.
 - `pivot/execution.py`, `pivot/broker.py`: durable order lifecycle and a narrow Alpaca adapter.
 - `pivot/policy.py`: the versioned rules reviewed before live permission is saved.
 - `pivot/store.py`: separate SQLite settings, permission, order-intent and audit storage.

@@ -15,7 +15,7 @@ import requests
 
 from .feeds import FeedError
 from .models import Bar, Market, timestamp
-from .range_reversal import analyze
+from .range_reversal import analyze, RULE_VERSION
 
 ET = ZoneInfo('America/New_York')
 SOURCE = 'alpaca_crypto_us'
@@ -24,7 +24,10 @@ ARCHIVE_LIMIT = 64 * 1024 * 1024
 
 
 class BitcoinBars:
-    def __init__(self, headers, session=None):
+    def __init__(self, headers, session=None, *, symbol='BTC/USD'):
+        if symbol not in ('BTC/USD', 'ETH/USD'):
+            raise ValueError('Unsupported crypto data instrument')
+        self.symbol = symbol
         self.headers = dict(headers)
         self.session = session or requests.Session()
 
@@ -33,7 +36,7 @@ class BitcoinBars:
         start = now.astimezone(ET).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
         try:
             response = self.session.get('https://data.alpaca.markets/v1beta3/crypto/us/bars',
-                headers=self.headers, params={'symbols': 'BTC/USD', 'timeframe': '5Min',
+                headers=self.headers, params={'symbols': self.symbol, 'timeframe': '5Min',
                     'start': start.isoformat(), 'end': now.isoformat(), 'sort': 'asc', 'limit': 1000},
                 timeout=(3, 10), allow_redirects=False)
         except requests.RequestException:
@@ -43,11 +46,11 @@ class BitcoinBars:
         try:
             raw = response.json()
             if (not isinstance(raw, dict) or raw.get('next_page_token')
-                    or not isinstance(raw.get('bars'), dict) or set(raw['bars']) != {'BTC/USD'}
-                    or not isinstance(raw['bars']['BTC/USD'], list)):
+                    or not isinstance(raw.get('bars'), dict) or set(raw['bars']) != {self.symbol}
+                    or not isinstance(raw['bars'][self.symbol], list)):
                 raise ValueError()
             bars, previous = [], None
-            for row in raw['bars']['BTC/USD']:
+            for row in raw['bars'][self.symbol]:
                 at = timestamp(row['t']).astimezone(timezone.utc)
                 if not start <= at <= now or (at-start).total_seconds() % 300:
                     raise ValueError()
@@ -65,7 +68,7 @@ class BitcoinBars:
                 raise ValueError()
         except (KeyError, TypeError, ValueError, OverflowError):
             raise FeedError('Bitcoin candles failed identity, ordering or timestamp validation') from None
-        return Market('BTC/USD', {5: bars}, SOURCE, True, receipt)
+        return Market(self.symbol, {5: bars}, SOURCE, True, receipt)
 
 
 class RangeWatch:
@@ -79,23 +82,27 @@ class RangeWatch:
         self.error = None
         self.last_at = None
         self.archive_status = 'Waiting for observations'
+        self.symbol = getattr(reader, 'symbol', 'BTC/USD')
+        self.provenance = {**PROVENANCE, 'symbol': self.symbol}
 
     def start(self, stop_event):
         if self.thread is not None:
             raise RuntimeError('Range observation worker already started')
-        self.thread = Thread(target=self._loop, args=(stop_event,), name='pivot-range-watch', daemon=True)
+        self.thread = Thread(target=self._loop, args=(stop_event,), name='pivot-range-' + self.symbol.split('/')[0].lower(), daemon=True)
         self.thread.start()
 
     def _loop(self, stop_event):
         while not stop_event.is_set():
             self.refresh()
-            stop_event.wait(60)
+            # Several bounded attempts within the 90-second entry window allow
+            # for provider publication lag without replaying an expired signal.
+            stop_event.wait(15)
 
     def refresh(self):
         try:
             market = self.reader.read(self.clock(), clock=self.clock)
             at = self.clock()
-            result = analyze(market, at, provenance=PROVENANCE)
+            result = analyze(market, at, provenance=self.provenance)
             with self.lock:
                 self.market, self.error, self.last_at = market, None, at.isoformat()
             try:
@@ -107,7 +114,7 @@ class RangeWatch:
                 self.archive_status = status
         except Exception:
             with self.lock:
-                self.error = 'Bitcoin data could not be refreshed. Earlier observations cannot authorize a trade.'
+                self.error = self.symbol + ' data could not be refreshed. Earlier observations cannot authorize a trade.'
 
     def _record(self, market, result):
         self.archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +129,7 @@ class RangeWatch:
             os.fchmod(fd, 0o600)
         finally:
             os.close(fd)
-        payload = {'provenance': PROVENANCE, 'bars': [asdict(bar) for bar in market.bars[5]]}
+        payload = {'rule_version':RULE_VERSION, 'provenance': self.provenance, 'bars': [asdict(bar) for bar in market.bars[5]]}
         encoded = json.dumps(payload, default=lambda value: value.isoformat(), sort_keys=True)
         digest = sha256(encoded.encode()).hexdigest()
         with sqlite3.connect(self.archive_path, timeout=2) as db:
@@ -141,10 +148,10 @@ class RangeWatch:
         with self.lock:
             market, error, last_at, archive = deepcopy(self.market), self.error, self.last_at, self.archive_status
         now = self.clock()
-        result = analyze(None if error else market, now, provenance=PROVENANCE)
+        result = analyze(None if error else market, now, provenance=self.provenance)
         if error:
             result['detail'] = error
-        result.update(data_source='Alpaca BTC/USD · native five-minute candles',
+        result.update(data_source='Alpaca ' + self.symbol + ' · native five-minute candles',
                       last_refresh_at=last_at, archive_status=archive,
-                      execution_note='Watching only. Live money currently controls Socrates; this strategy cannot send orders.')
+                      execution_note='Execution uses this strategy’s saved permission, purchase amount and current broker checks.')
         return result

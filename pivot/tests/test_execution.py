@@ -491,7 +491,7 @@ def test_completed_results_use_actual_fill_prices_and_keep_fees_unverified(engin
 
 def test_settings_cannot_change_during_live_permission_or_open_trade(engine):
     e,b,s=engine;service=Service(b,s,broker=b);service.refresh_account();enable(service.executor)
-    with pytest.raises(ValueError,match='Turn Live money off'):
+    with pytest.raises(ValueError,match='Turn Socrates Off'):
         service.save_settings({'sizing_mode':'target','target_dollars':'50'})
     disable(service.executor)
     assert service.save_settings({'sizing_mode':'target','target_dollars':'50'})['target_dollars']=='50.00'
