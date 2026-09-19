@@ -3,8 +3,12 @@ import {escape as esc, money} from './model.mjs';
 export const STRATEGY_VIEW_KEY='pivot.strategy-view.v1';
 const VIEWS=new Set(['socrates','range_reversal','all']);
 export const normalizeStrategyView=value=>VIEWS.has(value)?value:'socrates';
+export const STRATEGY_VIEW_SECTIONS={
+  socrates:['socrates-control','socrates-family','session-review','socrates-sidebar','socrates-purchase','socrates-data','socrates-rules','socrates-results'],
+  range_reversal:['range-control','range-family','crypto-management'],
+};
 
-// This preference only changes visible analysis. It has no API, broker, or
+// This preference changes the complete strategy workspace. It has no API, broker, or
 // settings dependency, and is safe when browser storage is unavailable.
 export function bindStrategyView(document,{storage=()=>globalThis.localStorage,onChange=()=>{}}={}) {
   let selected='socrates';
@@ -12,8 +16,12 @@ export function bindStrategyView(document,{storage=()=>globalThis.localStorage,o
   const selector=document.getElementById('strategy-view');
   function display() {
     selector.value=selected;
-    document.getElementById('socrates-family').hidden=selected==='range_reversal';
-    document.getElementById('range-family').hidden=selected==='socrates';
+    for(const [family,ids] of Object.entries(STRATEGY_VIEW_SECTIONS)) {
+      for(const id of ids)document.getElementById(id).hidden=selected!=='all' && selected!==family;
+    }
+    document.getElementById('strategy-workspace').dataset.view=selected;
+    document.getElementById('family-control-grid').dataset.view=selected;
+    document.getElementById('strategy-controls-title').textContent=selected==='all'?'All strategy controls':selected==='socrates'?'Socrates controls':'4H Range Reversal controls';
     document.getElementById('strategy-view-note').textContent=selected==='all'
       ? 'Showing all strategies. The controls below show which are enabled. Changing this view does not change trading.'
       : selected==='range_reversal'
@@ -28,6 +36,12 @@ export function bindStrategyView(document,{storage=()=>globalThis.localStorage,o
   });
   display();
   return {value:()=>selected};
+}
+
+export function globalCryptoAlert(snapshot) {
+  const messages=(Array.isArray(snapshot?.crypto_execution?.incidents)?snapshot.crypto_execution.incidents:[])
+    .map(row=>typeof row?.message==='string'?row.message:null).filter(Boolean);
+  return messages.length?'4H Range Reversal needs attention: '+[...new Set(messages)].join(' '):'';
 }
 
 export function portfolioView(snapshot) {

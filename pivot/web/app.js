@@ -1,5 +1,5 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
-import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit} from './strategy-families.mjs';
+import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert} from './strategy-families.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -37,7 +37,7 @@ function reconcileLive(next) {
 }
 function renderStrategyControls() {
   const p=portfolioView(snapshot),busy=strategySaving||saving||toggling||familyConnectionUnavailable;
-  $('strategy-run-summary').textContent=`Global Live ${p.globalOn?'On':'Off'} · ${p.scope}. Changing the strategy view does not change these settings.`;
+  $('strategy-run-summary').textContent=`Global Live ${p.globalOn?'On':'Off'} · ${p.families.map(f=>`${f.label} ${f.enabled?'On':'Off'} (${money(f.target)} per purchase)`).join(' · ')}. Changing views does not change trading.`;
   $('execution-scope').textContent=`Global Live · ${p.scope}`;
   for(const f of p.families){
     const prefix=f.id==='socrates'?'socrates':'range';
@@ -161,6 +161,9 @@ function render() {
   }
   $('operation-incident').hidden=!operations.incident;
   $('operation-incident').textContent=operations.incident;
+  const cryptoAlert=globalCryptoAlert(s);
+  $('global-crypto-alert').hidden=!cryptoAlert;
+  $('global-crypto-alert').textContent=cryptoAlert;
   $('direction-capability').textContent=operations.directionNote;
   $('method-timing').textContent=operations.timingNote;
   const sessionOpen=$('session-review').querySelector('details')?.open;

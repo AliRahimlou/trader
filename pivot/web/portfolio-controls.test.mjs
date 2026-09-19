@@ -14,7 +14,7 @@ const initial=()=>({live_enabled:true,execution_available:true,execution_policy:
 function harness({state=initial(),startup=false,clock=createDisplayClock}={}) {
   const nodes=new Map(),calls=[];
   const element=id=>{
-    if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',checked:false,disabled:false,open:false,hidden:false,listeners:{},
+    if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',checked:false,disabled:false,open:false,hidden:false,dataset:{},listeners:{},
       addEventListener(type,handler){this.listeners[type]=handler;},showModal(){this.open=true;},close(){this.open=false;},querySelectorAll(){return [];}});
     return nodes.get(id);
   };
