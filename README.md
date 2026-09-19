@@ -1,6 +1,6 @@
-# Pivot · Nasdaq video rebuild
+# Pivot · video strategy app
 
-A clean local app focused on the **17:25 and 18:11 recordings**. The 12:45 recording is supplementary, not another required strategy.
+Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 recording supplementary. A separate **4H Range Reversal** Bitcoin observer follows the September 19 recording. The top-left selector changes analysis views; the new family cannot send orders.
 
 **Current state: the app connects to Alpaca and InsightSentry Free actual VIX, with protected AllSpark hosting and remote GitHub updates.** The VIX integration keeps completed candles in a durable cache and checks a fresh actual-index quote before an otherwise valid entry. Its free allowance is guarded across restarts. Live execution requires owner review through the top-right Live money switch. Order handling has passed offline simulated-broker tests; paper-account/live fills and profitability have not been established.
 
@@ -29,6 +29,8 @@ These are related source variants in one workflow. The app does not add opening-
 - [Version 3.2 fixes, monitoring and remaining validation](docs/production-v3.2.md)
 - [Version 3.2.1 native data collection for strategy validation](docs/production-v3.2.1.md)
 - [Version 3.2.2 live execution audit and recovery fixes](docs/production-v3.2.2.md)
+- [Version 3.3.0 strategy views and Bitcoin observations](docs/production-v3.3.0.md)
+- [Detailed 4H Range Reversal source review and precise observation rules](docs/research/range-reversal-video-20260919.md)
 - [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
 - [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
 
@@ -48,6 +50,7 @@ Use `.venv/bin/python -m pip install -r requirements.txt` and `npm --prefix dash
 - `pivot/index_data.py`, `pivot/data_health.py`: actual VIX provenance and per-input freshness checks.
 - `pivot/insight_cache.py`, `pivot/insight_data.py`: InsightSentry collection, durable free-request allowance, exchange-calendar coverage and on-demand entry quotes.
 - `pivot/service.py`: independent account/data/execution polling, snapshots and settings validation.
+- `pivot/range_reversal.py`, `pivot/range_watch.py`: separate native-five-minute Bitcoin observation family; no order interface.
 - `pivot/execution.py`, `pivot/broker.py`: durable order lifecycle and a narrow Alpaca adapter.
 - `pivot/policy.py`: the versioned rules reviewed before live permission is saved.
 - `pivot/store.py`: separate SQLite settings, permission, order-intent and audit storage.

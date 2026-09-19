@@ -67,11 +67,19 @@ class Service:
         self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else []))
         self.archive = None
         self.native_capture = None
+        self.range_watch = None
+        self.range_watch_error = None
         try:
             self.archive = ObservationArchive(str(store.path) + '.observations.sqlite3')
         except Exception:
             pass  # Observation failure is visible below, independent of trading permission.
         from .feeds import ReadOnlyFeeds
+        if isinstance(feeds, ReadOnlyFeeds):
+            try:
+                from .range_watch import BitcoinBars, RangeWatch
+                self.range_watch = RangeWatch(BitcoinBars(feeds.alpaca_headers), str(store.path) + '.range-observations.sqlite3')
+            except Exception:
+                self.range_watch_error = 'Bitcoin observation worker could not be initialized.'
         if isinstance(feeds, ReadOnlyFeeds) and feeds.vix_provider == 'insightsentry':
             try:
                 from .native_capture import NativeCapture
@@ -101,6 +109,11 @@ class Service:
         monitor = Thread(target=self._monitor_loop, name='pivot-monitor', daemon=True)
         self.threads.append(monitor)
         monitor.start()
+        if self.range_watch:
+            try:
+                self.range_watch.start(self.stop_event)
+            except Exception:
+                self.range_watch_error = 'Bitcoin observation worker could not be started.'
 
     def stop(self):
         self.stop_event.set()
@@ -108,6 +121,8 @@ class Service:
             thread.join(timeout=1)
         if self.native_capture and self.native_capture.thread:
             self.native_capture.thread.join(timeout=1)
+        if self.range_watch and self.range_watch.thread and self.range_watch.thread.is_alive():
+            self.range_watch.thread.join(timeout=1)
 
     def _loop(self,name,function,delay):
         due = monotonic()
@@ -312,6 +327,10 @@ class Service:
         from .policy import POLICY
         if self.executor: result.update(self.executor.snapshot())
         result['worker_health'] = self.worker_health()
+        result['strategy_families'] = {
+            'socrates': {'family_id':'socrates', 'label':'Socrates', 'execution_status':'owner_controlled',
+                         'analysis':deepcopy(result.get('setup'))},
+            'range_reversal': self.range_snapshot()}
         result['native_history'] = self.native_capture.status() if self.native_capture else {
             'status':'unavailable', 'research_only':True, 'live_entry_ready':False,
             'detail':'Separate native validation history is not configured.'}
@@ -322,6 +341,21 @@ class Service:
         result.update(settings=self.store.settings(), rulebook=rulebook(), events=self.store.events(),
                       trade_results=self.store.trade_results(),
                       execution_policy=POLICY, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
+        return result
+
+    def range_snapshot(self):
+        """Optional observations cannot fail the live account/strategy response."""
+        from .range_reversal import analyze as range_analysis
+        error = self.range_watch_error
+        if self.range_watch and not error:
+            try:
+                return self.range_watch.snapshot()
+            except Exception:
+                error = 'Bitcoin observations are temporarily unavailable.'
+        result = range_analysis(None, datetime.now(timezone.utc))
+        if error:
+            result['detail'] = error
+        result['execution_note'] = 'Watching only. Live money currently controls Socrates; this strategy cannot send orders.'
         return result
 
     def save_settings(self,payload):
