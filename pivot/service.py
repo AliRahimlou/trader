@@ -64,11 +64,28 @@ class Service:
         self._stock_catchup_buckets = set()
         from .execution import Executor
         self.executor = Executor(broker, store) if broker else None
-        self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else []))
+        from .portfolio import Portfolio
+        from .crypto_store import CryptoStore
+        self.crypto_store = CryptoStore(store.path)
+        self.portfolio = Portfolio(store)
+        self.portfolio.register('range_reversal', self.crypto_store.active_trades)
+        self.portfolio.enabled_predicate = lambda family: (self.store.strategy_selection()['socrates']
+            if family == 'socrates' else self.crypto_store.control()['enabled'])
+        if self.executor:
+            self.executor.portfolio = self.portfolio
+        self.crypto_executor = None
+        from .broker import AlpacaBroker
+        if isinstance(broker, AlpacaBroker):
+            from .crypto_broker import CryptoBroker
+            from .crypto_execution import CryptoRangeExecutor
+            self.crypto_executor = CryptoRangeExecutor(CryptoBroker(feeds), self.crypto_store, store, self.portfolio)
+        self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else [])
+                                    + (['crypto_execution'] if self.crypto_executor else []))
         self.archive = None
         self.native_capture = None
         self.range_watch = None
         self.range_watch_error = None
+        self.extra_range_watches = {}
         try:
             self.archive = ObservationArchive(str(store.path) + '.observations.sqlite3')
         except Exception:
@@ -78,6 +95,7 @@ class Service:
             try:
                 from .range_watch import BitcoinBars, RangeWatch
                 self.range_watch = RangeWatch(BitcoinBars(feeds.alpaca_headers), str(store.path) + '.range-observations.sqlite3')
+                self.extra_range_watches['ETH/USD'] = RangeWatch(BitcoinBars(feeds.alpaca_headers, symbol='ETH/USD'), str(store.path) + '.eth-range-observations.sqlite3')
             except Exception:
                 self.range_watch_error = 'Bitcoin observation worker could not be initialized.'
         if isinstance(feeds, ReadOnlyFeeds) and feeds.vix_provider == 'insightsentry':
@@ -91,6 +109,7 @@ class Service:
                       'live_enabled':False, 'execution_available':False, 'data_health':None, 'data_valid_until':None, 'quote':None, 'quote_at':None, 'quote_error':None,
                       'decision_trace':None, 'diagnostic_error':None, 'market_context':None,
                       'input_archive':{'status':'starting' if self.archive else 'unavailable'},
+                      'crypto_worker_error': None,
                       'worker_incidents':[]}
         try:
             self.state['decision_trace'] = self.store.latest_decision()
@@ -102,6 +121,7 @@ class Service:
             raise RuntimeError('Workers already started')
         loops = [('account', self.refresh_account, 15), ('data', self.refresh_analysis, 60)]
         if self.executor: loops.append(('execution', self.refresh_execution, 5))
+        if self.crypto_executor: loops.append(('crypto_execution', self.refresh_crypto_execution, 10))
         for name, function, delay in loops:
             thread=Thread(target=self._loop,args=(name,function,delay),name=f'pivot-{name}',daemon=True)
             self.threads.append(thread)
@@ -114,6 +134,11 @@ class Service:
                 self.range_watch.start(self.stop_event)
             except Exception:
                 self.range_watch_error = 'Bitcoin observation worker could not be started.'
+        for watch in self.extra_range_watches.values():
+            try:
+                watch.start(self.stop_event)
+            except Exception:
+                watch.error = 'This crypto data worker could not be started.'
 
     def stop(self):
         self.stop_event.set()
@@ -123,6 +148,9 @@ class Service:
             self.native_capture.thread.join(timeout=1)
         if self.range_watch and self.range_watch.thread and self.range_watch.thread.is_alive():
             self.range_watch.thread.join(timeout=1)
+        for watch in self.extra_range_watches.values():
+            if watch.thread and watch.thread.is_alive():
+                watch.thread.join(timeout=1)
 
     def _loop(self,name,function,delay):
         due = monotonic()
@@ -134,7 +162,10 @@ class Service:
             except Exception:
                 failed = True
                 with self.lock:
-                    self.state['data_errors']=['Data update failed; waiting for a validated snapshot']
+                    if name == 'crypto_execution':
+                        self.state['crypto_worker_error'] = 'Crypto execution needs attention; check its orders and positions.'
+                    else:
+                        self.state['data_errors']=['Data update failed; waiting for a validated snapshot']
             finally:
                 self.workers.finish(name, failed)
             due = next_tick(due, delay, monotonic())
@@ -296,10 +327,24 @@ class Service:
         with self.lock: state = deepcopy(self.state)
         self.executor.tick(state)
 
+    def refresh_crypto_execution(self):
+        self.crypto_executor.tick(self.range_analyses())
+        with self.lock:
+            self.state['crypto_worker_error'] = None
+
+    def reconcile_crypto(self, payload):
+        if payload != {}:
+            raise ValueError('Crypto reconciliation accepts no settings or order instructions')
+        if not self.crypto_executor:
+            raise ValueError('The crypto broker connection is not configured')
+        result = self.crypto_executor.recover_incidents()
+        return {**self.snapshot(), 'crypto_reconciliation':result}
+
     def set_live(self, payload):
         if not self.executor:
             raise ValueError('Broker execution is not configured')
-        self.executor.set_live(payload)
+        with self.portfolio.admit():
+            self.executor.set_live(payload)
         return self.snapshot()
 
     def snapshot(self):
@@ -326,11 +371,18 @@ class Service:
             market_open=bool((result.get('clock') or {}).get('is_open')), error=result['quote_error'])
         from .policy import POLICY
         if self.executor: result.update(self.executor.snapshot())
+        control = self.store.control()
+        from .policy import POLICY_VERSION
+        global_live = control.get('enabled') is True and control.get('policy') == POLICY_VERSION
+        result['live_enabled'] = global_live
+        result['portfolio'] = self.portfolio_snapshot(global_live)
+        result['crypto_execution'] = self.crypto_executor.snapshot() if self.crypto_executor else {
+            'message':'Crypto broker execution is not configured for this runtime.', 'at':None, 'trades':[], 'incidents':[]}
         result['worker_health'] = self.worker_health()
         result['strategy_families'] = {
             'socrates': {'family_id':'socrates', 'label':'Socrates', 'execution_status':'owner_controlled',
                          'analysis':deepcopy(result.get('setup'))},
-            'range_reversal': self.range_snapshot()}
+            'range_reversal': {**self.range_snapshot(), 'analyses':self.range_analyses()}}
         result['native_history'] = self.native_capture.status() if self.native_capture else {
             'status':'unavailable', 'research_only':True, 'live_entry_ready':False,
             'detail':'Separate native validation history is not configured.'}
@@ -340,7 +392,10 @@ class Service:
             result['session_review'] = {'status':'unavailable', 'historical_only':True}
         result.update(settings=self.store.settings(), rulebook=rulebook(), events=self.store.events(),
                       trade_results=self.store.trade_results(),
-                      execution_policy=POLICY, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
+                      execution_policy={**POLICY, 'summary': [
+                          'Live money is the master entry switch for enabled strategies. Viewing another strategy does not stop entries or position management.',
+                          'Each strategy uses its own saved purchase target. Turning a strategy off stops its new entries; existing positions continue their exits.',
+                          *['Socrates: ' + line for line in POLICY['summary']]]}, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
         return result
 
     def range_snapshot(self):
@@ -355,8 +410,109 @@ class Service:
         result = range_analysis(None, datetime.now(timezone.utc))
         if error:
             result['detail'] = error
-        result['execution_note'] = 'Watching only. Live money currently controls Socrates; this strategy cannot send orders.'
+        result['execution_note'] = 'Execution uses this strategy’s saved permission, purchase amount and current broker checks.'
         return result
+
+    def range_analyses(self):
+        from .range_reversal import analyze as range_analysis
+        result = {'BTC/USD':self.range_snapshot()}
+        for symbol, watch in self.extra_range_watches.items():
+            try:
+                result[symbol] = watch.snapshot()
+            except Exception:
+                result[symbol] = range_analysis(None, datetime.now(timezone.utc))
+        return result
+
+    def portfolio_snapshot(self, global_live=None):
+        from .crypto_execution import POLICY as CRYPTO_POLICY
+        from .policy import POLICY_VERSION
+        control = self.store.control()
+        if global_live is None:
+            global_live = control.get('enabled') is True and control.get('policy') == POLICY_VERSION
+        crypto = self.crypto_store.control()
+        selection = self.store.strategy_selection()
+        with self.lock:
+            state = deepcopy(self.state)
+        settings_exposure_verified = False
+        try:
+            if not state['account_error'] and state['account_at'] and 0 <= (datetime.now(timezone.utc)-datetime.fromisoformat(state['account_at'])).total_seconds() <= 60:
+                if state['positions'] or state['orders']:
+                    self.portfolio.assert_exposure(state['account'].get('account_ref'), state['positions'], state['orders'],
+                        requesting_family='socrates', symbol='QQQ')
+                settings_exposure_verified = self.store.active_trade() is None
+        except Exception:
+            pass
+        return {'global_live_enabled':global_live,
+                'socrates':{'enabled':selection['socrates'], 'target_dollars':self.store.settings()['target_dollars'],
+                            'execution_available':self.executor is not None, 'settings_exposure_verified':settings_exposure_verified},
+                'range_reversal':{**{key:crypto[key] for key in ('enabled','target_dollars','symbols')},
+                    'policy_version':CRYPTO_POLICY['version'], 'policy_summary':CRYPTO_POLICY['summary'],
+                    'review_required':crypto['enabled'] and crypto.get('policy') != CRYPTO_POLICY['version'],
+                    'execution_available':self.crypto_executor is not None, 'route':'alpaca_crypto_spot',
+                    'capabilities':{'long':True, 'short':False}},
+                'allocation_note':'Each active trade retains its allocation until closed. Both strategies reserve shared buying power before buying.'}
+
+    def save_strategies(self, payload):
+        """One atomic owner setting change; views never call this method."""
+        import json
+        from .crypto_execution import POLICY_VERSION as CRYPTO_POLICY_VERSION
+        from .crypto_store import SYMBOLS
+        from .execution import Executor
+        if not isinstance(payload, dict) or not payload or set(payload) - {'socrates','range_reversal'}:
+            raise ValueError('Choose a valid strategy setting')
+        stock = payload.get('socrates')
+        if stock is not None and (not isinstance(stock, dict) or set(stock) != {'enabled'} or type(stock['enabled']) is not bool):
+            raise ValueError('Socrates permission must be on or off')
+        if stock is not None and stock['enabled'] and self.executor is None:
+            raise ValueError('The Socrates broker connection is not configured')
+        crypto = payload.get('range_reversal')
+        if crypto is not None and (not isinstance(crypto, dict) or not crypto
+                or set(crypto) - {'enabled','target_dollars','symbols','policy_version'}):
+            raise ValueError('Invalid range-reversal settings')
+        with self.portfolio.admit():
+            updated = self.crypto_store.control()
+            if crypto is not None:
+                if 'enabled' in crypto and type(crypto['enabled']) is not bool:
+                    raise ValueError('Range-reversal permission must be on or off')
+                updated.update({k:v for k,v in crypto.items() if k != 'policy_version'})
+                if 'symbols' in crypto:
+                    symbols = crypto['symbols']
+                    if (not isinstance(symbols, list) or not 1 <= len(symbols) <= len(SYMBOLS)
+                            or any(not isinstance(s,str) or s not in SYMBOLS for s in symbols) or len(set(symbols)) != len(symbols)):
+                        raise ValueError('Select Bitcoin and/or Ethereum')
+                amount = decimal(updated['target_dollars'])
+                if amount < 1 or amount != amount.quantize(decimal('.01')):
+                    raise ValueError('Enter a crypto purchase target of at least $1, in cents')
+                if updated['enabled']:
+                    old = self.crypto_store.control()
+                    if 'policy_version' in crypto and crypto['policy_version'] != CRYPTO_POLICY_VERSION:
+                        raise ValueError('Review the current crypto execution rules')
+                    if (not old['enabled'] or old.get('policy') != CRYPTO_POLICY_VERSION) and crypto.get('policy_version') != CRYPTO_POLICY_VERSION:
+                        raise ValueError('Review the crypto execution rules before enabling this strategy')
+                    if not self.crypto_executor:
+                        raise ValueError('The crypto broker connection is not configured')
+                    account = self.crypto_executor.broker.account()
+                    Executor._account_ready(account)
+                    if account.get('mode') != 'live' or account.get('crypto_status') != 'ACTIVE' or not account.get('account_ref'):
+                        raise ValueError('A verified active live crypto account is required')
+                    master = self.store.control()
+                    if master.get('enabled') and master.get('account_ref') != account['account_ref']:
+                        raise ValueError('The master Live account changed. Turn global Live Off and review the connected account before enabling crypto.')
+                    if old['enabled'] and old.get('account_ref') != account['account_ref']:
+                        raise ValueError('Crypto account changed. Turn this strategy off and review the new account first.')
+                    updated.update(policy=CRYPTO_POLICY_VERSION, account_ref=account['account_ref'])
+                    # Broker affordability is checked per order. Enabling does not
+                    # increase the amount or place an order inside this request.
+            with self.store.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                if stock is not None:
+                    db.execute('UPDATE strategy_selection SET body=? WHERE id=1', (json.dumps({'socrates':stock['enabled']}),))
+                if crypto is not None:
+                    self.crypto_store.configure(updated, db=db)
+                db.execute('UPDATE authorization_generation SET generation=generation+1 WHERE id=1')
+                db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
+                    (datetime.now(timezone.utc).isoformat(), 'strategy_settings', json.dumps(payload)))
+        return self.snapshot()
 
     def save_settings(self,payload):
         if set(payload)!={'sizing_mode','target_dollars'}:
@@ -366,17 +522,20 @@ class Service:
             raise ValueError('Automatic allocation is not defined by the recordings yet')
         if target<1 or target>decimal('1000000000000') or target!=target.quantize(decimal('.01')):
             raise ValueError('Target must be at least $1 with up to two decimal places')
-        with self.executor.entry_lock if self.executor else nullcontext():
-            if self.executor and (self.executor.enabled() or self.store.active_trade()):
-                raise ValueError('Turn Live money off and wait for the current trade to finish before changing size')
-            with self.lock:
-                at=self.state['account_at']
-                if self.state['account_error'] or not at or (datetime.now(timezone.utc)-datetime.fromisoformat(at)).total_seconds()>60:
+        with self.portfolio.admit():
+            with self.executor.entry_lock if self.executor else nullcontext():
+                if self.executor and (self.executor.enabled() or self.store.active_trade()):
+                    raise ValueError('Turn Socrates Off and wait for its current trade to finish before changing its size')
+                with self.lock:
+                    state = deepcopy(self.state)
+                at = state['account_at']
+                if state['account_error'] or not at or not 0 <= (datetime.now(timezone.utc)-datetime.fromisoformat(at)).total_seconds() <= 60:
                     raise ValueError('Wait for a current account balance')
-                if self.state['positions'] or self.state['orders']:
-                    raise ValueError('Existing positions and orders must finish before changing size')
-                if target>decimal(self.state['account']['buying_power']):
+                if state['positions'] or state['orders']:
+                    self.portfolio.assert_exposure(state['account'].get('account_ref'), state['positions'], state['orders'],
+                        requesting_family='socrates', symbol='QQQ')
+                if target > decimal(state['account']['buying_power']):
                     raise ValueError('Target exceeds current buying power')
-                normalized={'sizing_mode':'target','target_dollars':str(target.quantize(decimal('.01')))}
+                normalized = {'sizing_mode':'target','target_dollars':str(target.quantize(decimal('.01')))}
                 self.store.save(normalized)
         return normalized

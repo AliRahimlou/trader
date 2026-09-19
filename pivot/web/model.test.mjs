@@ -157,3 +157,24 @@ test('stale queued metadata is reported as historical rather than currently queu
   assert.equal(status.queued,false);
   assert.equal(status.current,false);
 });
+
+test('Socrates size uses its own family permission under the global master switch',()=>{
+  const portfolio={global_live_enabled:true,socrates:{enabled:false},range_reversal:{enabled:true}};
+  assert.equal(settingsError({target_dollars:'25'},{...snapshot,live_enabled:true,portfolio},now),'');
+  assert.match(settingsError({target_dollars:'25'},{...snapshot,portfolio:{...portfolio,socrates:{enabled:true}}},now),/Turn Socrates Off/);
+  assert.match(settingsError({target_dollars:'25'},{...snapshot,portfolio,positions:[{symbol:'BTCUSD'}]},now),/verified.*another strategy/);
+});
+
+test('Socrates sizing allows other strategy exposure only when the server verifies ownership',()=>{
+  const portfolio={global_live_enabled:true,socrates:{enabled:false,settings_exposure_verified:true},range_reversal:{enabled:true}};
+  const state={...snapshot,portfolio,positions:[{symbol:'BTCUSD',qty:'0.000049875'}],orders:[{symbol:'BTCUSD',side:'sell'}]};
+  assert.equal(settingsError({target_dollars:'25'},state,now),'');
+  for(const verified of [undefined,false,'true']){
+    const unverified={...state,portfolio:{...portfolio,socrates:{...portfolio.socrates,settings_exposure_verified:verified}}};
+    assert.match(settingsError({target_dollars:'25'},unverified,now),/verified.*another strategy/);
+  }
+  assert.match(settingsError({target_dollars:'25'},{...state,portfolio:{...portfolio,socrates:{...portfolio.socrates,enabled:true}}},now),/Turn Socrates Off/);
+  assert.match(settingsError({target_dollars:'25'},{...state,execution:{trade:{symbol:'QQQ'}}},now),/current trade/);
+  assert.match(settingsError({target_dollars:'25'},{...state,account_at:new Date(now-61000).toISOString()},now),/current account/);
+  assert.match(settingsError({target_dollars:'101'},state,now),/buying power/);
+});

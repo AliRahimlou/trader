@@ -18,7 +18,7 @@ def test_snapshot_observer_failure_keeps_account_and_permission_available(tmp_pa
     app.range_watch = SimpleNamespace(snapshot=broken)
     result = app.snapshot()
     family = result['strategy_families']['range_reversal']
-    assert family['state'] == 'DATA_WAITING' and family['can_enter'] is False
+    assert family['state'] == 'DATA_WAITING' and family['signal_ready'] is False
     assert 'temporarily unavailable' in family['detail']
     assert 'SECRET' not in str(result)
     assert result['account'] == before['account'] and result['setup'] == before['setup']
@@ -30,7 +30,7 @@ def test_observations_never_enter_executor_snapshot(tmp_path):
     app.state['setup'] = {'state':'WAITING', 'checks':[]}
     received = []
     app.executor = SimpleNamespace(tick=lambda value:received.append(value), snapshot=lambda:{})
-    app.range_watch = SimpleNamespace(snapshot=lambda:{'state':'SETUP_OBSERVED','can_enter':False})
+    app.range_watch = SimpleNamespace(snapshot=lambda:{'state':'SETUP_OBSERVED','signal_ready':True})
     result = app.snapshot()
     assert result['strategy_families']['range_reversal']['state'] == 'SETUP_OBSERVED'
     app.refresh_execution()

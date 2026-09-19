@@ -19,6 +19,7 @@ from .policy import POLICY_VERSION
 from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
 from .deployment import DeploymentHold
+from .portfolio import PortfolioBlocked
 from .strategy import LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
@@ -183,6 +184,7 @@ class Executor:
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.tick_lock, self.entry_lock = Lock(), Lock()
         self.entry_gate = None
+        self.portfolio = None
         self.message = 'Live money is off. Analysis continues.'
         self.last_at = None
         self.revision = revision
@@ -306,7 +308,8 @@ class Executor:
 
     def enabled(self):
         c = self.store.control()
-        return c['enabled'] is True and c.get('policy') == POLICY_VERSION
+        return (c['enabled'] is True and c.get('policy') == POLICY_VERSION
+                and (self.portfolio is None or self.portfolio.family_enabled('socrates')))
 
     def set_live(self, payload):
         if set(payload) != {'enabled', 'policy_version'} or type(payload['enabled']) is not bool:
@@ -370,10 +373,11 @@ class Executor:
                 # The updater's exclusive lock cannot begin between broker reads,
                 # durable reservation and the first entry submission.
                 with self.entry_gate.admit() if self.entry_gate else nullcontext():
-                    self._entry(snapshot)
-        except (Waiting, DeploymentHold, FeedError, ValueError) as exc:
-            outcome = 'waiting' if isinstance(exc, (Waiting, DeploymentHold)) else 'feed_error' if isinstance(exc, FeedError) else 'invalid_data'
-            exception_kind = 'Waiting' if isinstance(exc, (Waiting, DeploymentHold)) else 'FeedError' if isinstance(exc, FeedError) else 'ValueError'
+                    with self.portfolio.admit() if self.portfolio else nullcontext():
+                        self._entry(snapshot)
+        except (Waiting, DeploymentHold, PortfolioBlocked, FeedError, ValueError) as exc:
+            outcome = 'waiting' if isinstance(exc, (Waiting, DeploymentHold, PortfolioBlocked)) else 'feed_error' if isinstance(exc, FeedError) else 'invalid_data'
+            exception_kind = 'Waiting' if isinstance(exc, (Waiting, DeploymentHold, PortfolioBlocked)) else 'FeedError' if isinstance(exc, FeedError) else 'ValueError'
             if isinstance(exc, (Waiting, DeploymentHold)) and isinstance(exc.code, str) and exc.code in EXECUTION_GATES:
                 self._gate(exc.code)
             self.message = str(exc)
@@ -477,6 +481,13 @@ class Executor:
                 return candidate, expires, key
         raise Waiting('This setup has already been handled; waiting for the next event')
 
+    def _assert_entry_exposure(self, account_ref, positions, orders, *, excluding_trade_id=None):
+        if self.portfolio:
+            self.portfolio.assert_exposure(account_ref, positions, orders, requesting_family='socrates',
+                                           symbol='QQQ', excluding_trade_id=excluding_trade_id)
+        elif positions or orders:
+            raise Waiting('Waiting for existing broker positions and orders to finish')
+
     def _entry(self, snapshot):
         now = self.now()
         if self.expected_account_mode == 'paper':
@@ -513,8 +524,7 @@ class Executor:
         if closing(clock, self.now(), 600):
             raise Waiting('No new entries in the final ten minutes of the market session')
         self._gate('existing_exposure')
-        if positions or orders:
-            raise Waiting('Waiting for existing broker positions and orders to finish')
+        self._assert_entry_exposure(account['account_ref'], positions, orders)
         self._gate('asset_eligibility')
         asset = self.broker.asset('QQQ')
         if asset.get('symbol') != 'QQQ' or asset.get('status') != 'active' or asset.get('tradable') is not True:
@@ -538,13 +548,15 @@ class Executor:
             raise Waiting('Price has moved more than 1% from the signal; skipping this entry')
         self._gate('purchase_size')
         amount = authorization['settings']['target_dollars']
-        plan = purchase_plan(amount, price, account['buying_power'], direction, asset.get('fractionable') is True)
+        buying_power = (self.portfolio.available(account['account_ref'], account['buying_power'])
+                        if self.portfolio else account['buying_power'])
+        plan = purchase_plan(amount, price, buying_power, direction, asset.get('fractionable') is True)
         if direction == 'short':
             self._gate('short_eligibility')
             if account.get('shorting_enabled') is not True or not asset.get('shortable') or not asset.get('easy_to_borrow'):
                 raise Waiting('This short requires account permission and available QQQ borrow')
             self._gate('short_reserve')
-            if decimal(plan['quantity']) * ask * decimal('1.03') > decimal(account['buying_power']):
+            if decimal(plan['quantity']) * ask * decimal('1.03') > decimal(buying_power):
                 raise Waiting('Not enough buying power for the broker’s short-sale reserve')
         # A cheap candle cache does not prove that a current index quote exists.
         # This read-only check runs only for an otherwise actionable entry.
@@ -630,38 +642,42 @@ class Executor:
             # Recovered durable intents also need admission. Acquire deployment
             # before entry_lock; live-off keeps its existing entry_lock ordering.
             with self.entry_gate.admit() if self.entry_gate else nullcontext():
-                with self.entry_lock:
-                    # Local proof of an expired never-submitted intent does not
-                    # depend on a reachable/unchanged broker account. Retiring it
-                    # is conditional on its exact durable prepared state.
-                    if self._prepared_entry_locally_expired(trade):
-                        self._expire_entry(trade)
-                        return None
-                    if self.store.active_trade() != trade:
-                        raise Waiting('Entry state changed; waiting for durable order reconciliation')
-                    self._gate('broker_snapshot')
-                    # A durable but unsent intent can be recovered after the
-                    # account changed or another order/position appeared. Only
-                    # attempted operations may skip these entry-only reads.
-                    account = self.broker.account()
-                    self._gate('account_status')
-                    self._account_ready(account)
-                    self._gate('account_identity')
-                    if account.get('account_ref') != trade['account_ref']:
-                        raise Waiting('The connected account changed before entry submission')
-                    self._gate('account_mode')
-                    if account.get('mode') != self.expected_account_mode:
-                        raise Waiting('The account environment changed before entry submission')
-                    self._gate('existing_exposure')
-                    if self.broker.positions() or self.broker.orders():
-                        raise Waiting('Waiting for existing broker positions and orders to finish before entry submission')
-                    self._gate('market_session')
-                    clock = self.broker.clock()
-                    if self._prepared_entry_expired(trade, clock):
-                        self._expire_entry(trade)
-                        return None
-                    return self._order_admitted(trade, name)
+                with self.portfolio.admit() if self.portfolio else nullcontext():
+                    return self._recover_prepared_entry(trade, name)
         return self._order_admitted(trade, name)
+
+    def _recover_prepared_entry(self, trade, name):
+        with self.entry_lock:
+            # Local proof of an expired never-submitted intent does not
+            # depend on a reachable/unchanged broker account. Retiring it
+            # is conditional on its exact durable prepared state.
+            if self._prepared_entry_locally_expired(trade):
+                self._expire_entry(trade)
+                return None
+            if self.store.active_trade() != trade:
+                raise Waiting('Entry state changed; waiting for durable order reconciliation')
+            self._gate('broker_snapshot')
+            # A durable but unsent intent can be recovered after the
+            # account changed or another order/position appeared. Only
+            # attempted operations may skip these entry-only reads.
+            account = self.broker.account()
+            self._gate('account_status')
+            self._account_ready(account)
+            self._gate('account_identity')
+            if account.get('account_ref') != trade['account_ref']:
+                raise Waiting('The connected account changed before entry submission')
+            self._gate('account_mode')
+            if account.get('mode') != self.expected_account_mode:
+                raise Waiting('The account environment changed before entry submission')
+            self._gate('existing_exposure')
+            self._assert_entry_exposure(account['account_ref'], self.broker.positions(),
+                                        self.broker.orders(), excluding_trade_id=trade['id'])
+            self._gate('market_session')
+            clock = self.broker.clock()
+            if self._prepared_entry_expired(trade, clock):
+                self._expire_entry(trade)
+                return None
+            return self._order_admitted(trade, name)
 
     def _order_admitted(self, trade, name):
         self._gate('order_reconciliation')

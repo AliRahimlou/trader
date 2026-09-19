@@ -1,27 +1,119 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview} from './model.mjs';
-import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup} from './strategy-families.mjs';
+import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit} from './strategy-families.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
 let snapshot=null, dirty=false, saving=false, fetching=false, generation=0, saveError="", toggling=false, liveError='';
 let pendingLive=null;
 let familyConnectionUnavailable=false;
+let strategySaving=false,rangeDirty=false,strategyError='',pendingStrategy=null,strategyReview=null;
+let cryptoRechecking=false,cryptoRecheckMessage='',cryptoRecheckCompleted=false;
+let liveReviewFingerprint=null,strategyReviewFingerprint=null;
+function permissionFingerprint() {
+  const p=portfolioView(snapshot);
+  return JSON.stringify({version:snapshot?.execution_policy?.version,globalOn:p.globalOn,families:p.families});
+}
 const LIVE_RECONCILE_MS=60000;
 bindStrategyView(document,{onChange:()=>renderStrategyFamilies()});
 function renderStrategyFamilies() {
   const open=new Set([...$('range-content').querySelectorAll('details[open]')].map(node=>node.id));
-  const view=rangeFamilyView(snapshot);
-  if(familyConnectionUnavailable)Object.assign(view,{current:false,currentSignal:null,state:'App connection unavailable',
-    detail:'Reconnecting to verify current observations. Saved analysis cannot authorize an entry.'});
-  $('range-content').innerHTML=rangeFamilyMarkup(view);
+  const symbols=portfolioView(snapshot).families[1].symbols;
+  $('range-content').innerHTML=(symbols.length?symbols:['BTC/USD']).map(symbol=>{
+    const view=rangeFamilyView(snapshot,Date.now(),symbol);
+    if(familyConnectionUnavailable)Object.assign(view,{current:false,currentSignal:null,state:'App connection unavailable',
+      detail:'Reconnecting to verify current observations. Saved analysis cannot authorize an entry.'});
+    return rangeFamilyMarkup(view);
+  }).join('');
   for(const node of $('range-content').querySelectorAll('details'))node.open=open.has(node.id);
 }
 function reconcileLive(next) {
   if(!pendingLive)return;
   if(Date.now()>pendingLive.expiresAt){pendingLive=null;return;}
-  if(typeof next.live_enabled==='boolean' && next.live_enabled===pendingLive.enabled){
+  if(typeof next.live_enabled==='boolean' && portfolioView(next).globalOn===pendingLive.enabled){
     pendingLive=null;liveError='';$('live-error').textContent='';$('live-dialog').close();
   }
+}
+function renderStrategyControls() {
+  const p=portfolioView(snapshot),busy=strategySaving||saving||toggling||familyConnectionUnavailable;
+  $('strategy-run-summary').textContent=`Global Live ${p.globalOn?'On':'Off'} · ${p.scope}. Changing the strategy view does not change these settings.`;
+  $('execution-scope').textContent=`Global Live · ${p.scope}`;
+  for(const f of p.families){
+    const prefix=f.id==='socrates'?'socrates':'range';
+    $(prefix+'-run-state').textContent=f.status;
+    $(prefix+'-toggle').textContent=f.enabled?'Turn strategy Off':'Enable strategy';
+    $(prefix+'-toggle').disabled=busy||!p.configured||(!f.enabled&&!f.available);
+    $(prefix+'-run-detail').textContent=`${money(f.target)} per purchase · ${f.symbols.join(', ')}. `+
+      (f.id==='socrates'?(snapshot.execution?.message || ''):(snapshot.crypto_execution?.message || 'Waiting for execution checks.'));
+  }
+  $('run-both').disabled=busy||!p.configured||p.families.some(f=>!f.available)||p.families.every(f=>f.enabled);
+  $('range-review').hidden=!p.families[1].reviewRequired;
+  $('range-review').disabled=busy||!p.families[1].available;
+  if(!rangeDirty&&!strategySaving){const f=p.families[1];$('range-amount').value=f.target;$('range-btc').checked=f.symbols.includes('BTC/USD');$('range-eth').checked=f.symbols.includes('ETH/USD');}
+  $('save-range').disabled=busy||!p.configured||!rangeDirty;
+  $('strategy-save-message').textContent=strategyError || (strategySaving?'Saving strategy settings…':rangeDirty?'Unsaved crypto settings. Saving does not change global Live.':'Strategy Off stops its new entries. Existing positions continue their exits.');
+  const execution=snapshot.crypto_execution || {},trades=Array.isArray(execution.trades)?execution.trades:[];
+  const incidents=Array.isArray(execution.incidents)?execution.incidents:[];
+  $('crypto-execution-status').textContent=execution.message || 'Crypto execution is not configured.';
+  $('crypto-incidents').innerHTML=[...(snapshot.crypto_worker_error?[snapshot.crypto_worker_error]:[]),...incidents].map(row=>`<p class="notice warning">${esc(typeof row==='string'?row:row.reason || row.message || 'Crypto execution needs attention.')}</p>`).join('');
+  $('crypto-recheck').hidden=!incidents.length;
+  $('crypto-recheck').disabled=busy||cryptoRechecking;
+  $('crypto-recheck').textContent=cryptoRechecking?'Checking broker records…':'Recheck crypto incidents';
+  $('crypto-recheck-message').hidden=!incidents.length&&!cryptoRecheckMessage&&!cryptoRechecking&&!cryptoRecheckCompleted;
+  const recheckResult=cryptoRecheckCompleted?`${cryptoRecheckMessage?'Last recheck: '+cryptoRecheckMessage+' ':''}${incidents.length?`${incidents.length} incident${incidents.length===1?'':'s'} still need${incidents.length===1?'s':''} attention in the latest update.`:'No crypto incidents in the latest update.'}`:cryptoRecheckMessage;
+  $('crypto-recheck-message').textContent=cryptoRechecking?'Checking saved incidents against broker records. No orders or trading settings are changed.':recheckResult || 'Checks broker evidence only. An incident clears only when its safe resolution is verified.';
+  $('crypto-trades').innerHTML=trades.length?trades.map(row=>`<div class="holding"><strong>${esc(row.symbol)}</strong><span>${esc(row.stage || 'Managing')} · ${esc(cryptoQuantityLabel(row))}</span><b>${money(row.amount)} purchase</b><p class="help">Stop ${money(row.stop)} · Target ${money(row.target)}${row.reason?' · '+esc(row.reason):''}</p></div>`).join(''):'<p class="muted">No app-managed crypto positions in this snapshot. Broker positions and orders are listed below.</p>';
+  $('crypto-history').innerHTML=cryptoHistoryMarkup(execution.history);
+}
+async function recheckCryptoIncidents() {
+  if(!snapshot||cryptoRechecking||saving||toggling||strategySaving||familyConnectionUnavailable
+      || !Array.isArray(snapshot.crypto_execution?.incidents) || !snapshot.crypto_execution.incidents.length)return;
+  cryptoRechecking=true;cryptoRecheckMessage='';cryptoRecheckCompleted=false;const version=++generation;renderStrategyControls();
+  try {
+    const response=await fetch(new URL('crypto/reconcile',api),{method:'POST',headers:{'Content-Type':'application/json','X-Pivot-Intent':'settings'},body:'{}',signal:AbortSignal.timeout(30000)});
+    const next=await response.json();
+    if(!response.ok)throw Error(next.detail || 'Could not recheck crypto incidents');
+    if(!next.portfolio || typeof next.live_enabled!=='boolean' || !Array.isArray(next.crypto_execution?.incidents))throw Error('The recheck response was incomplete. Refreshing incident status.');
+    const proofMessage=typeof next.crypto_reconciliation?.message==='string'?next.crypto_reconciliation.message:next.crypto_execution.message || '';
+    if(version===generation){
+      generation++;snapshot=next;familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);
+      cryptoRecheckCompleted=true;cryptoRecheckMessage=proofMessage;
+    }else cryptoRecheckMessage=`${proofMessage?proofMessage+' ':''}Refreshing the current incident list.`;
+  }catch(error){cryptoRecheckMessage=error.name==='TimeoutError'?'Recheck result is uncertain. Refreshing status; no automatic retry will be sent.':error.message;}
+  finally{cryptoRechecking=false;render();refresh();}
+}
+function reconcileStrategies(next) {
+  if(!pendingStrategy)return;
+  if(Date.now()>pendingStrategy.expiresAt){pendingStrategy=null;return;}
+  if(strategySettingsMatch(next,pendingStrategy.payload)){
+    pendingStrategy=null;strategyError='';rangeDirty=false;strategyReview=null;
+    $('strategy-dialog-error').textContent='';$('strategy-dialog').close();
+  }
+}
+function reviewStrategies(payload) {
+  if(!snapshot||strategySaving||toggling||saving)return;
+  const p=portfolioView(snapshot),selected=p.families.filter(f=>payload[f.id]?.enabled===true);
+  strategyReview=payload;strategyReviewFingerprint=permissionFingerprint();pendingStrategy=null;
+  $('strategy-dialog-title').textContent=selected.length===2?'Run both strategies':'Review strategy settings';
+  $('strategy-dialog-summary').textContent=selected.length?`${selected.map(f=>f.label).join(' + ')}. Global Live is ${p.globalOn?'On: enabling permits new entries when checks pass.':'Off: this saves the selection; turn global Live On separately to permit entries.'}`:'Review the crypto purchase amount and selected markets. Global Live is unchanged.';
+  const lines=selected.flatMap(f=>f.id==='socrates'?(snapshot.execution_policy?.summary || []):f.policy);
+  if(payload.range_reversal){
+    if(!selected.some(f=>f.id==='range_reversal'))lines.push(...p.families[1].policy);
+    lines.push(`Crypto target: ${money(payload.range_reversal.target_dollars || p.families[1].target)} per purchase. Markets: ${(payload.range_reversal.symbols || p.families[1].symbols).join(', ')}.`);
+    lines.push('BTC/USD is the video market. ETH/USD is an unvalidated adaptation. This spot route supports long entries only.');
+  }
+  $('strategy-dialog-policy').innerHTML=lines.map(line=>`<li>${esc(line)}</li>`).join('');
+  $('strategy-dialog-error').textContent='';$('accept-strategy-policy').checked=false;$('confirm-strategy').disabled=true;$('strategy-dialog').showModal();
+}
+async function changeStrategies(payload) {
+  if(!snapshot||strategySaving||toggling||saving)return;
+  strategySaving=true;generation++;strategyError='';pendingStrategy={payload,expiresAt:Date.now()+LIVE_RECONCILE_MS};
+  $('confirm-strategy').disabled=true;$('cancel-strategy').disabled=true;
+  try{
+    const response=await fetch(new URL('strategies',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'settings'},body:JSON.stringify(payload),signal:AbortSignal.timeout(30000)});
+    const next=await response.json();if(!response.ok)throw Error(next.detail || 'Could not save strategy settings');
+    snapshot=next;reconcileStrategies(next);if(pendingStrategy)throw Error('Strategy settings are not yet confirmed. Checking the saved state.');
+  }catch(error){strategyError=error.name==='TimeoutError'?'The strategy update result is uncertain. Checking the saved settings before retrying.':error.message;$('strategy-dialog-error').textContent=strategyError;}
+  finally{strategySaving=false;$('cancel-strategy').disabled=false;$('confirm-strategy').disabled=!$('accept-strategy-policy').checked;render();refresh();}
 }
 function formSettings() { return {sizing_mode:'target',target_dollars:$('amount').value}; }
 function formChanged() {
@@ -34,6 +126,7 @@ function formChanged() {
 function render() {
   const s=snapshot; if(!s)return;
   renderStrategyFamilies();
+  renderStrategyControls();
   $('runtime-status').textContent=s.hosting?.message || 'Checking where the app is running…';
   const release=releaseStatus(s);
   $('installed-version').textContent=release.label;
@@ -51,16 +144,16 @@ function render() {
   $('account-warning').hidden=!stale;
   $('account-warning').textContent=s.account_error || 'Account information is not current yet. Amounts shown may be out of date.';
   $('analysis-updated').textContent=ago(s.analysis_at);
-  const status=appStatus(s), vixDisplay=vixStatus(s.data_health?.vix);
+  const status=portfolioStatus(s,appStatus(s)), vixDisplay=vixStatus(s.data_health?.vix);
   $('status-title').textContent=status.title;
   $('live-status').innerHTML=`Live money <strong>${s.live_enabled?'On':'Off'}</strong><span class="switch" aria-hidden="true"></span>`;
   $('live-status').classList.toggle('is-on',s.live_enabled);
-  $('live-status').disabled=toggling || !s.execution_available;
-  $('live-status').setAttribute('aria-label', s.live_enabled?'Socrates live money on. Turn off new entries':'Socrates live money off. Review and turn on');
-  $('live-status').title='Controls Socrates real-money execution only. Strategy view does not change this setting.';
+  $('live-status').disabled=toggling || strategySaving || (!portfolioView(s).globalOn && !portfolioView(s).enabled.some(f=>f.available));
+  $('live-status').setAttribute('aria-label', s.live_enabled?'Global live money on. Turn off all new entries':'Global live money off. Review enabled strategies and turn on');
+  $('live-status').title='Controls new entries for all enabled strategies. Existing positions continue their exits.';
   $('status-text').textContent=liveError || status.text;
   const operations=operationStatus(s), session=sessionReview(s);
-  if(operations.workerLabel==='Needs attention' && !s.execution?.trade){
+  if(!s.portfolio && operations.workerLabel==='Needs attention' && !s.execution?.trade){
     $('status-title').textContent='App worker needs attention';
     $('status-text').textContent=operations.workerDetail+'. Data and order progress must be checked.';
   }
@@ -80,7 +173,7 @@ function render() {
   for(const node of $('strategy-cards').querySelectorAll('details')) node.open=openMethods.has(node.dataset.method);
   $('holding-count').textContent=`${s.positions.length} positions · ${s.orders.length} orders`;
   $('holdings').innerHTML=(!s.positions.length&&!s.orders.length)?`<p class="muted">${stale?'No positions in the last snapshot. Awaiting a fresh broker update.':'No open positions or working orders.'}</p>`:
-    s.positions.map(p=>`<div class="holding"><strong>${esc(p.symbol)}</strong><span>${esc(p.qty)} shares · ${esc(p.side)}</span><b>${money(p.unrealized_pl)}</b></div>`).join('')+s.orders.map(o=>`<div class="holding"><strong>${esc(o.symbol)}</strong><span>${esc(o.side)} ${esc(o.qty)} · ${esc(o.type)}</span><b>${esc(o.status)}</b></div>`).join('');
+    s.positions.map(p=>`<div class="holding"><strong>${esc(p.symbol)}</strong><span>${esc(p.qty)} ${positionUnit(p)} · ${esc(p.side)}</span><b>${money(p.unrealized_pl)}</b></div>`).join('')+s.orders.map(o=>`<div class="holding"><strong>${esc(o.symbol)}</strong><span>${esc(o.side)} ${esc(o.qty)} · ${esc(o.type)}</span><b>${esc(o.status)}</b></div>`).join('');
   $('current-size').textContent=s.settings.sizing_mode==='target'?`Saved target: ${money(s.settings.target_dollars)} per purchase.`:'Saved mode: automatic allocation.';
   if(!dirty&&!saving) {
     $('amount').value=s.settings.target_dollars;
@@ -127,13 +220,13 @@ function render() {
   formChanged();
 }
 async function refresh() {
-  if(fetching||saving||toggling)return; fetching=true; const version=generation;
-  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;familyConnectionUnavailable=false;reconcileLive(next);render();}}
-  catch { if(version!==generation||saving||toggling)return; familyConnectionUnavailable=true;renderStrategyFamilies(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
-  finally{fetching=false;if(version!==generation&&!saving&&!toggling)refresh();}
+  if(fetching||saving||toggling||strategySaving)return; fetching=true; const version=generation;
+  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling&&!strategySaving){snapshot=next;familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);render();}}
+  catch { if(version!==generation||saving||toggling||strategySaving)return; familyConnectionUnavailable=true;renderStrategyFamilies();if(snapshot)renderStrategyControls(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
+  finally{fetching=false;if(version!==generation&&!saving&&!toggling&&!strategySaving)refresh();}
 }
 async function changeLive(enabled) {
-  if(toggling)return;
+  if(toggling||strategySaving||saving)return;
   liveError='';toggling=true;generation++;pendingLive={enabled,expiresAt:Date.now()+LIVE_RECONCILE_MS};$('live-status').disabled=true;$('confirm-live').disabled=true;$('cancel-live').disabled=true;
   $('live-error').textContent='';
   try {
@@ -151,22 +244,53 @@ async function changeLive(enabled) {
   }
 }
 $('live-status').addEventListener('click',()=>{
-  if(!snapshot||toggling)return;
-  if(snapshot.live_enabled){changeLive(false);return;}
+  if(!snapshot||toggling||strategySaving||saving)return;
+  if(portfolioView(snapshot).globalOn){changeLive(false);return;}
   pendingLive=null;
-  $('live-summary').textContent=`Socrates · real Alpaca account · ${money(snapshot.settings.target_dollars)} target per purchase. 4H Range Reversal remains watching only.`;
-  $('live-policy').innerHTML=snapshot.execution_policy.summary.map(line=>`<li>${esc(line)}</li>`).join('');
-  $('live-data-note').textContent='Turning on permits orders only after the full strategy, completed VIX candles, a fresh VIX quote and broker checks pass. The free-data request limit can pause new entries; the app will not buy extra data.';
+  const p=portfolioView(snapshot);
+  liveReviewFingerprint=permissionFingerprint();
+  $('live-summary').textContent=`Global Live · ${p.scope}. ${p.enabled.map(f=>f.label+': '+money(f.target)+' per purchase').join(' · ')}`;
+  $('live-policy').innerHTML=p.enabled.flatMap(f=>f.id==='socrates'?snapshot.execution_policy.summary:f.policy).map(line=>`<li>${esc(line)}</li>`).join('');
+  $('live-data-note').textContent='Global Live permits new entries for the enabled strategies above. Each strategy uses its own data and broker checks. Turning it Off stops all new entries; existing positions continue their exits.';
   $('live-error').textContent='';$('accept-policy').checked=false;$('confirm-live').disabled=true;$('live-dialog').showModal();
 });
 $('cancel-live').addEventListener('click',()=>$('live-dialog').close());
 $('accept-policy').addEventListener('change',()=>{$('confirm-live').disabled=toggling || !$('accept-policy').checked;});
-$('live-form').addEventListener('submit',event=>{event.preventDefault();if($('accept-policy').checked)changeLive(true);});
+$('live-form').addEventListener('submit',event=>{event.preventDefault();if(!$('accept-policy').checked)return;
+  if(liveReviewFingerprint!==permissionFingerprint()){$('live-error').textContent='Strategy settings changed while this review was open. Close it and review the current settings before turning on.';return;}
+  changeLive(true);
+});
+for(const [button,id] of [['socrates-toggle','socrates'],['range-toggle','range_reversal']])$(button).addEventListener('click',()=>{
+  const family=portfolioView(snapshot).families.find(f=>f.id===id);
+  if(!snapshot?.portfolio||!family||strategySaving||toggling||saving)return;
+  if(family.enabled){changeStrategies({[id]:{enabled:false}});return;}
+  if(!family.available)return;
+  reviewStrategies({[id]:{enabled:true,...(id==='range_reversal'?{policy_version:family.policyVersion}:{})}});
+});
+$('run-both').addEventListener('click',()=>{
+  const p=portfolioView(snapshot);if(!p.configured||p.families.some(f=>!f.available))return;
+  reviewStrategies({socrates:{enabled:true},range_reversal:{enabled:true,policy_version:p.families[1].policyVersion}});
+});
+$('range-review').addEventListener('click',()=>{const f=portfolioView(snapshot).families[1];if(f.available&&f.reviewRequired)reviewStrategies({range_reversal:{enabled:true,policy_version:f.policyVersion}});});
+$('crypto-recheck').addEventListener('click',recheckCryptoIncidents);
+$('range-settings-form').addEventListener('input',()=>{rangeDirty=true;strategyError='';if(snapshot)renderStrategyControls();});
+$('range-settings-form').addEventListener('submit',event=>{
+  event.preventDefault();if(!snapshot?.portfolio||strategySaving||toggling||saving)return;
+  const value=$('range-amount').value,amount=Number(value),symbols=[...($('range-btc').checked?['BTC/USD']:[]),...($('range-eth').checked?['ETH/USD']:[])];
+  if(!/^\d+(\.\d{1,2})?$/.test(value)||!Number.isFinite(amount)||amount<1||amount>1e12||!symbols.length){strategyError='Choose at least one crypto market and enter a target of $1 or more with up to two decimal places.';renderStrategyControls();return;}
+  reviewStrategies({range_reversal:{target_dollars:amount.toFixed(2),symbols,policy_version:portfolioView(snapshot).families[1].policyVersion}});
+});
+$('cancel-strategy').addEventListener('click',()=>{strategyReview=null;$('strategy-dialog').close();});
+$('accept-strategy-policy').addEventListener('change',()=>{$('confirm-strategy').disabled=strategySaving||!$('accept-strategy-policy').checked;});
+$('strategy-review-form').addEventListener('submit',event=>{event.preventDefault();if(!strategyReview||!$('accept-strategy-policy').checked)return;
+  if(strategyReviewFingerprint!==permissionFingerprint()){$('strategy-dialog-error').textContent='Strategy settings changed while this review was open. Close it and review the current settings before applying.';return;}
+  changeStrategies(strategyReview);
+});
 $('settings-form').addEventListener('input',()=>{dirty=true;saveError='';formChanged();});
 $('settings-form').addEventListener('submit',async event=>{
-  event.preventDefault();if(saving)return;const settings=formSettings();const error=settingsError(settings,snapshot);if(error){$('save-message').textContent=error;return;}
+  event.preventDefault();if(saving||strategySaving||toggling)return;const settings=formSettings();const error=settingsError(settings,snapshot);if(error){$('save-message').textContent=error;return;}
   saving=true;generation++;saveError='';formChanged();$('save-message').textContent='Saving…';
-  try{const response=await fetch(new URL('settings',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'settings'},body:JSON.stringify(settings),signal:AbortSignal.timeout(8000)});const result=await response.json();if(!response.ok)throw Error(result.detail || 'Could not save');snapshot.settings=result;dirty=false;$('save-message').textContent='Purchase target saved.';}
+  try{const response=await fetch(new URL('settings',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'settings'},body:JSON.stringify(settings),signal:AbortSignal.timeout(8000)});const result=await response.json();if(!response.ok)throw Error(result.detail || 'Could not save');snapshot.settings=result;if(snapshot.portfolio?.socrates)snapshot.portfolio.socrates.target_dollars=result.target_dollars;dirty=false;$('save-message').textContent='Purchase target saved.';}
   catch(error){saveError=error.name==='TimeoutError'?'Save status is uncertain. Refresh before retrying.':error.message;}
   finally{saving=false;render();}
 });

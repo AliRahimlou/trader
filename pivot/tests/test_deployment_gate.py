@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from pivot.api import Hosting, create_app
-from pivot.deployment import DeploymentHold, EntryGate, PROTOCOL, _control_token
+from pivot.deployment import DeploymentHold, EntryGate, PROTOCOL, _control_token, _deployment_permission
 from pivot.execution import Executor
 from pivot.feeds import FeedError
 from pivot.service import Service
@@ -282,7 +282,7 @@ def test_readiness_is_fresh_read_only_and_identifies_exclusive_hold(tmp_path):
         payload = response.json()
         assert payload['ok'] and payload['gate']['locked'] and payload['gate']['hold_valid']
         assert payload['read_started_at'] == payload['checked_at'] == NOW.isoformat()
-        assert payload['permission_token'] == _control_token(original[0])
+        assert payload['permission_token'] == _deployment_permission(service.store)[1]
         assert payload['positions_count'] == payload['orders_count'] == 0
         assert payload['active_trade'] is False
         assert payload['saved_live_enabled'] and payload['live_enabled'] and not payload['review_required']
@@ -376,7 +376,8 @@ def test_exposure_and_review_state_are_explicit_and_protocol_requires_configurat
     assert payload['ok'] and payload['positions_count'] == 1
     assert payload['review_required'] and payload['saved_live_enabled'] and not payload['live_enabled']
     broker.position_data = []
-    assert service.store.reserve_trade({'id': 'd' * 24, 'stage': 'entering'})
+    assert service.store.reserve_trade({'id': 'd' * 24, 'stage': 'entering',
+        'account_ref':'fake-account-only', 'symbol':'QQQ', 'amount':'5.00'})
     with TestClient(app) as client:
         payload = client.get('/api/deployment-readiness').json()
     assert payload['ok'] and payload['positions_count'] == 0 and payload['active_trade'] is True

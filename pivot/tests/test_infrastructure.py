@@ -109,7 +109,7 @@ def test_new_runtime_has_no_legacy_imports_and_only_executor_calls_broker_mutati
             if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute):
                 receiver = node.func.value
                 if isinstance(receiver, ast.Attribute) and receiver.attr == 'broker' and node.func.attr in ('submit', 'cancel'):
-                    assert path.name == 'execution.py'
+                    assert path.name in {'execution.py', 'crypto_execution.py'}
 
 def test_legitimate_bar_pagination_can_exceed_ten_pages():
     class Feeds(ReadOnlyFeeds):

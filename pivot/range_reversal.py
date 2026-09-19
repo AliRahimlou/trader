@@ -1,4 +1,4 @@
-"""Observational interpretation of the September 19 four-hour-range video.
+"""Signal interpretation of the September 19 four-hour-range video.
 
 This pure analyzer never authorizes orders. The day anchor and first-outside-bar
 stop are declared provisional conventions, not recovered creator formulas.
@@ -13,20 +13,20 @@ from .models import Market, timestamp
 
 NY = ZoneInfo('America/New_York')
 UTC = timezone.utc
-RULE_VERSION = 'range-reversal-observation-v1'
+RULE_VERSION = 'range-reversal-v1'
 FAMILY_ID = 'range_reversal'
 SOURCES = {'alpaca_crypto', 'alpaca_crypto_us', 'alpaca_iex', 'alpaca_sip'}
 STEP = timedelta(minutes=5)
 MAX_RECEIPT_SECONDS = 90
 PUBLICATION_GRACE_SECONDS = 90
 INTERPRETATION_WARNINGS = (
-    'Observation only: this strategy cannot authorize broker orders and has not been validated for live execution.',
+    'Signals require separate account, cost, execution and ownership checks before an order. Signal detection alone is not an order.',
     'Provisional range convention: New York midnight plus four elapsed hours. Selecting New York display time does not establish the creator’s four-hour candle anchor. DST changes the displayed range-end hour.',
     'Provisional stop convention: the extreme of the first five-minute candle closing outside the range. The narration also refers to the breakout move; those interpretations can differ.',
     'The discretionary closer stop for a large excursion has no numerical definition and is not implemented.',
     'Daily or weekly trend preference is optional in the narration and is not an entry filter here.',
     'A close beyond the opposite boundary without a close inside resets the pending excursion; this is an explicit interpretation.',
-    'Repeated fresh excursions are separate observations. They are not permission for simultaneous positions.',
+    'Repeated fresh excursions are separate opportunities. Position ownership and shared buying power are managed separately.',
 )
 
 
@@ -36,8 +36,8 @@ def _iso(value):
 
 def _base(now):
     return {'family_id': FAMILY_ID, 'label': '4H Range Reversal',
-            'rule_version': RULE_VERSION, 'can_enter': False,
-            'execution_status': 'validation', 'state': 'DATA_WAITING',
+            'rule_version': RULE_VERSION, 'signal_ready': False, 'signal_valid_until': None,
+            'execution_status': 'signal', 'state': 'DATA_WAITING',
             'detail': 'Waiting for validated native five-minute data.',
             'analyzed_at': _iso(now), 'symbol': None, 'source': None,
             'observed_at': None, 'latest_bar_at': None, 'range': None,
@@ -154,7 +154,7 @@ def analyze(market: Market | None, now, *, provenance=None):
                            'stop': bar.high if side == 'above' else bar.low,
                            'stop_basis': 'first_outside_candle_extreme', 'confirmation_at': None,
                            'entry': None, 'target': None, 'current': False,
-                           'can_enter': False, 'rule_version': RULE_VERSION}
+                           'signal_ready': False, 'entry_valid_until': None, 'rule_version': RULE_VERSION}
                 result['observations'].append(pending)
             elif pending and inside:
                 risk = abs(bar.close - pending['stop'])
@@ -162,8 +162,10 @@ def analyze(market: Market | None, now, *, provenance=None):
                 pending.update(confirmation_at=_iso(at), entry=bar.close, target=target,
                                risk_per_unit=risk, reward_to_risk=2, current=at == latest,
                                observed_at=_iso(observed))
+                deadline = min(at + timedelta(seconds=90), observed + timedelta(seconds=90), day_end)
+                pending.update(entry_valid_until=_iso(deadline), signal_ready=at == latest and now < deadline)
                 if risk <= 0 or not isfinite(target) or target <= 0:
-                    pending.update(status='INVALID_GEOMETRY', detail='The declared stop and 2R target do not produce valid positive prices.')
+                    pending.update(status='INVALID_GEOMETRY', signal_ready=False, detail='The declared stop and 2R target do not produce valid positive prices.')
                 else:
                     pending.update(status='CONFIRMED', detail='A completed outside close was followed by a later completed close strictly inside.')
                     result['candidates'].append(pending.copy())
@@ -176,10 +178,12 @@ def analyze(market: Market | None, now, *, provenance=None):
             event = result['observations'][-1]
             result['current_event'] = event.copy()
             result.update(state='SETUP_OBSERVED' if event['status'] == 'CONFIRMED' else 'DATA_WAITING',
-                          detail=('A range-reversal setup was observed on the latest completed candle. Validation only; no order is authorized.'
+                          signal_ready=event['status'] == 'CONFIRMED' and event['signal_ready'],
+                          signal_valid_until=event.get('entry_valid_until'),
+                          detail=(('A reversal has confirmed. The execution worker checks account, price, costs and ownership before entry.' if event['signal_ready'] else 'This reversal’s entry window has expired. Waiting for a new outside-and-inside cycle.')
                                   if event['status'] == 'CONFIRMED' else event['detail']))
         return result
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
         result.update(state='DATA_WAITING', detail='Native candle metadata or prices could not be validated.',
-                      range=None, observations=[], candidates=[], current_event=None)
+                      signal_ready=False, signal_valid_until=None, range=None, observations=[], candidates=[], current_event=None)
         return result

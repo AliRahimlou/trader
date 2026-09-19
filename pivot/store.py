@@ -42,6 +42,8 @@ class Store:
             db.execute('CREATE TABLE IF NOT EXISTS authorization_generation '
                        '(id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL)')
             db.execute('INSERT OR IGNORE INTO authorization_generation VALUES(1,0)')
+            db.execute('CREATE TABLE IF NOT EXISTS strategy_selection (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)')
+            db.execute('INSERT OR IGNORE INTO strategy_selection VALUES(1,?)', (json.dumps({'socrates': True}),))
             for table in ('decision_traces', 'execution_checks'):
                 db.execute(f'CREATE INDEX IF NOT EXISTS {table}_session_time ON {table}(julianday(last_observed_at))')
 
@@ -51,6 +53,23 @@ class Store:
     def settings(self):
         with self.connect() as db:
             return json.loads(db.execute('SELECT body FROM settings WHERE id=1').fetchone()[0])
+
+    def strategy_selection(self):
+        with self.connect() as db:
+            result = json.loads(db.execute('SELECT body FROM strategy_selection WHERE id=1').fetchone()[0])
+            if set(result) != {'socrates'} or type(result['socrates']) is not bool:
+                raise ValueError('Strategy selection could not be validated')
+            return result
+
+    def deployment_permission(self):
+        """One read transaction covers all permissions/settings during a rollout."""
+        with self.connect() as db:
+            db.execute('BEGIN')
+            master = self._entry_authorization(db)
+            selection = json.loads(db.execute('SELECT body FROM strategy_selection WHERE id=1').fetchone()[0])
+            crypto_exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='crypto_control'").fetchone()
+            crypto = json.loads(db.execute('SELECT body FROM crypto_control WHERE id=1').fetchone()[0]) if crypto_exists else None
+            return {**master, 'strategy_selection':selection, 'crypto_control':crypto}
 
     @staticmethod
     def _entry_authorization(db):

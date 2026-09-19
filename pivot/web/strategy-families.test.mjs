@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,STRATEGY_VIEW_KEY} from './strategy-families.mjs';
+import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,portfolioView,STRATEGY_VIEW_KEY} from './strategy-families.mjs';
 
 const at='2026-09-19T12:10:10+00:00',now=Date.parse(at);
 function snapshot(){return {live_enabled:true,settings:{target_dollars:'5.00'},strategy_families:{range_reversal:{
@@ -27,7 +27,7 @@ test('view selection persists locally while every execution value stays unchange
   const h=dom(),writes=[],requests=[],saved=new Map(),initial=snapshot();
   const storage={getItem:key=>saved.get(key),setItem:(key,value)=>{saved.set(key,value);writes.push({key,value});}};
   const context=vm.createContext({URL,Date,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>storage}),
-    rangeFamilyView,rangeFamilyMarkup,document:h.document,location:{hostname:'example.test',port:''},
+    rangeFamilyView,rangeFamilyMarkup,portfolioView,document:h.document,location:{hostname:'example.test',port:''},
     fetch:(...args)=>{requests.push(args);throw Error('No network expected');}});
   vm.runInContext(source+`\nsnapshot=${JSON.stringify(initial)};globalThis.state=()=>({snapshot,dirty,saving,toggling,pendingLive});`,context);
   const before=JSON.stringify(context.state());
@@ -37,8 +37,8 @@ test('view selection persists locally while every execution value stays unchange
     assert.equal(h.element('socrates-family').hidden,socratesHidden);
     assert.equal(h.element('range-family').hidden,rangeHidden);
     assert.equal(JSON.stringify(context.state()),before);
-    assert.match(h.element('strategy-view-note').textContent,/Socrates/);
-    if(selected==='all')assert.match(h.element('strategy-view-note').textContent,/does not enable simultaneous trading/);
+    assert.match(h.element('strategy-view-note').textContent,/Changing this view does not change trading/);
+    if(selected==='all')assert.match(h.element('strategy-view-note').textContent,/does not change trading/);
   }
   assert.equal(requests.length,0);
   assert.deepEqual(writes.map(row=>row.key),Array(3).fill(STRATEGY_VIEW_KEY));
@@ -59,18 +59,18 @@ test('unrecognized saved or selected strategy falls back to Socrates',()=>{
   h.element('strategy-view').value='trade-everything';h.element('strategy-view').listeners.change();
   assert.equal(h.element('strategy-view').value,'socrates');
 });
-test('valid remembered All view shows both analyses and explicitly disclaims simultaneous orders',()=>{
+test('valid remembered All view shows both analyses without changing trading permission',()=>{
   const h=dom();
   bindStrategyView(h.document,{storage:()=>({getItem:()=> 'all'})});
   assert.equal(h.element('socrates-family').hidden,false);
   assert.equal(h.element('range-family').hidden,false);
-  assert.match(h.element('strategy-view-note').textContent,/does not enable simultaneous trading/);
+  assert.match(h.element('strategy-view-note').textContent,/does not change trading/);
 });
-test('current confirmed reversal shows references and always remains watching only',()=>{
+test('current confirmed reversal shows references without claiming unavailable execution',()=>{
   const view=rangeFamilyView(snapshot(),now),markup=rangeFamilyMarkup(view);
   assert.equal(view.state,'Reversal observed');assert.ok(view.currentSignal);
   assert.equal(view.watchingOnly,true);
-  assert.match(markup,/Watching only/);assert.match(markup,/No orders from this strategy/);
+  assert.match(markup,/Execution unavailable/);assert.match(markup,/Broker execution is not available/);
   assert.match(markup,/Entry reference/);assert.match(markup,/Alpaca spot market/);
   assert.match(markup,/not submitted orders or guaranteed fills/);
 });
@@ -123,7 +123,7 @@ test('provider text is escaped and history is bounded to the five newest observa
 });
 test('static page keeps account, Socrates execution, positions and controls outside strategy view sections',async()=>{
   const html=await readFile(new URL('./index.html',import.meta.url),'utf8');
-  assert.match(html,/id="strategy-view"/);assert.match(html,/Socrates · live execution/);
+  assert.match(html,/id="strategy-view"/);assert.match(html,/Global Live · all enabled strategies/);
   assert.match(html,/<h2>Socrates · why no trade today\?<\/h2>/);
   const socratesStart=html.indexOf('id="socrates-family"'),rangeStart=html.indexOf('id="range-family"');
   assert.ok(html.indexOf('id="live-status"')<socratesStart);

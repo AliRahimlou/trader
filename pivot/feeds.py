@@ -70,11 +70,11 @@ class ReadOnlyFeeds:
 
     def account(self):
         raw = self.get('alpaca', '/v2/account')
-        keys = ('equity', 'last_equity', 'cash', 'buying_power', 'currency', 'status', 'trading_blocked', 'account_blocked', 'trade_suspended_by_user', 'shorting_enabled')
+        keys = ('equity', 'last_equity', 'cash', 'buying_power', 'non_marginable_buying_power', 'crypto_status', 'currency', 'status', 'trading_blocked', 'account_blocked', 'trade_suspended_by_user', 'shorting_enabled')
         return {**{k: raw.get(k) for k in keys}, 'account_ref': sha256((self.broker_url + ':' + raw['id']).encode()).hexdigest(), 'mode': 'live' if self.broker_url == 'https://api.alpaca.markets' else 'paper'}
 
     def positions(self):
-        keys = ('symbol', 'qty', 'side', 'avg_entry_price', 'current_price', 'market_value', 'unrealized_pl', 'unrealized_plpc')
+        keys = ('symbol', 'qty', 'qty_available', 'asset_class', 'side', 'avg_entry_price', 'current_price', 'market_value', 'unrealized_pl', 'unrealized_plpc')
         return [{k: p.get(k) for k in keys} for p in self.get('alpaca', '/v2/positions')]
 
     def orders(self):
