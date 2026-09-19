@@ -1,10 +1,21 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview} from './model.mjs';
+import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup} from './strategy-families.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
 let snapshot=null, dirty=false, saving=false, fetching=false, generation=0, saveError="", toggling=false, liveError='';
 let pendingLive=null;
+let familyConnectionUnavailable=false;
 const LIVE_RECONCILE_MS=60000;
+bindStrategyView(document,{onChange:()=>renderStrategyFamilies()});
+function renderStrategyFamilies() {
+  const open=new Set([...$('range-content').querySelectorAll('details[open]')].map(node=>node.id));
+  const view=rangeFamilyView(snapshot);
+  if(familyConnectionUnavailable)Object.assign(view,{current:false,currentSignal:null,state:'App connection unavailable',
+    detail:'Reconnecting to verify current observations. Saved analysis cannot authorize an entry.'});
+  $('range-content').innerHTML=rangeFamilyMarkup(view);
+  for(const node of $('range-content').querySelectorAll('details'))node.open=open.has(node.id);
+}
 function reconcileLive(next) {
   if(!pendingLive)return;
   if(Date.now()>pendingLive.expiresAt){pendingLive=null;return;}
@@ -22,6 +33,7 @@ function formChanged() {
 }
 function render() {
   const s=snapshot; if(!s)return;
+  renderStrategyFamilies();
   $('runtime-status').textContent=s.hosting?.message || 'Checking where the app is running…';
   const release=releaseStatus(s);
   $('installed-version').textContent=release.label;
@@ -44,7 +56,8 @@ function render() {
   $('live-status').innerHTML=`Live money <strong>${s.live_enabled?'On':'Off'}</strong><span class="switch" aria-hidden="true"></span>`;
   $('live-status').classList.toggle('is-on',s.live_enabled);
   $('live-status').disabled=toggling || !s.execution_available;
-  $('live-status').setAttribute('aria-label', s.live_enabled?'Live money on. Turn off new entries':'Live money off. Review and turn on');
+  $('live-status').setAttribute('aria-label', s.live_enabled?'Socrates live money on. Turn off new entries':'Socrates live money off. Review and turn on');
+  $('live-status').title='Controls Socrates real-money execution only. Strategy view does not change this setting.';
   $('status-text').textContent=liveError || status.text;
   const operations=operationStatus(s), session=sessionReview(s);
   if(operations.workerLabel==='Needs attention' && !s.execution?.trade){
@@ -56,7 +69,7 @@ function render() {
   $('direction-capability').textContent=operations.directionNote;
   $('method-timing').textContent=operations.timingNote;
   const sessionOpen=$('session-review').querySelector('details')?.open;
-  $('session-review').innerHTML=`<div class="section-heading"><h2>${session.orders?.confirmed_entries?'Today’s trade checks':'Why no trade today?'}</h2><span>${esc(session.day || 'Waiting for records')} · ET</span></div><p class="help">${esc(session.detail)}</p>${session.available?`<div class="session-counts"><div><strong>${esc(session.events)}</strong><span>Level events</span></div><div><strong>${esc(session.orders.submission_attempts || 0)}</strong><span>Entry attempts</span></div><div><strong>${esc(session.orders.confirmed_entries || 0)}</strong><span>Confirmed entries</span></div></div><details class="evidence"><summary>See checks and blockers</summary><p>${esc(session.checkpoints)} recorded checkpoints. Passing a signal check does not authorize an order. This summary refreshes every 30 seconds.</p>${session.stages.map(row=>`<p><b>${esc(row.label)}</b><span>${esc(row.count)} distinct events passed</span></p>`).join('')}${session.blockers.map(row=>`<p><b>${esc(row.scope)} · ${esc(row.name)}</b><span>Latest recorded result for ${esc(row.count)} events</span></p>`).join('')}<h3>Recent observations</h3>${session.checks.map(row=>`<p><b>${esc(new Date(row.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}</b><span>${esc(row.blocker)}</span></p>`).join('') || '<p>No analysis recorded today.</p>'}</details>`:''}`;
+  $('session-review').innerHTML=`<div class="section-heading"><h2>Socrates · ${session.orders?.confirmed_entries?'today’s trade checks':'why no trade today?'}</h2><span> ${esc(session.day || 'Waiting for records')} · ET</span></div><p class="help">${esc(session.detail)}</p>${session.available?`<div class="session-counts"><div><strong>${esc(session.events)}</strong><span>Level events</span></div><div><strong>${esc(session.orders.submission_attempts || 0)}</strong><span>Entry attempts</span></div><div><strong>${esc(session.orders.confirmed_entries || 0)}</strong><span>Confirmed entries</span></div></div><details class="evidence"><summary>See checks and blockers</summary><p>${esc(session.checkpoints)} recorded checkpoints. Passing a signal check does not authorize an order. This summary refreshes every 30 seconds.</p>${session.stages.map(row=>`<p><b>${esc(row.label)}</b><span>${esc(row.count)} distinct events passed</span></p>`).join('')}${session.blockers.map(row=>`<p><b>${esc(row.scope)} · ${esc(row.name)}</b><span>Latest recorded result for ${esc(row.count)} events</span></p>`).join('')}<h3>Recent observations</h3>${session.checks.map(row=>`<p><b>${esc(new Date(row.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}</b><span>${esc(row.blocker)}</span></p>`).join('') || '<p>No analysis recorded today.</p>'}</details>`:''}`;
   if(sessionOpen && $('session-review').querySelector('details'))$('session-review').querySelector('details').open=true;
   const views=strategyViews(s), leaders=leaderOverview(s), overview=marketOverview(s);
   const overviewOpen=$('market-overview').querySelector('details')?.open;
@@ -115,8 +128,8 @@ function render() {
 }
 async function refresh() {
   if(fetching||saving||toggling)return; fetching=true; const version=generation;
-  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;reconcileLive(next);render();}}
-  catch { if(version!==generation||saving||toggling)return; $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
+  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling){snapshot=next;familyConnectionUnavailable=false;reconcileLive(next);render();}}
+  catch { if(version!==generation||saving||toggling)return; familyConnectionUnavailable=true;renderStrategyFamilies(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
   finally{fetching=false;if(version!==generation&&!saving&&!toggling)refresh();}
 }
 async function changeLive(enabled) {
@@ -141,7 +154,7 @@ $('live-status').addEventListener('click',()=>{
   if(!snapshot||toggling)return;
   if(snapshot.live_enabled){changeLive(false);return;}
   pendingLive=null;
-  $('live-summary').textContent=`Real Alpaca account · ${money(snapshot.settings.target_dollars)} target per purchase.`;
+  $('live-summary').textContent=`Socrates · real Alpaca account · ${money(snapshot.settings.target_dollars)} target per purchase. 4H Range Reversal remains watching only.`;
   $('live-policy').innerHTML=snapshot.execution_policy.summary.map(line=>`<li>${esc(line)}</li>`).join('');
   $('live-data-note').textContent='Turning on permits orders only after the full strategy, completed VIX candles, a fresh VIX quote and broker checks pass. The free-data request limit can pause new entries; the app will not buy extra data.';
   $('live-error').textContent='';$('accept-policy').checked=false;$('confirm-live').disabled=true;$('live-dialog').showModal();

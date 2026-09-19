@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
+import {bindStrategyView} from './strategy-families.mjs';
 
 // Run the real asynchronous handlers against deferred fetches. The DOM and
 // render function are isolated; no provider or broker connection is available.
 const source=(await readFile(new URL('./app.js',import.meta.url),'utf8'))
-  .replace(/^import .*?;\n/,'')
+  .replace(/^import .*?;\n/gm,'')
   .replace('refresh();setInterval(refresh,10000);','');
 function harness(enabled=false) {
   let now=1000;
@@ -16,11 +17,11 @@ function harness(enabled=false) {
       open:id==='live-dialog',closeCount:0,addEventListener(){},close(){this.open=false;this.closeCount++;}});
     return elements.get(id);
   };
-  const context=vm.createContext({URL,location:{port:'',hostname:'example.test'},
+  const context=vm.createContext({URL,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),location:{port:'',hostname:'example.test'},
     document:{baseURI:'https://example.test/pivot/',getElementById:element,querySelector:()=>badge},
     Date:{now:()=>now},AbortSignal:{timeout:milliseconds=>({milliseconds})},
     fetch:(url,options)=>new Promise((resolve,reject)=>calls.push({url:String(url),options,resolve,reject}))});
-  vm.runInContext(source+`\nrender=()=>{ $('status-text').textContent=liveError || 'Current app status'; };
+  vm.runInContext(source+`\nrenderStrategyFamilies=()=>{};render=()=>{ $('status-text').textContent=liveError || 'Current app status'; };
     snapshot={live_enabled:${enabled},execution_policy:{version:'test-policy'},settings:{target_dollars:'5.00'}};
     globalThis.app={refresh,changeLive,state:()=>({snapshot,liveError,pendingLive,toggling,generation})};`,context);
   return {app:context.app,calls,element,advance:ms=>{now+=ms;}};
