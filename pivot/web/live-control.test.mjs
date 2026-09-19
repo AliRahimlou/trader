@@ -14,7 +14,7 @@ function harness(enabled=false) {
   let now=1000;
   const elements=new Map(), calls=[], badge={dataset:{}};
   const element=id=>{
-    if(!elements.has(id))elements.set(id,{textContent:'',innerHTML:'',disabled:false,checked:true,
+    if(!elements.has(id))elements.set(id,{textContent:'',innerHTML:'',disabled:false,checked:true,dataset:{},
       open:id==='live-dialog',closeCount:0,addEventListener(){},close(){this.open=false;this.closeCount++;}});
     return elements.get(id);
   };
