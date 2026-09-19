@@ -86,18 +86,26 @@ class Service:
         self.range_watch = None
         self.range_watch_error = None
         self.extra_range_watches = {}
+        self.extra_range_errors = {}
         try:
             self.archive = ObservationArchive(str(store.path) + '.observations.sqlite3')
         except Exception:
             pass  # Observation failure is visible below, independent of trading permission.
         from .feeds import ReadOnlyFeeds
         if isinstance(feeds, ReadOnlyFeeds):
+            from .range_watch import BitcoinBars, RangeWatch
+            from .crypto_markets import SYMBOLS
             try:
-                from .range_watch import BitcoinBars, RangeWatch
                 self.range_watch = RangeWatch(BitcoinBars(feeds.alpaca_headers), str(store.path) + '.range-observations.sqlite3')
-                self.extra_range_watches['ETH/USD'] = RangeWatch(BitcoinBars(feeds.alpaca_headers, symbol='ETH/USD'), str(store.path) + '.eth-range-observations.sqlite3')
             except Exception:
                 self.range_watch_error = 'Bitcoin observation worker could not be initialized.'
+            for symbol in SYMBOLS[1:]:
+                try:
+                    self.extra_range_watches[symbol] = RangeWatch(
+                        BitcoinBars(feeds.alpaca_headers, symbol=symbol),
+                        str(store.path) + '.' + symbol.split('/')[0].lower() + '-range-observations.sqlite3')
+                except Exception:
+                    self.extra_range_errors[symbol] = symbol + ' data worker could not be initialized.'
         if isinstance(feeds, ReadOnlyFeeds) and feeds.vix_provider == 'insightsentry':
             try:
                 from .native_capture import NativeCapture
@@ -416,6 +424,8 @@ class Service:
     def range_analyses(self):
         from .range_reversal import analyze as range_analysis
         result = {'BTC/USD':self.range_snapshot()}
+        for symbol, error in self.extra_range_errors.items():
+            result[symbol] = {**range_analysis(None, datetime.now(timezone.utc)), 'symbol':symbol, 'detail':error}
         for symbol, watch in self.extra_range_watches.items():
             try:
                 result[symbol] = watch.snapshot()
@@ -425,6 +435,7 @@ class Service:
 
     def portfolio_snapshot(self, global_live=None):
         from .crypto_execution import POLICY as CRYPTO_POLICY
+        from .crypto_markets import MARKETS
         from .policy import POLICY_VERSION
         control = self.store.control()
         if global_live is None:
@@ -449,6 +460,7 @@ class Service:
                     'policy_version':CRYPTO_POLICY['version'], 'policy_summary':CRYPTO_POLICY['summary'],
                     'review_required':crypto['enabled'] and crypto.get('policy') != CRYPTO_POLICY['version'],
                     'execution_available':self.crypto_executor is not None, 'route':'alpaca_crypto_spot',
+                    'watch_markets':deepcopy(MARKETS),
                     'capabilities':{'long':True, 'short':False}},
                 'allocation_note':'Each active trade retains its allocation until closed. Both strategies reserve shared buying power before buying.'}
 
@@ -479,7 +491,7 @@ class Service:
                     symbols = crypto['symbols']
                     if (not isinstance(symbols, list) or not 1 <= len(symbols) <= len(SYMBOLS)
                             or any(not isinstance(s,str) or s not in SYMBOLS for s in symbols) or len(set(symbols)) != len(symbols)):
-                        raise ValueError('Select Bitcoin and/or Ethereum')
+                        raise ValueError('Select one or more supported crypto markets')
                 amount = decimal(updated['target_dollars'])
                 if amount < 1 or amount != amount.quantize(decimal('.01')):
                     raise ValueError('Enter a crypto purchase target of at least $1, in cents')

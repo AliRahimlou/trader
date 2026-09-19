@@ -347,6 +347,8 @@ def test_two_symbols_can_hold_separate_protected_positions(engine):
     e, b, store, _, _ = engine
     store.configure({'symbols': ['BTC/USD', 'ETH/USD']})
     e.tick({s: signal(s) for s in ['BTC/USD', 'ETH/USD']})
+    assert len(b.sent) == 2  # One eligible entry preflight per worker cycle.
+    e.tick({s: signal(s) for s in ['BTC/USD', 'ETH/USD']})
     assert len(b.sent) == 4, e.message
     assert {t['symbol'] for t in store.active_trades()} == {'BTC/USD', 'ETH/USD'}
 

@@ -16,6 +16,7 @@ import requests
 from .feeds import FeedError
 from .models import Bar, Market, timestamp
 from .range_reversal import analyze, RULE_VERSION
+from .crypto_markets import SYMBOLS
 
 ET = ZoneInfo('America/New_York')
 SOURCE = 'alpaca_crypto_us'
@@ -25,7 +26,7 @@ ARCHIVE_LIMIT = 64 * 1024 * 1024
 
 class BitcoinBars:
     def __init__(self, headers, session=None, *, symbol='BTC/USD'):
-        if symbol not in ('BTC/USD', 'ETH/USD'):
+        if symbol not in SYMBOLS:
             raise ValueError('Unsupported crypto data instrument')
         self.symbol = symbol
         self.headers = dict(headers)
@@ -40,9 +41,9 @@ class BitcoinBars:
                     'start': start.isoformat(), 'end': now.isoformat(), 'sort': 'asc', 'limit': 1000},
                 timeout=(3, 10), allow_redirects=False)
         except requests.RequestException:
-            raise FeedError('Bitcoin candle connection unavailable') from None
+            raise FeedError(self.symbol + ' candle connection unavailable') from None
         if response.status_code != 200:
-            raise FeedError('Bitcoin candles could not be retrieved from Alpaca')
+            raise FeedError(self.symbol + ' candles could not be retrieved from Alpaca')
         try:
             raw = response.json()
             if (not isinstance(raw, dict) or raw.get('next_page_token')
@@ -67,7 +68,7 @@ class BitcoinBars:
             if receipt < now or (receipt-now).total_seconds() > 90:
                 raise ValueError()
         except (KeyError, TypeError, ValueError, OverflowError):
-            raise FeedError('Bitcoin candles failed identity, ordering or timestamp validation') from None
+            raise FeedError(self.symbol + ' candles failed identity, ordering or timestamp validation') from None
         return Market(self.symbol, {5: bars}, SOURCE, True, receipt)
 
 

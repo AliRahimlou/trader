@@ -1,5 +1,5 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
-import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert} from './strategy-families.mjs';
+import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert, CRYPTO_MARKETS, cryptoWatchMarkup, cryptoReviewMarkup} from './strategy-families.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -18,6 +18,10 @@ const LIVE_RECONCILE_MS=60000;
 function acceptSnapshot(next) { snapshot=next;displayClock.accept(next); }
 bindStrategyView(document,{onChange:()=>renderStrategyFamilies()});
 function renderStrategyFamilies() {
+  $('crypto-watch-content').innerHTML=cryptoWatchMarkup(snapshot,displayClock.now());
+  const reviewOpen=$('crypto-check-history')?.open;
+  $('crypto-review-content').innerHTML=cryptoReviewMarkup(snapshot);
+  if($('crypto-check-history'))$('crypto-check-history').open=!!reviewOpen;
   const open=new Set([...$('range-content').querySelectorAll('details[open]')].map(node=>node.id));
   const symbols=portfolioView(snapshot).families[1].symbols;
   $('range-content').innerHTML=(symbols.length?symbols:['BTC/USD']).map(symbol=>{
@@ -50,7 +54,7 @@ function renderStrategyControls() {
   $('run-both').disabled=busy||!p.configured||p.families.some(f=>!f.available)||p.families.every(f=>f.enabled);
   $('range-review').hidden=!p.families[1].reviewRequired;
   $('range-review').disabled=busy||!p.families[1].available;
-  if(!rangeDirty&&!strategySaving){const f=p.families[1];$('range-amount').value=f.target;$('range-btc').checked=f.symbols.includes('BTC/USD');$('range-eth').checked=f.symbols.includes('ETH/USD');}
+  if(!rangeDirty&&!strategySaving){const f=p.families[1];$('range-amount').value=f.target;for(const symbol of CRYPTO_MARKETS)$('range-'+symbol.split('/')[0].toLowerCase()).checked=f.symbols.includes(symbol);}
   $('save-range').disabled=busy||!p.configured||!rangeDirty;
   $('strategy-save-message').textContent=strategyError || (strategySaving?'Saving strategy settings…':rangeDirty?'Unsaved crypto settings. Saving does not change global Live.':'Strategy Off stops its new entries. Existing positions continue their exits.');
   const execution=snapshot.crypto_execution || {},trades=Array.isArray(execution.trades)?execution.trades:[];
@@ -101,7 +105,7 @@ function reviewStrategies(payload) {
   if(payload.range_reversal){
     if(!selected.some(f=>f.id==='range_reversal'))lines.push(...p.families[1].policy);
     lines.push(`Crypto target: ${money(payload.range_reversal.target_dollars || p.families[1].target)} per purchase. Markets: ${(payload.range_reversal.symbols || p.families[1].symbols).join(', ')}.`);
-    lines.push('BTC/USD is the video market. ETH/USD is an unvalidated adaptation. This spot route supports long entries only.');
+    lines.push('BTC/USD is the video market. Other markets are unvalidated adaptations. Each selected market may open its own purchase using shared cash. This spot route supports long entries only.');
   }
   $('strategy-dialog-policy').innerHTML=lines.map(line=>`<li>${esc(line)}</li>`).join('');
   $('strategy-dialog-error').textContent='';$('accept-strategy-policy').checked=false;$('confirm-strategy').disabled=true;$('strategy-dialog').showModal();
@@ -281,8 +285,8 @@ $('crypto-recheck').addEventListener('click',recheckCryptoIncidents);
 $('range-settings-form').addEventListener('input',()=>{rangeDirty=true;strategyError='';if(snapshot)renderStrategyControls();});
 $('range-settings-form').addEventListener('submit',event=>{
   event.preventDefault();if(!snapshot?.portfolio||strategySaving||toggling||saving)return;
-  const value=$('range-amount').value,amount=Number(value),symbols=[...($('range-btc').checked?['BTC/USD']:[]),...($('range-eth').checked?['ETH/USD']:[])];
-  if(!/^\d+(\.\d{1,2})?$/.test(value)||!Number.isFinite(amount)||amount<1||amount>1e12||!symbols.length){strategyError='Choose at least one crypto market and enter a target of $1 or more with up to two decimal places.';renderStrategyControls();return;}
+  const value=$('range-amount').value,amount=Number(value),symbols=CRYPTO_MARKETS.filter(symbol=>$('range-'+symbol.split('/')[0].toLowerCase()).checked);
+  if(!/^\d+(\.\d{1,2})?$/.test(value)||!Number.isFinite(amount)||amount<1||amount>200000||!symbols.length){strategyError='Choose at least one crypto market and enter a target from $1 to $200,000 with up to two decimal places.';renderStrategyControls();return;}
   reviewStrategies({range_reversal:{target_dollars:amount.toFixed(2),symbols,policy_version:portfolioView(snapshot).families[1].policyVersion}});
 });
 $('cancel-strategy').addEventListener('click',()=>{strategyReview=null;$('strategy-dialog').close();});

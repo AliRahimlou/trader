@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,portfolioView,globalCryptoAlert,STRATEGY_VIEW_KEY,STRATEGY_VIEW_SECTIONS} from './strategy-families.mjs';
+import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,portfolioView,globalCryptoAlert,STRATEGY_VIEW_KEY,STRATEGY_VIEW_SECTIONS,cryptoWatchMarkup,cryptoReviewMarkup} from './strategy-families.mjs';
 import {createDisplayClock} from './model.mjs';
 
 const at='2026-09-19T12:10:10+00:00',now=Date.parse(at);
@@ -49,7 +49,7 @@ test('view selection persists locally while every execution value stays unchange
     range_reversal:{enabled:true,target_dollars:'5.00',symbols:['BTC/USD'],execution_available:true}};
   const storage={getItem:key=>saved.get(key),setItem:(key,value)=>{saved.set(key,value);writes.push({key,value});}};
   const context=vm.createContext({URL,Date,createDisplayClock,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>storage}),
-    rangeFamilyView,rangeFamilyMarkup,portfolioView,document:h.document,location:{hostname:'example.test',port:''},
+    rangeFamilyView,rangeFamilyMarkup,portfolioView,cryptoWatchMarkup,cryptoReviewMarkup,document:h.document,location:{hostname:'example.test',port:''},
     fetch:(...args)=>{requests.push(args);throw Error('No network expected');}});
   vm.runInContext(source+`\nsnapshot=${JSON.stringify(initial)};globalThis.state=()=>({snapshot,dirty,saving,toggling,pendingLive});globalThis.refreshRange=renderStrategyFamilies;`,context);
   const before=JSON.stringify(context.state());
@@ -76,7 +76,7 @@ test('shipped page switches the whole strategy workspace while shared controls a
   h.element('global-crypto-alert').textContent=incident;
   bindStrategyView(h.document,{storage:()=>null});
   const stockContent=['socrates-toggle','amount','data-connections','session-review','market-overview','strategy-cards','audit','trade-results'];
-  const cryptoContent=['range-toggle','range-settings-form','range-content','crypto-execution-status','crypto-history'];
+  const cryptoContent=['range-toggle','range-settings-form','range-content','crypto-execution-status','crypto-history','crypto-watch-content','crypto-review-content'];
   const shared=['balance','live-status','status-title','strategy-run-summary','run-both','holdings','journal','global-crypto-alert'];
   for(const view of ['range_reversal','socrates','all','range_reversal','all','socrates']){
     h.select(view);
@@ -183,7 +183,7 @@ test('a current failed analysis keeps its useful data-waiting reason visible',()
 test('missing family remains an explicit waiting state',()=>{
   const view=rangeFamilyView({},now);
   assert.equal(view.state,'Waiting for analysis');assert.equal(view.currentSignal,null);
-  assert.match(rangeFamilyMarkup(view),/Waiting for the first native five-minute Bitcoin observation/);
+  assert.match(rangeFamilyMarkup(view),/Waiting for the first native five-minute BTC\/USD observation/);
 });
 test('provider text is escaped and history is bounded to the five newest observations',()=>{
   const value=snapshot(),family=value.strategy_families.range_reversal;

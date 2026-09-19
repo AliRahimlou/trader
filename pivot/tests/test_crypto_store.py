@@ -23,7 +23,7 @@ def test_invalid_amount_cannot_be_saved(tmp_path, value):
     assert s.control()['target_dollars'] == '5.00'
 
 
-@pytest.mark.parametrize('settings', [{'enabled': 'true'}, {'enabled': True}, {'symbols': []}, {'symbols': ['SOL/USD']},
+@pytest.mark.parametrize('settings', [{'enabled': 'true'}, {'enabled': True}, {'symbols': []}, {'symbols': ['DOGE/USD']},
                                      {'symbols': ['BTC/USD', 'BTC/USD']}, {'unexpected': 1}])
 def test_invalid_control_shape_rejected(tmp_path, settings):
     s = CryptoStore(tmp_path/'app.db')

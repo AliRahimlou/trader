@@ -6,8 +6,12 @@ from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 import sqlite3
+from zoneinfo import ZoneInfo
+from .crypto_markets import SYMBOLS
+from .models import timestamp
 
-SYMBOLS = ('BTC/USD', 'ETH/USD')
+DECISION_LIMIT = 12000
+NY = ZoneInfo('America/New_York')
 DEFAULT_CONTROL = {'enabled': False, 'symbols': ['BTC/USD'], 'target_dollars': '5.00',
                    'policy': None, 'account_ref': None, 'generation': 0}
 
@@ -34,6 +38,9 @@ class CryptoStore:
                     kind TEXT NOT NULL, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS crypto_incidents (id TEXT PRIMARY KEY, at TEXT NOT NULL,
                     resolved INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS crypto_decisions (id INTEGER PRIMARY KEY, day TEXT NOT NULL,
+                    symbol TEXT NOT NULL, fingerprint TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS crypto_decisions_day_symbol ON crypto_decisions(day,symbol,id);
             ''')
             db.execute('INSERT OR IGNORE INTO crypto_control VALUES(1,?)', (_json(DEFAULT_CONTROL),))
 
@@ -63,7 +70,7 @@ class CryptoStore:
             symbols = value['symbols']
             if (not isinstance(symbols, list) or not 1 <= len(symbols) <= len(SYMBOLS)
                     or any(not isinstance(s, str) or s not in SYMBOLS for s in symbols) or len(set(symbols)) != len(symbols)):
-                raise ValueError('Select Bitcoin and/or Ethereum')
+                raise ValueError('Select one or more supported crypto markets')
             try:
                 amount = Decimal(str(value['target_dollars']))
                 if not amount.is_finite() or amount < 1 or amount > 200000 or amount != amount.quantize(Decimal('.01')):
@@ -198,3 +205,60 @@ class CryptoStore:
         with self.connect() as db:
             return [self._row(row) for row in db.execute(
                 'SELECT version,body FROM crypto_trades WHERE finished=1 ORDER BY rowid DESC LIMIT ?', (min(100, max(1, int(limit))),))]
+
+    def record_decision(self, decision):
+        """Record changed live checks, not every quote refresh or reconstructed bar.
+
+        Receipt/check timestamps are evidence in the row but not change triggers.
+        A new completed candle, event, readiness, outcome or reason is a trigger.
+        """
+        fields = ('checked_at', 'symbol', 'state', 'event_id', 'direction', 'confirmation_at',
+                  'latest_bar_at', 'observed_at', 'signal_fresh', 'outcome', 'reason')
+        value = {key: decision.get(key) for key in fields}
+        if value['symbol'] not in SYMBOLS or type(value['signal_fresh']) is not bool:
+            raise ValueError('Invalid crypto decision')
+        day = timestamp(value['checked_at']).astimezone(NY).date().isoformat()
+        for key in fields:
+            if key != 'signal_fresh' and value[key] is not None:
+                if not isinstance(value[key], str):
+                    raise ValueError('Invalid crypto decision field')
+                value[key] = value[key][:1000 if key == 'reason' else 160]
+        fingerprint = _json({key: value[key] for key in fields if key not in ('checked_at', 'observed_at')})
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            previous = db.execute('SELECT fingerprint FROM crypto_decisions WHERE day=? AND symbol=? ORDER BY id DESC LIMIT 1',
+                                  (day, value['symbol'])).fetchone()
+            if previous and previous[0] == fingerprint:
+                return False
+            db.execute('INSERT INTO crypto_decisions(day,symbol,fingerprint,body) VALUES(?,?,?,?)',
+                       (day, value['symbol'], fingerprint, _json(value)))
+            db.execute('DELETE FROM crypto_decisions WHERE id IN '
+                       '(SELECT id FROM crypto_decisions ORDER BY id DESC LIMIT -1 OFFSET ?)', (DECISION_LIMIT,))
+        return True
+
+    def decision_review(self, now=None):
+        day = timestamp(now or datetime.now(timezone.utc)).astimezone(NY).date().isoformat()
+        with self.connect() as db:
+            rows = [json.loads(row[0]) for row in db.execute('SELECT body FROM crypto_decisions WHERE day=? ORDER BY id DESC', (day,))]
+            trades = [json.loads(row[0]) for row in db.execute('SELECT body FROM crypto_trades')]
+        latest, longs, shorts = {}, set(), set()
+        for row in rows:
+            latest.setdefault(row['symbol'], row)
+            if row['signal_fresh'] and row.get('event_id'):
+                if row.get('direction') == 'long': longs.add(row['event_id'])
+                if row.get('direction') == 'short': shorts.add(row['event_id'])
+        attempts = fills = 0
+        for trade in trades:
+            try:
+                if timestamp(trade['created_at']).astimezone(NY).date().isoformat() != day:
+                    continue
+                entry = trade.get('ops', {}).get('entry', {})
+                attempts += entry.get('state') in ('attempted', 'rejected')
+                fills += Decimal(str(entry.get('last_seen', {}).get('filled_qty', '0'))) > 0
+            except (KeyError, ValueError, TypeError, InvalidOperation):
+                continue
+        return {'status': 'available', 'day': day, 'scope': 'recorded_live_checks_only',
+                'detail': 'Counts cover retained live worker checks only. Reconstructed chart history is not counted as checked live.',
+                'checks_recorded': len(rows), 'fresh_setups': {'total': len(longs | shorts), 'long': len(longs), 'short': len(shorts)},
+                'order_attempts': attempts, 'filled_entries': fills, 'latest_by_symbol': latest,
+                'recent_checks': rows[:20], 'retention_limit': DECISION_LIMIT}

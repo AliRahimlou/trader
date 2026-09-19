@@ -161,6 +161,58 @@ def test_missing_range_or_excursion_candle_blocks_all_current_evidence(index):
     assert 'gap' in result['detail']
 
 
+@pytest.mark.parametrize('index,in_opening_range', [(0, True), (47, True), (48, False)])
+def test_gap_diagnostics_identify_the_missing_completed_slot_without_authorizing_a_signal(index, in_opening_range):
+    market, now, provenance = sample([111, 105, 100])
+    missing = market.bars[5].pop(index).end
+    result = analyze(market, now, provenance=provenance)
+    assert result['coverage'] == {
+        'expected_completed_bars': 51, 'received_completed_bars': 50,
+        'missing_count': 1, 'missing_at': [missing.isoformat()],
+        'missing_timestamps_truncated': False,
+        'opening_range_missing_count': int(in_opening_range), 'publication_wait': False,
+    }
+    assert result['state'] == 'DATA_WAITING'
+    assert result['signal_ready'] is False and result['current_event'] is None
+
+
+def test_gap_diagnostics_bound_timestamp_output_without_truncating_counts():
+    market, now, provenance = sample([111, 105])
+    missing = [bar.end.isoformat() for bar in market.bars[5][:20]]
+    market.bars[5] = market.bars[5][20:]
+    result = analyze(market, now, provenance=provenance)
+    coverage = result['coverage']
+    assert coverage['expected_completed_bars'] == 50
+    assert coverage['received_completed_bars'] == 30
+    assert coverage['missing_count'] == coverage['opening_range_missing_count'] == 20
+    assert coverage['missing_at'] == missing[:12]
+    assert coverage['missing_timestamps_truncated'] is True
+    assert result['state'] == 'DATA_WAITING' and result['signal_ready'] is False
+
+
+def test_complete_day_diagnostics_exclude_unclosed_future_candles():
+    market, now, provenance = sample([100] * (24 * 12 - 49))
+    market.bars[5].append(candle(start('2026-09-20'), 130, 131, 90))
+    result = analyze(market, now, provenance=provenance)
+    assert result['coverage'] == {
+        'expected_completed_bars': 287, 'received_completed_bars': 287,
+        'missing_count': 0, 'missing_at': [], 'missing_timestamps_truncated': False,
+        'opening_range_missing_count': 0, 'publication_wait': False,
+    }
+    assert result['state'] == 'WATCHING' and result['observations'] == []
+
+
+def test_forming_range_diagnostics_do_not_count_future_opening_slots_as_gaps():
+    market, _, provenance = sample()
+    market.bars[5] = market.bars[5][:12]
+    now = market.bars[5][-1].end + timedelta(seconds=10)
+    market.observed_at = now
+    result = analyze(market, now, provenance=provenance)
+    assert result['state'] == 'RANGE_FORMING'
+    assert result['coverage']['expected_completed_bars'] == result['coverage']['received_completed_bars'] == 12
+    assert result['coverage']['missing_count'] == result['coverage']['opening_range_missing_count'] == 0
+
+
 @pytest.mark.parametrize('kind', ['duplicate', 'unordered', 'off_grid', 'wrong_frame'])
 def test_invalid_timestamp_or_frame_cannot_generate_observation(kind):
     market, now, provenance = sample([111, 105])
@@ -205,9 +257,19 @@ def test_publication_grace_only_allows_latest_completed_candle_to_be_missing():
     market, now, provenance = sample([111])
     now = market.bars[5][-1].end + timedelta(minutes=5, seconds=90)
     market.observed_at = now
-    assert analyze(market, now, provenance=provenance)['state'] == 'OUTSIDE_RANGE'
+    result = analyze(market, now, provenance=provenance)
+    assert result['state'] == 'OUTSIDE_RANGE'
+    assert result['coverage']['publication_wait'] is True
+    assert result['coverage']['expected_completed_bars'] == 50
+    assert result['coverage']['received_completed_bars'] == 49
+    assert result['coverage']['missing_count'] == 1
+    assert result['coverage']['opening_range_missing_count'] == 0
+    assert result['coverage']['missing_at'] == [(now - timedelta(seconds=90)).isoformat()]
     market.observed_at = now + timedelta(seconds=1)
-    assert analyze(market, now + timedelta(seconds=1), provenance=provenance)['state'] == 'DATA_WAITING'
+    expired = analyze(market, now + timedelta(seconds=1), provenance=provenance)
+    assert expired['state'] == 'DATA_WAITING'
+    assert expired['coverage']['publication_wait'] is False
+    assert expired['coverage']['missing_at'] == result['coverage']['missing_at']
 
 
 def test_completed_candle_cannot_postdate_its_provider_receipt():

@@ -70,7 +70,7 @@ def test_possible_truncation_of_open_orders_fails_closed():
 
 
 @pytest.mark.parametrize('mutate', [
-    lambda p: p.update(symbol='SOL/USD'), lambda p: p.update(side='short'),
+    lambda p: p.update(symbol='DOGE/USD'), lambda p: p.update(side='short'),
     lambda p: p.update(type='market'), lambda p: p.update(time_in_force='day'),
     lambda p: p.update(qty='NaN'), lambda p: p.update(qty='0'),
     lambda p: p.update(order_class='bracket'), lambda p: p.update(notional='5'),

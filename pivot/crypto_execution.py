@@ -25,8 +25,9 @@ POLICY = {'version': POLICY_VERSION, 'summary': [
     'The first range is New York midnight plus four elapsed hours, built from 48 native five-minute candles. This is an explicit app convention.',
     'Buy after a completed close below the range followed by a later close strictly inside. Use the first outside candle low as stop and the signal close plus twice that distance as target.',
     'Alpaca spot supports long entries and sells of owned crypto only. Upper-range short setups cannot open positions here.',
-    'Bitcoin is demonstrated in the recording. Ethereum is an optional additional market, not a creator-validated result.',
-    'Each enabled market may hold one independent position. Each fresh entry targets the saved dollars, never above that amount; partial fills can be smaller.',
+    'Bitcoin is demonstrated in the recording. Other selected markets are optional adaptations, not creator-validated results.',
+    'A maximum of two crypto positions may be active, with at most one per selected market. This execution capacity bounds broker workload; it is not a signal rule. Each fresh entry targets the saved dollars, never above that amount; partial fills can be smaller.',
+    'At most one eligible new crypto entry receives broker checks per worker cycle, rotating across selected markets. Existing positions keep their exit checks and signal deadlines are not extended.',
     'Use immediate limit entries, no more than 0.1% above the confirmation price, current bid/ask, and shared account cash. Fees, spread and execution allowance must leave a positive net target.',
     'Published tier-one taker fees are 0.25% per side; buy fees reduce acquired crypto. Exits sell net owned quantity, so dollar proceeds change with price and fees.',
     'A broker stop-limit has a limit 1% below the stop. It may remain unfilled through a gap. The worker checks targets and cancellation-safe market fallback every 10 seconds while connected; neither fill price nor profit is guaranteed.',
@@ -40,6 +41,7 @@ FEE = Decimal('.0025')
 EXIT_ALLOWANCE = Decimal('.001')
 MAX_ENTRY_DRIFT = Decimal('.001')
 MAX_SPREAD = Decimal('.005')
+MAX_ACTIVE_CRYPTO_TRADES = 2
 MAX_EXIT_CHILD_NOTIONAL = Decimal('190000')  # Buffer below Alpaca's published $200k per-order cap.
 ZERO = Decimal('0')
 NY = ZoneInfo('America/New_York')
@@ -157,6 +159,9 @@ class CryptoRangeExecutor:
         self.entry_gate, self.revision = None, None
         self.message, self.last_at = 'Crypto live trading is off.', None
         self.market_messages = {}
+        self.decision_error = None
+        self.last_preflight_symbol = None
+        self.entry_preflights_remaining = 0
 
     def enabled(self):
         control, main = self.store.control(), self.main_store.control()
@@ -177,7 +182,52 @@ class CryptoRangeExecutor:
                 'message': self.message, 'at': self.last_at, 'markets': deepcopy(self.market_messages),
                 'trades': [{k: t.get(k) for k in visible if k in t} for t in trades],
                 'history': [{k: t.get(k) for k in (*visible, 'completed_at') if k in t} for t in self.store.history(10)],
+                'decision_review': self._decision_review(),
+                'capacity': {'max_active': MAX_ACTIVE_CRYPTO_TRADES, 'active_count': len(trades)},
                 'incidents': self.store.incidents(), 'execution_account_mode': 'live', 'route': 'alpaca_spot_long_only'}
+
+    def _decision_review(self):
+        try:
+            review = self.store.decision_review(self.now())
+            if self.decision_error:
+                review.update(status='degraded', detail=self.decision_error)
+            return review
+        except Exception:
+            return {'status': 'unavailable', 'scope': 'recorded_live_checks_only',
+                    'detail': 'Saved crypto decision checks could not be read. Current execution remains separate.'}
+
+    def _record_decisions(self, analyses, decisions):
+        """Audit observations only; never changes an order or trading permission."""
+        try:
+            for symbol, (phase, reason, checked_at) in decisions.items():
+                analysis = (analyses or {}).get(symbol) or {}
+                event = analysis.get('current_event') or {}
+                try:
+                    checked_signal(analysis, symbol, checked_at)
+                    signal_fresh = True
+                except (CryptoWaiting, ValueError, TypeError):
+                    signal_fresh = False
+                outcome = phase
+                if phase == 'entry_checked':
+                    outcome = 'unsupported_direction' if signal_fresh and event.get('direction') == 'short' else 'waiting'
+                    if isinstance(event.get('event_id'), str):
+                        identity = sha256((POLICY_VERSION + '|' + symbol + '|' + event['event_id']).encode()).hexdigest()[:24]
+                        trade = self.store.get_trade(identity)
+                        if trade:
+                            entry = trade.get('ops', {}).get('entry', {})
+                            seen = entry.get('last_seen') or {}
+                            filled = number(seen.get('filled_qty', '0'))
+                            outcome = ('closed' if filled > 0 else 'entry_rejected' if seen.get('status') == 'rejected'
+                                       else 'no_fill' if seen.get('status') in TERMINAL else 'entry_skipped') if trade.get('stage') == 'finished' else (
+                                       'entry_filled' if filled > 0 else 'order_attempted' if entry.get('state') == 'attempted' else 'entry_prepared')
+                self.store.record_decision({'checked_at': iso(checked_at), 'symbol': symbol,
+                    'state': analysis.get('state') or 'DATA_WAITING', 'event_id': event.get('event_id'),
+                    'direction': event.get('direction'), 'confirmation_at': event.get('confirmation_at'),
+                    'latest_bar_at': analysis.get('latest_bar_at'), 'observed_at': analysis.get('observed_at'),
+                    'signal_fresh': signal_fresh, 'outcome': outcome, 'reason': reason})
+            self.decision_error = None
+        except Exception:
+            self.decision_error = 'Some crypto decision checks could not be saved. Earlier records remain historical; order management continues.'
 
     def recover_incidents(self):
         """Read broker proof and resolve flat, terminal incidents without trading.
@@ -274,9 +324,15 @@ class CryptoRangeExecutor:
     def tick(self, analyses):
         if not self.tick_lock.acquire(blocking=False):
             return
+        decisions = {}
+        self.entry_preflights_remaining = 1
         try:
             trades = self.store.active_trades()
             for trade in trades:
+                checked_at = self.now()
+                # Some reconciliation paths deliberately return without changing
+                # status; never attribute another market's earlier message here.
+                self.message = f'Reconciling {trade["symbol"]} crypto position and its saved orders.'
                 try:
                     self._manage(trade)
                 except (CryptoWaiting, FeedError, ValueError, ConcurrentChange) as exc:
@@ -285,15 +341,26 @@ class CryptoRangeExecutor:
                 except Exception:
                     self.message = 'Crypto order handling needs attention; reconciling saved broker state.'
                     self._incident(trade, 'management_error', self.message)
+                self.market_messages[trade['symbol']] = self.message
+                decisions[trade['symbol']] = ('management', self.message, checked_at)
             if not self.enabled():
                 self.message = 'Crypto entries are off. Existing crypto positions continue their exits.'
+                for symbol in self.store.control()['symbols']:
+                    decisions.setdefault(symbol, ('paused', self.message, self.now()))
                 return
             if self.store.incidents():
                 self.message = 'Crypto new entries are paused for a recorded incident. Existing positions continue their exits.'
+                for symbol in self.store.control()['symbols']:
+                    decisions.setdefault(symbol, ('incident_paused', self.message, self.now()))
                 return
-            for symbol in self.store.control()['symbols']:
+            symbols = self.store.control()['symbols']
+            if self.last_preflight_symbol in symbols:
+                start = symbols.index(self.last_preflight_symbol) + 1
+                symbols = symbols[start:] + symbols[:start]
+            for symbol in symbols:
                 if self.store.active_trade(symbol):
                     continue
+                checked_at = self.now()
                 try:
                     with self.entry_gate.admit() if self.entry_gate else nullcontext():
                         with self.portfolio.admit():
@@ -306,10 +373,12 @@ class CryptoRangeExecutor:
                     self.message = 'Crypto entry checks are unavailable; no additional order will be submitted.'
                     self.market_messages[symbol] = self.message
                     self.store.incident('entry_check_error:' + symbol, self.message, symbol=symbol)
+                decisions[symbol] = ('entry_checked', self.message, checked_at)
         finally:
             try:
                 self._pending_deadlines()
             finally:
+                self._record_decisions(analyses, decisions)
                 self.last_at = iso(self.now())
                 self.tick_lock.release()
 
@@ -339,6 +408,15 @@ class CryptoRangeExecutor:
         identity = sha256((POLICY_VERSION + '|' + symbol + '|' + event['event_id']).encode()).hexdigest()[:24]
         if self.store.trade_exists(identity):
             raise CryptoWaiting('This range-reversal event has already been handled; waiting for a new excursion')
+        # These checks execute under the shared portfolio admission lock and
+        # before any broker read. Uncertain/pending lifecycles occupy capacity;
+        # their management above is never limited by this new-entry budget.
+        if len(self.store.active_trades()) >= MAX_ACTIVE_CRYPTO_TRADES:
+            raise CryptoWaiting('Crypto execution capacity is full (two active positions); waiting for an existing position to finish.')
+        if self.entry_preflights_remaining <= 0:
+            raise CryptoWaiting('Waiting for next broker-check slot; the original signal deadline still applies.')
+        self.entry_preflights_remaining -= 1
+        self.last_preflight_symbol = symbol
         authorization = self._authorization()
         control = authorization['crypto']
         account = self.broker.account()

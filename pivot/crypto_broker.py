@@ -7,11 +7,11 @@ import requests
 from .broker import BrokerRejected
 from .feeds import FeedError
 from .crypto_store import SYMBOLS
+from .crypto_markets import ALIASES
 
 
 def canonical_symbol(value):
-    aliases = {'BTCUSD': 'BTC/USD', 'ETHUSD': 'ETH/USD'}
-    return aliases.get(value, value)
+    return ALIASES.get(value, value)
 
 
 class CryptoBroker:

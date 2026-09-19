@@ -75,3 +75,22 @@ def test_reader_uses_separate_session_and_no_broker_interface(tmp_path):
     assert app.range_watch.reader.headers == feeds.alpaca_headers
     assert app.range_watch.reader.headers is not feeds.alpaca_headers
     assert not hasattr(app.range_watch, 'broker')
+
+
+def test_one_extra_market_constructor_failure_does_not_disable_other_markets(tmp_path, monkeypatch):
+    from pivot.range_watch import RangeWatch
+    from pivot.crypto_markets import SYMBOLS
+    def constructor(reader, path):
+        if reader.symbol == 'SOL/USD':
+            raise RuntimeError('PRIVATE provider failure')
+        return RangeWatch(reader, path)
+    monkeypatch.setattr('pivot.range_watch.RangeWatch', constructor)
+    app = Service(ReadOnlyFeeds({}), Store(tmp_path/'state.db'))
+    assert app.range_watch is not None and app.range_watch_error is None
+    assert set(app.extra_range_watches) == set(SYMBOLS) - {'BTC/USD', 'SOL/USD'}
+    snapshot = app.range_analyses()
+    assert set(snapshot) == set(SYMBOLS)
+    assert 'SOL/USD data worker could not be initialized' in snapshot['SOL/USD']['detail']
+    assert 'could not be initialized' not in snapshot['BTC/USD']['detail']
+    assert 'PRIVATE' not in str(snapshot)
+    assert app.crypto_store.control()['symbols'] == ['BTC/USD']
