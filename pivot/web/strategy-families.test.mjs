@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,portfolioView,STRATEGY_VIEW_KEY} from './strategy-families.mjs';
+import {createDisplayClock} from './model.mjs';
 
 const at='2026-09-19T12:10:10+00:00',now=Date.parse(at);
 function snapshot(){return {live_enabled:true,settings:{target_dollars:'5.00'},strategy_families:{range_reversal:{
@@ -26,7 +27,7 @@ test('view selection persists locally while every execution value stays unchange
     .replace(/^import .*?;\n/gm,'').replace('refresh();setInterval(refresh,10000);','');
   const h=dom(),writes=[],requests=[],saved=new Map(),initial=snapshot();
   const storage={getItem:key=>saved.get(key),setItem:(key,value)=>{saved.set(key,value);writes.push({key,value});}};
-  const context=vm.createContext({URL,Date,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>storage}),
+  const context=vm.createContext({URL,Date,createDisplayClock,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>storage}),
     rangeFamilyView,rangeFamilyMarkup,portfolioView,document:h.document,location:{hostname:'example.test',port:''},
     fetch:(...args)=>{requests.push(args);throw Error('No network expected');}});
   vm.runInContext(source+`\nsnapshot=${JSON.stringify(initial)};globalThis.state=()=>({snapshot,dirty,saving,toggling,pendingLive});`,context);
@@ -43,6 +44,17 @@ test('view selection persists locally while every execution value stays unchange
   assert.equal(requests.length,0);
   assert.deepEqual(writes.map(row=>row.key),Array(3).fill(STRATEGY_VIEW_KEY));
   assert.equal(saved.get(STRATEGY_VIEW_KEY),'socrates');
+});
+test('server display time fixes client skew while Range observations still expire',()=>{
+  let elapsed=0;const state=snapshot(),clock=createDisplayClock({wallNow:()=>now-700,elapsedNow:()=>elapsed});
+  assert.equal(rangeFamilyView(state,clock.now()).current,false);
+  clock.accept({server_at:at});assert.equal(rangeFamilyView(state,clock.now()).current,true);
+  elapsed=90001;assert.equal(rangeFamilyView(state,clock.now()).state,'Analysis out of date');
+});
+test('Range evidence genuinely in the future relative to server time remains rejected',()=>{
+  const state=snapshot(),clock=createDisplayClock({wallNow:()=>now+3600000,elapsedNow:()=>0});
+  clock.accept({server_at:at});state.strategy_families.range_reversal.observed_at=new Date(now+1000).toISOString();
+  assert.equal(rangeFamilyView(state,clock.now()).current,false);
 });
 test('unavailable storage still permits local switching without affecting live controls',()=>{
   const h=dom();

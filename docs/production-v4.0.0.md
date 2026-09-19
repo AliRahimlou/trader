@@ -1,5 +1,7 @@
 # Version 4.0.0: independent live strategy engines
 
+**4.0.1 display follow-up:** hosted verification found that small browser/server clock differences could mark freshly generated crypto analysis as out of date. Snapshots now include a host timestamp; the interface advances that clock with elapsed time for display freshness. Future or stale evidence relative to the host still fails. Socrates' control card also reports a verified closed market before entry-only VIX waits. Broker execution rules and saved permissions are unchanged. The follow-up passed 1,657 Python tests, 110 interface tests and the production build.
+
 The previous release added a second analysis view but could not execute its trades. This release supplies a separate Alpaca crypto order engine, persistent strategy controls, and shared account coordination. Socrates remains its own QQQ engine. No discretionary trading rule or real order is invented by changing views.
 
 ## Controls and migration

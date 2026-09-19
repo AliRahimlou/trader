@@ -1,7 +1,17 @@
 export const money = value => value !== null && value !== undefined && Number.isFinite(Number(value)) ? new Intl.NumberFormat('en-US', {style:'currency',currency:'USD'}).format(Number(value)) : '—';
 export const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 export function age(at, now=Date.now()) { const ms = now-Date.parse(at); return Number.isFinite(ms) && ms >= -5000 ? Math.max(ms,0)/1000 : Infinity; }
-export function ago(at) { const seconds=age(at); return !Number.isFinite(seconds) ? 'Not updated' : seconds<60 ? `${Math.floor(seconds)}s ago` : `${Math.floor(seconds/60)}m ago`; }
+export function ago(at, now=Date.now()) { const seconds=age(at,now); return !Number.isFinite(seconds) ? 'Not updated' : seconds<60 ? `${Math.floor(seconds)}s ago` : `${Math.floor(seconds/60)}m ago`; }
+export function createDisplayClock({wallNow=()=>Date.now(),elapsedNow=()=>globalThis.performance?.now?.() ?? Date.now()}={}) {
+  let anchor=null;
+  return {
+    accept(snapshot) {
+      const serverAt=typeof snapshot?.server_at==='string'?Date.parse(snapshot.server_at):NaN;
+      anchor=Number.isFinite(serverAt)?{serverAt,receivedAt:elapsedNow()}:null;
+    },
+    now() { return anchor?anchor.serverAt+Math.max(0,elapsedNow()-anchor.receivedAt):wallNow(); },
+  };
+}
 export function sizeHint(value) { return `Target purchase: ${money(value)}. Planned amount must be within 1% below the target. Unsupported quantities are skipped; actual fills may differ.`; }
 export function vixStatus(vix, now=Date.now()) {
   const verification=vix?.verification || {};

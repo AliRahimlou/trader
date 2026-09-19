@@ -1,8 +1,9 @@
-import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview} from './model.mjs';
+import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
 import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit} from './strategy-families.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
+const displayClock=createDisplayClock();
 let snapshot=null, dirty=false, saving=false, fetching=false, generation=0, saveError="", toggling=false, liveError='';
 let pendingLive=null;
 let familyConnectionUnavailable=false;
@@ -14,12 +15,13 @@ function permissionFingerprint() {
   return JSON.stringify({version:snapshot?.execution_policy?.version,globalOn:p.globalOn,families:p.families});
 }
 const LIVE_RECONCILE_MS=60000;
+function acceptSnapshot(next) { snapshot=next;displayClock.accept(next); }
 bindStrategyView(document,{onChange:()=>renderStrategyFamilies()});
 function renderStrategyFamilies() {
   const open=new Set([...$('range-content').querySelectorAll('details[open]')].map(node=>node.id));
   const symbols=portfolioView(snapshot).families[1].symbols;
   $('range-content').innerHTML=(symbols.length?symbols:['BTC/USD']).map(symbol=>{
-    const view=rangeFamilyView(snapshot,Date.now(),symbol);
+    const view=rangeFamilyView(snapshot,displayClock.now(),symbol);
     if(familyConnectionUnavailable)Object.assign(view,{current:false,currentSignal:null,state:'App connection unavailable',
       detail:'Reconnecting to verify current observations. Saved analysis cannot authorize an entry.'});
     return rangeFamilyMarkup(view);
@@ -43,7 +45,7 @@ function renderStrategyControls() {
     $(prefix+'-toggle').textContent=f.enabled?'Turn strategy Off':'Enable strategy';
     $(prefix+'-toggle').disabled=busy||!p.configured||(!f.enabled&&!f.available);
     $(prefix+'-run-detail').textContent=`${money(f.target)} per purchase · ${f.symbols.join(', ')}. `+
-      (f.id==='socrates'?(snapshot.execution?.message || ''):(snapshot.crypto_execution?.message || 'Waiting for execution checks.'));
+      (f.id==='socrates'?appStatus(snapshot,displayClock.now()).text:(snapshot.crypto_execution?.message || 'Waiting for execution checks.'));
   }
   $('run-both').disabled=busy||!p.configured||p.families.some(f=>!f.available)||p.families.every(f=>f.enabled);
   $('range-review').hidden=!p.families[1].reviewRequired;
@@ -75,7 +77,7 @@ async function recheckCryptoIncidents() {
     if(!next.portfolio || typeof next.live_enabled!=='boolean' || !Array.isArray(next.crypto_execution?.incidents))throw Error('The recheck response was incomplete. Refreshing incident status.');
     const proofMessage=typeof next.crypto_reconciliation?.message==='string'?next.crypto_reconciliation.message:next.crypto_execution.message || '';
     if(version===generation){
-      generation++;snapshot=next;familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);
+      generation++;acceptSnapshot(next);familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);
       cryptoRecheckCompleted=true;cryptoRecheckMessage=proofMessage;
     }else cryptoRecheckMessage=`${proofMessage?proofMessage+' ':''}Refreshing the current incident list.`;
   }catch(error){cryptoRecheckMessage=error.name==='TimeoutError'?'Recheck result is uncertain. Refreshing status; no automatic retry will be sent.':error.message;}
@@ -111,7 +113,7 @@ async function changeStrategies(payload) {
   try{
     const response=await fetch(new URL('strategies',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'settings'},body:JSON.stringify(payload),signal:AbortSignal.timeout(30000)});
     const next=await response.json();if(!response.ok)throw Error(next.detail || 'Could not save strategy settings');
-    snapshot=next;reconcileStrategies(next);if(pendingStrategy)throw Error('Strategy settings are not yet confirmed. Checking the saved state.');
+    acceptSnapshot(next);reconcileStrategies(next);if(pendingStrategy)throw Error('Strategy settings are not yet confirmed. Checking the saved state.');
   }catch(error){strategyError=error.name==='TimeoutError'?'The strategy update result is uncertain. Checking the saved settings before retrying.':error.message;$('strategy-dialog-error').textContent=strategyError;}
   finally{strategySaving=false;$('cancel-strategy').disabled=false;$('confirm-strategy').disabled=!$('accept-strategy-policy').checked;render();refresh();}
 }
@@ -119,32 +121,32 @@ function formSettings() { return {sizing_mode:'target',target_dollars:$('amount'
 function formChanged() {
   const settings=formSettings();
   $('size-explanation').textContent=sizeHint(settings.target_dollars);
-  const error=settingsError(settings,snapshot);
+  const error=settingsError(settings,snapshot,displayClock.now());
   $('save-size').disabled=saving || !dirty || !!error;
   if (dirty && !saving) $('save-message').textContent=saveError || error || 'Unsaved change · does not enable real trading.';
 }
 function render() {
-  const s=snapshot; if(!s)return;
+  const s=snapshot; if(!s)return;const now=displayClock.now();
   renderStrategyFamilies();
   renderStrategyControls();
   $('runtime-status').textContent=s.hosting?.message || 'Checking where the app is running…';
-  const release=releaseStatus(s);
+  const release=releaseStatus(s,now);
   $('installed-version').textContent=release.label;
   $('installed-version').title=release.revision || '';
   $('deployment-status').textContent=release.detail;
   document.querySelector('.release-badge').dataset.state=release.tone;
-  const stale=age(s.account_at)>60 || !!s.account_error;
+  const stale=age(s.account_at,now)>60 || !!s.account_error;
   $('balance').textContent=money(s.account?.equity);
   $('account-mode').textContent=s.account ? `${s.account.mode} account · ${s.live_enabled?'execution on':'execution off'}` : '';
   const change=Number(s.account?.equity)-Number(s.account?.last_equity);
   $('day-change').textContent=s.account ? `${change>=0?'+':''}${money(change)} since previous close` : 'Waiting for account data';
   $('cash').textContent=`Cash ${money(s.account?.cash)}`;
   $('buying-power').textContent=`Buying power ${money(s.account?.buying_power)}`;
-  $('account-updated').textContent=ago(s.account_at);
+  $('account-updated').textContent=ago(s.account_at,now);
   $('account-warning').hidden=!stale;
   $('account-warning').textContent=s.account_error || 'Account information is not current yet. Amounts shown may be out of date.';
-  $('analysis-updated').textContent=ago(s.analysis_at);
-  const status=portfolioStatus(s,appStatus(s)), vixDisplay=vixStatus(s.data_health?.vix);
+  $('analysis-updated').textContent=ago(s.analysis_at,now);
+  const status=portfolioStatus(s,appStatus(s,now)), vixDisplay=vixStatus(s.data_health?.vix,now);
   $('status-title').textContent=status.title;
   $('live-status').innerHTML=`Live money <strong>${s.live_enabled?'On':'Off'}</strong><span class="switch" aria-hidden="true"></span>`;
   $('live-status').classList.toggle('is-on',s.live_enabled);
@@ -152,7 +154,7 @@ function render() {
   $('live-status').setAttribute('aria-label', s.live_enabled?'Global live money on. Turn off all new entries':'Global live money off. Review enabled strategies and turn on');
   $('live-status').title='Controls new entries for all enabled strategies. Existing positions continue their exits.';
   $('status-text').textContent=liveError || status.text;
-  const operations=operationStatus(s), session=sessionReview(s);
+  const operations=operationStatus(s,now), session=sessionReview(s);
   if(!s.portfolio && operations.workerLabel==='Needs attention' && !s.execution?.trade){
     $('status-title').textContent='App worker needs attention';
     $('status-text').textContent=operations.workerDetail+'. Data and order progress must be checked.';
@@ -164,7 +166,7 @@ function render() {
   const sessionOpen=$('session-review').querySelector('details')?.open;
   $('session-review').innerHTML=`<div class="section-heading"><h2>Socrates · ${session.orders?.confirmed_entries?'today’s trade checks':'why no trade today?'}</h2><span> ${esc(session.day || 'Waiting for records')} · ET</span></div><p class="help">${esc(session.detail)}</p>${session.available?`<div class="session-counts"><div><strong>${esc(session.events)}</strong><span>Level events</span></div><div><strong>${esc(session.orders.submission_attempts || 0)}</strong><span>Entry attempts</span></div><div><strong>${esc(session.orders.confirmed_entries || 0)}</strong><span>Confirmed entries</span></div></div><details class="evidence"><summary>See checks and blockers</summary><p>${esc(session.checkpoints)} recorded checkpoints. Passing a signal check does not authorize an order. This summary refreshes every 30 seconds.</p>${session.stages.map(row=>`<p><b>${esc(row.label)}</b><span>${esc(row.count)} distinct events passed</span></p>`).join('')}${session.blockers.map(row=>`<p><b>${esc(row.scope)} · ${esc(row.name)}</b><span>Latest recorded result for ${esc(row.count)} events</span></p>`).join('')}<h3>Recent observations</h3>${session.checks.map(row=>`<p><b>${esc(new Date(row.at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}</b><span>${esc(row.blocker)}</span></p>`).join('') || '<p>No analysis recorded today.</p>'}</details>`:''}`;
   if(sessionOpen && $('session-review').querySelector('details'))$('session-review').querySelector('details').open=true;
-  const views=strategyViews(s), leaders=leaderOverview(s), overview=marketOverview(s);
+  const views=strategyViews(s,now), leaders=leaderOverview(s,now), overview=marketOverview(s,now);
   const overviewOpen=$('market-overview').querySelector('details')?.open;
   $('market-overview').innerHTML=`<article class="card"><div class="section-heading"><h3>Nasdaq overview</h3><span>Broader price structure</span></div><div class="context-frames">${overview.frames.map(frame=>`<div><span class="help">${esc(frame.label)}</span><strong>${esc(frame.value)}</strong><span class="help">${frame.latestAt?`Candle ${esc(new Date(frame.latestAt).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))}`:'Waiting for candles'}</span></div>`).join('')}</div><p class="help">${esc(overview.detail)}</p><details class="evidence"><summary>How to read the overview</summary><p>${esc(overview.explanation)}</p>${overview.frames.map(frame=>`<p><b>${esc(frame.label)}</b><span>${esc(frame.detail)}</span></p>`).join('')}</details></article>`;
   if(overviewOpen)$('market-overview').querySelector('details').open=true;
@@ -179,15 +181,15 @@ function render() {
     $('amount').value=s.settings.target_dollars;
   }
   const health=s.data_health, stocks=health?.stocks, vix=health?.vix, quote=s.quote_health;
-  const logging=loggingStatus(s);
-  const healthStale=age(stocks?.checked_at)>90;
+  const logging=loggingStatus(s,now);
+  const healthStale=age(stocks?.checked_at,now)>90;
   const current=stocks?.instruments.filter(i=>i.status==='current').length || 0;
   const detailOpen=$('data-connections').querySelector('details')?.open;
   const candleTime=value=>value?new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'Missing';
   $('data-connections').innerHTML=`<div><span>Account & orders</span><b>${stale?'Updating':'Connected'}</b></div>
     <div><span>Market clock</span><b>${stale?'Updating':s.clock?.is_open?'Open':'Closed'}</b></div>
-    <div><span>QQQ bid / ask</span><b>${quote?.status==='current'&&age(quote.latest_at)<=30?'Current':quote?.status==='market_closed'?'Market closed':'Waiting'}</b></div>
-    ${quote?.latest_at?`<p class="help">${money(quote.bid)} / ${money(quote.ask)} · ${ago(quote.latest_at)}</p>`:''}
+    <div><span>QQQ bid / ask</span><b>${quote?.status==='current'&&age(quote.latest_at,now)<=30?'Current':quote?.status==='market_closed'?'Market closed':'Waiting'}</b></div>
+    ${quote?.latest_at?`<p class="help">${money(quote.bid)} / ${money(quote.ask)} · ${ago(quote.latest_at,now)}</p>`:''}
     <div><span>Stock candles</span><b>${healthStale?'Updating':`${current}/8 current`}</b></div>
     <p class="help">${esc(stocks?.coverage || 'Checking coverage')} · $0 data budget</p>
     <div><span>Actual VIX</span><b class="${vixDisplay.tone}">${vixDisplay.label}</b></div>
@@ -211,7 +213,7 @@ function render() {
         ${vix?.verification?.history_received_at?`<p class="help">History received: ${esc(candleTime(vix.verification.history_received_at))}</p>`:''}
       </article>
       <article><b>Five-minute validation history</b><p>${esc(({captured:'Saved for validation',incomplete:'Incomplete',collecting:'Collecting',waiting:'Waiting',unavailable:'Unavailable'})[s.native_history?.status] || 'Not collected')}</p><p class="help">${esc(s.native_history?.detail || 'Separate historical evidence has not been collected.')}</p><p class="help">This is historical research data, not a continuously updated five-minute trading feed.</p></article>
-      <p class="help">Last stock refresh: ${stocks?.fetch_seconds!=null?stocks.fetch_seconds.toFixed(1)+'s':'—'} · ${esc(stocks?.refresh_mode || 'starting')}. Updated ${ago(stocks?.checked_at)}.</p>
+      <p class="help">Last stock refresh: ${stocks?.fetch_seconds!=null?stocks.fetch_seconds.toFixed(1)+'s':'—'} · ${esc(stocks?.refresh_mode || 'starting')}. Updated ${ago(stocks?.checked_at,now)}.</p>
       <p class="help">${esc(stocks?.frame_policy || '')}</p>
     </details>`+s.data_errors.filter(e=>!e.startsWith('VIX:')).map(e=>`<p class="help error">${esc(e)}</p>`).join('');
   if(detailOpen)$('data-connections').querySelector('details').open=true;
@@ -221,7 +223,7 @@ function render() {
 }
 async function refresh() {
   if(fetching||saving||toggling||strategySaving)return; fetching=true; const version=generation;
-  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling&&!strategySaving){snapshot=next;familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);render();}}
+  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling&&!strategySaving){acceptSnapshot(next);familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);render();}}
   catch { if(version!==generation||saving||toggling||strategySaving)return; familyConnectionUnavailable=true;renderStrategyFamilies();if(snapshot)renderStrategyControls(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
   finally{fetching=false;if(version!==generation&&!saving&&!toggling&&!strategySaving)refresh();}
 }
@@ -233,7 +235,7 @@ async function changeLive(enabled) {
     const response=await fetch(new URL('live',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'live-control'},body:JSON.stringify({enabled,policy_version:snapshot.execution_policy.version}),signal:AbortSignal.timeout(30000)});
     const result=await response.json();
     if(!response.ok)throw Error(result.detail || 'Could not update live money');
-    snapshot=result;reconcileLive(result);
+    acceptSnapshot(result);reconcileLive(result);
     if(pendingLive)throw Error('Live money change is not confirmed. Checking the saved setting.');
   } catch(error) {
     const message=error.name==='TimeoutError'?'The result is uncertain. Check the refreshed switch before retrying.':error.message;
@@ -288,7 +290,7 @@ $('strategy-review-form').addEventListener('submit',event=>{event.preventDefault
 });
 $('settings-form').addEventListener('input',()=>{dirty=true;saveError='';formChanged();});
 $('settings-form').addEventListener('submit',async event=>{
-  event.preventDefault();if(saving||strategySaving||toggling)return;const settings=formSettings();const error=settingsError(settings,snapshot);if(error){$('save-message').textContent=error;return;}
+  event.preventDefault();if(saving||strategySaving||toggling)return;const settings=formSettings();const error=settingsError(settings,snapshot,displayClock.now());if(error){$('save-message').textContent=error;return;}
   saving=true;generation++;saveError='';formChanged();$('save-message').textContent='Saving…';
   try{const response=await fetch(new URL('settings',api),{method:'PUT',headers:{'Content-Type':'application/json','X-Pivot-Intent':'settings'},body:JSON.stringify(settings),signal:AbortSignal.timeout(8000)});const result=await response.json();if(!response.ok)throw Error(result.detail || 'Could not save');snapshot.settings=result;if(snapshot.portfolio?.socrates)snapshot.portfolio.socrates.target_dollars=result.target_dollars;dirty=false;$('save-message').textContent='Purchase target saved.';}
   catch(error){saveError=error.name==='TimeoutError'?'Save status is uncertain. Refresh before retrying.':error.message;}

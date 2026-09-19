@@ -151,6 +151,10 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
             result['deployment_gate'] = entry_gate.status()
         if hosting.public_origin:
             result['deployment'] = deployment_status(deployment_status_path)
+        # Evidence timestamps are created on the host. The browser advances this
+        # response clock locally instead of treating host/Mac clock skew as stale
+        # or future evidence. Broker execution retains its own strict clock checks.
+        result['server_at'] = datetime.now(timezone.utc).isoformat()
         return result
     @asynccontextmanager
     async def lifespan(app):

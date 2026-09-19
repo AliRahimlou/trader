@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
-import {money,escape as esc} from './model.mjs';
+import {money,escape as esc,appStatus,createDisplayClock} from './model.mjs';
 import {bindStrategyView,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit} from './strategy-families.mjs';
 
 const source=(await readFile(new URL('./app.js',import.meta.url),'utf8')).replace(/^import .*?;\n/gm,'');
@@ -11,22 +11,22 @@ const initial=()=>({live_enabled:true,execution_available:true,execution_policy:
     range_reversal:{enabled:false,target_dollars:'5.00',symbols:['BTC/USD'],execution_available:true,
       policy_version:'crypto-v1',review_required:false,policy_summary:['Crypto stop-limit may not fill in a fast move.','Crypto fees apply.'],capabilities:{long:true,short:false}}},
   crypto_execution:{message:'Waiting for a current long setup',trades:[],incidents:[]}});
-function harness({state=initial(),startup=false}={}) {
+function harness({state=initial(),startup=false,clock=createDisplayClock}={}) {
   const nodes=new Map(),calls=[];
   const element=id=>{
     if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',innerHTML:'',checked:false,disabled:false,open:false,hidden:false,listeners:{},
       addEventListener(type,handler){this.listeners[type]=handler;},showModal(){this.open=true;},close(){this.open=false;},querySelectorAll(){return [];}});
     return nodes.get(id);
   };
-  const context=vm.createContext({URL,Date,money,esc,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,
+  const context=vm.createContext({URL,Date,money,esc,appStatus,createDisplayClock:clock,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,
     bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),
     location:{hostname:'example.test',port:''},AbortSignal:{timeout:()=>({})},setInterval(){},
     document:{baseURI:'https://example.test/pivot/',getElementById:element,querySelector:()=>({dataset:{}})},
     fetch:(url,options)=>new Promise((resolve,reject)=>calls.push({url:String(url),options,resolve,reject}))});
   vm.runInContext((startup?source:source.replace('refresh();setInterval(refresh,10000);',''))+`\n
-    render=()=>{};renderStrategyFamilies=()=>{};snapshot=${JSON.stringify(state)};
+    render=()=>{};renderStrategyFamilies=()=>{};acceptSnapshot(${JSON.stringify(state)});
     globalThis.app={changeStrategies,changeLive,refresh,reviewStrategies,renderStrategyControls,recheckCryptoIncidents,
-      setSnapshot:value=>{snapshot=value;},state:()=>({snapshot,strategyError,pendingStrategy,strategyReview,strategySaving,cryptoRechecking,cryptoRecheckMessage})};`,context);
+      setSnapshot:acceptSnapshot,displayNow:()=>displayClock.now(),state:()=>({snapshot,strategyError,pendingStrategy,strategyReview,strategySaving,cryptoRechecking,cryptoRecheckMessage})};`,context);
   return {app:context.app,element,calls,fire:(id,type='click')=>element(id).listeners[type]?.({preventDefault(){}})};
 }
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
@@ -329,4 +329,29 @@ test('broker holdings label crypto units separately from stock shares',()=>{
   assert.equal(positionUnit({symbol:'SOL/USD',asset_class:'crypto'}),'units');
   assert.equal(positionUnit({symbol:'QQQ',asset_class:'us_equity'}),'shares');
   assert.equal(positionUnit({symbol:'QQQ'}),'shares');
+});
+
+test('Socrates card prioritizes a verified closed session over an old VIX wait',()=>{
+  const state=initial(),server=Date.parse('2026-09-19T13:00:00Z');
+  Object.assign(state,{server_at:new Date(server).toISOString(),account_at:new Date(server-1000).toISOString(),clock:{is_open:false},execution:{message:'Waiting for actual VIX data'}});
+  const h=harness({state,clock:()=>createDisplayClock({wallNow:()=>server-60000,elapsedNow:()=>0})});
+  h.app.renderStrategyControls();assert.match(h.element('socrates-run-detail').textContent,/regular market session is closed/);
+  assert.doesNotMatch(h.element('socrates-run-detail').textContent,/Waiting for actual VIX/);
+  state.execution.trade={stage:'exit_pending'};state.execution.message='Waiting for confirmed position exit';
+  h.app.setSnapshot(state);h.app.renderStrategyControls();assert.match(h.element('socrates-run-detail').textContent,/confirmed position exit/);
+  delete state.execution.trade;state.account_at=new Date(server-61000).toISOString();
+  h.app.setSnapshot(state);h.app.renderStrategyControls();assert.match(h.element('socrates-run-detail').textContent,/Waiting for confirmed position exit/);
+  assert.doesNotMatch(h.element('socrates-run-detail').textContent,/regular market session is closed/);
+});
+
+test('only accepted responses reset display time and render calls do not refresh its age',async()=>{
+  let elapsed=0;const server=Date.parse('2026-09-19T13:00:00Z'),state=initial();state.server_at=new Date(server).toISOString();
+  const h=harness({state,clock:()=>createDisplayClock({wallNow:()=>server-5000,elapsedNow:()=>elapsed})});
+  elapsed=2500;h.app.renderStrategyControls();assert.equal(h.app.displayNow(),server+2500);
+  const oldPoll=h.app.refresh(),changing=h.app.changeLive(false);
+  const next=structuredClone(state);next.server_at=new Date(server+10000).toISOString();next.live_enabled=false;next.portfolio.global_live_enabled=false;
+  answer(h.calls[1],next);await changing;assert.equal(h.app.displayNow(),server+10000);
+  answer(h.calls[0],state);await oldPoll;assert.equal(h.app.displayNow(),server+10000);
+  elapsed+=1000;assert.equal(h.app.displayNow(),server+11000);
+  answer(h.calls[2],next);await flush();assert.equal(h.app.displayNow(),server+10000);
 });
