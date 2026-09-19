@@ -2,10 +2,11 @@ import {escape as esc, money} from './model.mjs';
 
 export const STRATEGY_VIEW_KEY='pivot.strategy-view.v1';
 const VIEWS=new Set(['socrates','range_reversal','all']);
+export const CRYPTO_MARKETS=['BTC/USD','ETH/USD','SOL/USD','LINK/USD','XRP/USD'];
 export const normalizeStrategyView=value=>VIEWS.has(value)?value:'socrates';
 export const STRATEGY_VIEW_SECTIONS={
   socrates:['socrates-control','socrates-family','session-review','socrates-sidebar','socrates-purchase','socrates-data','socrates-rules','socrates-results'],
-  range_reversal:['range-control','range-family','crypto-management'],
+  range_reversal:['range-control','range-family','crypto-management','crypto-watchlist','crypto-review'],
 };
 
 // This preference changes the complete strategy workspace. It has no API, broker, or
@@ -52,7 +53,7 @@ export function portfolioView(snapshot) {
     const enabled=p?raw.enabled===true:id==='socrates';
     const available=id==='socrates'?snapshot?.execution_available===true:raw.execution_available===true;
     return {id,label,enabled,available,target:raw.target_dollars || (id==='socrates'?snapshot?.settings?.target_dollars:'5.00'),
-      symbols:id==='socrates'?['QQQ']:(Array.isArray(raw.symbols)?raw.symbols.filter(s=>['BTC/USD','ETH/USD'].includes(s)):['BTC/USD']),
+      symbols:id==='socrates'?['QQQ']:(Array.isArray(raw.symbols)?raw.symbols.filter(s=>CRYPTO_MARKETS.includes(s)):['BTC/USD']),
       status:!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':'On · entries enabled',
       reviewRequired:raw.review_required===true,
       policyVersion:raw.policy_version,policy:Array.isArray(raw.policy_summary)?raw.policy_summary:[],
@@ -106,7 +107,7 @@ export function cryptoQuantityLabel(trade) {
 
 export function positionUnit(position) {
   const symbol=typeof position?.symbol==='string'?position.symbol.toUpperCase():'';
-  return position?.asset_class==='crypto' || ['BTCUSD','BTC/USD','ETHUSD','ETH/USD'].includes(symbol)?'units':'shares';
+  return position?.asset_class==='crypto' || CRYPTO_MARKETS.some(s=>s===symbol||s.replace('/','')===symbol)?'units':'shares';
 }
 
 export function cryptoHistoryMarkup(history) {
@@ -140,7 +141,7 @@ export function rangeFamilyView(snapshot,now=Date.now(),symbol='BTC/USD') {
   const labels={DATA_WAITING:'Waiting for data',RANGE_FORMING:'First range forming',WATCHING:'Waiting for an outside close',
     OUTSIDE_RANGE:'Waiting for a return inside',SETUP_OBSERVED:'Reversal observed'};
   let state=!family?'Waiting for analysis':waitingNow?'Waiting for data':!current?'Analysis out of date':labels[family.state] || 'Waiting for validated analysis';
-  const detail=!family?`Waiting for the first native five-minute ${symbol==='ETH/USD'?'Ethereum':'Bitcoin'} observation.`:!current && !waitingNow
+  const detail=!family?`Waiting for the first native five-minute ${symbol} observation.`:!current && !waitingNow
     ? 'Waiting for a current update. Saved candles and observations below cannot authorize an entry.'
     : typeof family.detail==='string'?family.detail:'Waiting for the next completed candle.';
   const range=family?.range;
@@ -167,8 +168,9 @@ export function rangeFamilyView(snapshot,now=Date.now(),symbol='BTC/USD') {
     archive:family?.archive_status,
     warnings:(Array.isArray(family?.interpretation_warnings)?family.interpretation_warnings:[]).filter(row=>typeof row==='string'),
     session:family?.session,
-    watchingOnly:!route.available,routeStatus:route.status,enabled:route.enabled,signalReady,
-    executionMessage:typeof snapshot?.crypto_execution?.message==='string'?snapshot.crypto_execution.message:null,
+    coverage:family?.coverage,
+    watchingOnly:!route.available,routeStatus:route.symbols.includes(symbol)?route.status:'Not selected for trading',enabled:route.enabled&&route.symbols.includes(symbol),signalReady,
+    executionMessage:route.symbols.includes(symbol)?(snapshot?.crypto_execution?.markets?.[symbol] || snapshot?.crypto_execution?.message || null):'Watched for setups and data quality. Select this market in crypto settings to permit entries.',
     shortUnsupported:currentSignal?.direction==='short' && !route.shortSupported};
 }
 
@@ -178,7 +180,7 @@ export function rangeFamilyMarkup(view) {
   return `<article class="card range-observer"><div class="section-heading"><h3>${esc(view.symbol)} · ${esc(view.state)}</h3><span class="pill">${esc(view.watchingOnly?'Execution unavailable':view.routeStatus)}</span></div>
     <p class="observation">${esc(view.detail)}</p>
     <p class="help range-execution-note">${esc(view.watchingOnly?'Broker execution is not available for this strategy.':view.executionMessage || 'Alpaca spot execution buys on eligible long setups and sells owned units to exit. Short entries are unsupported.')}</p>
-    ${view.symbol==='ETH/USD'?'<p class="notice">ETH is an unvalidated adaptation. The recording’s crypto examples describe Bitcoin.</p>':''}
+    ${view.symbol!=='BTC/USD'?'<p class="notice">This market is an unvalidated adaptation. The recording’s crypto examples describe Bitcoin.</p>':''}
     ${view.shortUnsupported?'<p class="notice">Short setup observed · unsupported by this spot route. No new short order will be sent.</p>':''}
     <div class="range-stat-grid"><div><span>Market</span><strong>${esc(view.symbol)}</strong><small>${esc(view.source)}</small></div>
     <div><span>Last completed candle</span><strong>${esc(time(view.latestAt))}</strong><small>${view.current?'Current provider receipt':'Current data unverified'} · ${esc(time(view.observedAt))}</small></div></div>
@@ -194,4 +196,30 @@ export function rangeFamilyMarkup(view) {
     <li>Use the breakout candle’s extreme for the basic stop and twice the risk distance for the target. Fresh excursions can create more observations that day. <small>Video 2:55–3:14; 5:59–6:10</small></li></ol>
     <h4>Interpretations still needing validation</h4>${view.warnings.length?`<ul class="range-rule-list">${view.warnings.map(text=>`<li>${esc(text)}</li>`).join('')}</ul>`:'<p>The candle anchor and discretionary stop adjustment still need validation.</p>'}
     <p>This Alpaca spot strategy is separate from Bullpen and Socrates’ QQQ execution.</p></details></article>`;
+}
+
+export function cryptoWatchMarkup(snapshot,now=Date.now()) {
+  const root=snapshot?.strategy_families?.range_reversal;
+  const selected=portfolioView(snapshot).families[1].symbols;
+  return CRYPTO_MARKETS.map(symbol=>{
+    const view=rangeFamilyView(snapshot,now,symbol),analysis=root?.analyses?.[symbol] || (symbol==='BTC/USD'?root:null);
+    const coverage=view.coverage;
+    const complete=view.current&&analysis?.state!=='DATA_WAITING'&&coverage?.missing_count===0;
+    const count=direction=>new Set((analysis?.candidates || []).filter(row=>row?.status==='CONFIRMED'&&row.direction===direction).map(row=>row.event_id||row.confirmation_at)).size;
+    const data=coverage?`${coverage.received_completed_bars}/${coverage.expected_completed_bars} completed candles · ${coverage.missing_count} missing${coverage.publication_wait?' · latest candle within publication allowance':''}`:view.state;
+    const chart=complete?`Today’s chart: ${count('long')} buy setups · ${count('short')} short setups`:'Setup totals unavailable until data is complete.';
+    const gap=coverage?.opening_range_missing_count?`${coverage.opening_range_missing_count} missing in the opening four-hour range.`:coverage?.missing_count?'Later candle gaps prevent a complete strategy evaluation.':'';
+    return `<article class="crypto-watch-row"><div><strong>${esc(symbol)}</strong><span class="pill">${esc(selected.includes(symbol)?view.routeStatus:'Not selected for trading')}</span></div><div><b>${esc(data)}</b><p>${esc(chart)}</p><small>${esc(gap || view.state)}</small></div></article>`;
+  }).join('');
+}
+
+export function cryptoReviewMarkup(snapshot) {
+  const review=snapshot?.crypto_execution?.decision_review;
+  if(!review||review.status!=='available')return `<p class="notice">${esc(review?.detail || 'Recorded crypto checks are not available yet.')} Chart observations above do not prove that a live entry was attempted.</p>`;
+  const setups=review.fresh_setups||{},recent=Array.isArray(review.recent_checks)?review.recent_checks:[];
+  const latest=Object.values(review.latest_by_symbol||{});
+  return `<p class="help">${esc(review.day)} · ET · Retained worker checks recorded since this logging version was installed. Earlier chart setups are not counted as live checks.</p><p class="help">Crypto worker last checked: ${esc(time(snapshot?.crypto_execution?.at))}.</p>
+    <div class="crypto-review-counts"><span><b>${Number(setups.long)||0}</b> fresh buy setups checked</span><span><b>${Number(setups.short)||0}</b> fresh short setups checked</span><span><b>${Number(review.order_attempts)||0}</b> entry submissions attempted</span><span><b>${Number(review.filled_entries)||0}</b> entries with confirmed fills</span></div>
+    ${latest.map(row=>`<p><strong>${esc(row.symbol)}</strong> · ${esc(row.reason)} <small>${esc(time(row.checked_at))}</small></p>`).join('') || '<p>No live checks recorded today yet.</p>'}
+    <details class="evidence" id="crypto-check-history"><summary>Recent entry checks · ${recent.length}</summary>${recent.map(row=>`<p><b>${esc(row.symbol)} · ${esc(time(row.checked_at))}</b><span>${esc(row.reason)}</span></p>`).join('') || '<p>No checks recorded.</p>'}</details>`;
 }

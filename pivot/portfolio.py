@@ -15,6 +15,7 @@ import re
 import stat
 
 from .sizing import decimal
+from .crypto_markets import ALIASES
 
 
 class PortfolioBlocked(ValueError):
@@ -23,10 +24,9 @@ class PortfolioBlocked(ValueError):
 
 def canonical_symbol(symbol):
     """Only explicit known aliases are equivalent, never arbitrary punctuation."""
-    aliases = {'BTCUSD': 'BTC/USD', 'ETHUSD': 'ETH/USD', 'SOLUSD': 'SOL/USD'}
     if not isinstance(symbol, str) or not symbol:
         raise PortfolioBlocked('An account instrument could not be verified')
-    return aliases.get(symbol, symbol)
+    return ALIASES.get(symbol, symbol)
 
 
 class Portfolio:

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {money,escape as esc,appStatus,createDisplayClock} from './model.mjs';
-import {bindStrategyView,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit} from './strategy-families.mjs';
+import {bindStrategyView,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,CRYPTO_MARKETS} from './strategy-families.mjs';
 
 const source=(await readFile(new URL('./app.js',import.meta.url),'utf8')).replace(/^import .*?;\n/gm,'');
 const initial=()=>({live_enabled:true,execution_available:true,execution_policy:{version:'socrates-v1',summary:['Socrates rules']},
@@ -18,7 +18,7 @@ function harness({state=initial(),startup=false,clock=createDisplayClock}={}) {
       addEventListener(type,handler){this.listeners[type]=handler;},showModal(){this.open=true;},close(){this.open=false;},querySelectorAll(){return [];}});
     return nodes.get(id);
   };
-  const context=vm.createContext({URL,Date,money,esc,appStatus,createDisplayClock:clock,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,
+  const context=vm.createContext({URL,Date,money,esc,appStatus,createDisplayClock:clock,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,CRYPTO_MARKETS,
     bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),
     location:{hostname:'example.test',port:''},AbortSignal:{timeout:()=>({})},setInterval(){},
     document:{baseURI:'https://example.test/pivot/',getElementById:element,querySelector:()=>({dataset:{}})},
@@ -196,6 +196,27 @@ test('Range signals expire between snapshots and shorts remain visibly unsupport
 test('ETH uses its own analysis and carries the adaptation notice',()=>{
   const state=initial();state.strategy_families={range_reversal:{analyses:{'ETH/USD':{symbol:'ETH/USD',source:'alpaca_crypto_us',analyzed_at:new Date().toISOString(),observed_at:new Date().toISOString(),state:'WATCHING'}}}};
   const view=rangeFamilyView(state,Date.now(),'ETH/USD');assert.equal(view.symbol,'ETH/USD');assert.match(rangeFamilyMarkup(view),/unvalidated adaptation/);
+});
+
+test('additional market selection requires review and saves only the explicit chosen markets',async()=>{
+  const state=initial(),h=harness({state});
+  h.app.renderStrategyControls();
+  for(const symbol of ['sol','link','xrp'])assert.equal(h.element('range-'+symbol).checked,false);
+  h.element('range-sol').checked=true;h.element('range-link').checked=true;h.element('range-xrp').checked=true;
+  h.fire('range-settings-form','input');h.fire('range-settings-form','submit');
+  assert.equal(writes(h).length,0);
+  assert.match(h.element('strategy-dialog-policy').innerHTML,/SOL\/USD, LINK\/USD, XRP\/USD/);
+  h.element('accept-strategy-policy').checked=true;h.fire('strategy-review-form','submit');
+  assert.deepEqual(payload(h.calls[0]).range_reversal.symbols,['BTC/USD','SOL/USD','LINK/USD','XRP/USD']);
+  assert.equal(payload(h.calls[0]).range_reversal.enabled,undefined);
+  const next=updated(state,payload(h.calls[0]));answer(h.calls[0],next);await flush();answer(h.calls[1],next);await flush();
+  assert.equal(h.app.state().snapshot.portfolio.range_reversal.enabled,false);
+});
+
+test('crypto target above provider order maximum never opens review or sends a write',()=>{
+  const h=harness();h.app.renderStrategyControls();h.element('range-amount').value='200000.01';
+  h.fire('range-settings-form','submit');assert.equal(writes(h).length,0);
+  assert.match(h.app.state().strategyError,/200,000/);
 });
 
 test('crypto worker failure stays prominent even when global Live is Off and a position is open',()=>{

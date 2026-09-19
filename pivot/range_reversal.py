@@ -41,6 +41,7 @@ def _base(now):
             'detail': 'Waiting for validated native five-minute data.',
             'analyzed_at': _iso(now), 'symbol': None, 'source': None,
             'observed_at': None, 'latest_bar_at': None, 'range': None,
+            'coverage': None,
             'observations': [], 'candidates': [], 'current_event': None,
             'interpretation_warnings': list(INTERPRETATION_WARNINGS)}
 
@@ -115,6 +116,22 @@ def analyze(market: Market | None, now, *, provenance=None):
             result['latest_bar_at'] = _iso(latest)
         publication_wait = (expected > start and latest == expected - STEP
                             and 0 <= (now - expected).total_seconds() <= PUBLICATION_GRACE_SECONDS)
+        # Coverage describes only already completed slots in this New York day.
+        # It remains available on a gap/stale return without manufacturing bars
+        # or weakening the existing full-day validation below.
+        expected_count = int((expected - start).total_seconds() // 300)
+        received_stamps = {at for _, at in bars}
+        missing = [start + (index + 1) * STEP for index in range(expected_count)
+                   if start + (index + 1) * STEP not in received_stamps]
+        result['coverage'] = {
+            'expected_completed_bars': expected_count,
+            'received_completed_bars': len(bars),
+            'missing_count': len(missing),
+            'missing_at': [_iso(at) for at in missing[:12]],
+            'missing_timestamps_truncated': len(missing) > 12,
+            'opening_range_missing_count': sum(at <= range_end for at in missing),
+            'publication_wait': publication_wait,
+        }
         if latest != expected and not publication_wait:
             result['detail'] = 'The latest completed five-minute candle is missing or stale.'
             return result
@@ -185,5 +202,6 @@ def analyze(market: Market | None, now, *, provenance=None):
         return result
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
         result.update(state='DATA_WAITING', detail='Native candle metadata or prices could not be validated.',
-                      signal_ready=False, signal_valid_until=None, range=None, observations=[], candidates=[], current_event=None)
+                      signal_ready=False, signal_valid_until=None, range=None, coverage=None,
+                      observations=[], candidates=[], current_event=None)
         return result
