@@ -121,11 +121,13 @@ def test_invalid_or_unreviewed_strategy_changes_are_atomic(tmp_path, payload):
 
 
 def test_strategy_endpoint_checks_origin_and_returns_complete_scoped_snapshot(tmp_path):
+    from datetime import datetime, timezone
     service, _, _ = app_service(tmp_path)
     with TestClient(create_app(service, background=False)) as client:
         payload = {'range_reversal':{'enabled':True,'policy_version':CRYPTO_POLICY}}
         assert client.put('/api/strategies', json=payload).status_code == 403
         assert client.put('/api/strategies', json=payload, headers={**HEADERS,'origin':'https://foreign.example'}).status_code == 403
+        started = datetime.now(timezone.utc)
         response = client.put('/api/strategies', json=payload, headers=HEADERS)
         assert response.status_code == 200
         body = response.json()
@@ -133,6 +135,7 @@ def test_strategy_endpoint_checks_origin_and_returns_complete_scoped_snapshot(tm
         assert body['portfolio']['range_reversal']['capabilities'] == {'long':True,'short':False}
         assert 'account_ref' not in body['portfolio']['range_reversal']
         assert body['live_enabled'] is False and body['app_version']
+        assert started <= datetime.fromisoformat(body['server_at']) <= datetime.now(timezone.utc)
 
 
 def test_master_off_preserves_selections_for_later_owner_enable(tmp_path):

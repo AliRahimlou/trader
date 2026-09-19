@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 import {bindStrategyView,portfolioView} from './strategy-families.mjs';
+import {createDisplayClock} from './model.mjs';
 
 // Run the real asynchronous handlers against deferred fetches. The DOM and
 // render function are isolated; no provider or broker connection is available.
@@ -17,7 +18,7 @@ function harness(enabled=false) {
       open:id==='live-dialog',closeCount:0,addEventListener(){},close(){this.open=false;this.closeCount++;}});
     return elements.get(id);
   };
-  const context=vm.createContext({URL,portfolioView,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),location:{port:'',hostname:'example.test'},
+  const context=vm.createContext({URL,portfolioView,createDisplayClock,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),location:{port:'',hostname:'example.test'},
     document:{baseURI:'https://example.test/pivot/',getElementById:element,querySelector:()=>badge},
     Date:{now:()=>now},AbortSignal:{timeout:milliseconds=>({milliseconds})},
     fetch:(url,options)=>new Promise((resolve,reject)=>calls.push({url:String(url),options,resolve,reject}))});

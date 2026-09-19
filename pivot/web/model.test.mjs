@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {money,escape,age,settingsError,vixStatus,appStatus,releaseStatus} from './model.mjs';
+import {money,escape,age,settingsError,vixStatus,appStatus,releaseStatus,createDisplayClock} from './model.mjs';
 const now=Date.now(),snapshot={account_at:new Date(now).toISOString(),account:{buying_power:100},positions:[],orders:[]};
 test('target validation preserves dollar semantics',()=>{assert.equal(settingsError({target_dollars:'25'},snapshot,now),'');assert.match(settingsError({target_dollars:'101'},snapshot,now),/buying power/);for(const target_dollars of ['NaN','0','-1','25.001'])assert.ok(settingsError({target_dollars},snapshot,now));});
 test('stale and exposed account cannot change target',()=>{assert.match(settingsError({target_dollars:25},{...snapshot,account_at:new Date(now-61000).toISOString()},now),/current account/);assert.match(settingsError({target_dollars:25},{...snapshot,positions:[{}]},now),/finished/);});
@@ -177,4 +177,20 @@ test('Socrates sizing allows other strategy exposure only when the server verifi
   assert.match(settingsError({target_dollars:'25'},{...state,execution:{trade:{symbol:'QQQ'}}},now),/current trade/);
   assert.match(settingsError({target_dollars:'25'},{...state,account_at:new Date(now-61000).toISOString()},now),/current account/);
   assert.match(settingsError({target_dollars:'101'},state,now),/buying power/);
+});
+
+test('display clock follows server time plus elapsed time independently of browser clock skew',()=>{
+  const server=Date.parse('2026-09-19T13:00:00Z');let elapsed=100,wall=server-700;
+  const clock=createDisplayClock({wallNow:()=>wall,elapsedNow:()=>elapsed});
+  clock.accept({server_at:new Date(server).toISOString()});assert.equal(clock.now(),server);
+  elapsed+=91000;wall+=3600000;assert.equal(clock.now(),server+91000);
+  assert.equal(age(new Date(server).toISOString(),clock.now()),91);
+  clock.accept({server_at:new Date(server+92000).toISOString()});assert.equal(clock.now(),server+92000);
+});
+
+test('missing or malformed server timestamps use the browser clock without retaining an old anchor',()=>{
+  const clock=createDisplayClock({wallNow:()=>12345,elapsedNow:()=>0});
+  for(const server_at of [undefined,null,1234,'invalid']){
+    clock.accept({server_at:'2026-09-19T13:00:00Z'});clock.accept({server_at});assert.equal(clock.now(),12345);
+  }
 });
