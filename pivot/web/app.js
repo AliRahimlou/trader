@@ -1,5 +1,6 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
 import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert, CRYPTO_MARKETS, cryptoWatchMarkup, cryptoReviewMarkup} from './strategy-families.mjs';
+import {dailyReviewView,dailyReviewMarkup,fetchDailyReview,previousReviewDay,reviewDay,validReviewDay} from './daily-review.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -10,13 +11,50 @@ let familyConnectionUnavailable=false;
 let strategySaving=false,rangeDirty=false,strategyError='',pendingStrategy=null,strategyReview=null;
 let cryptoRechecking=false,cryptoRecheckMessage='',cryptoRecheckCompleted=false;
 let liveReviewFingerprint=null,strategyReviewFingerprint=null;
+let dailySelectedDay=null,dailyHistory=null,dailyReviewLoading=false,dailyReviewError='',dailyReviewGeneration=0;
 function permissionFingerprint() {
   const p=portfolioView(snapshot);
   return JSON.stringify({version:snapshot?.execution_policy?.version,globalOn:p.globalOn,families:p.families});
 }
 const LIVE_RECONCILE_MS=60000;
 function acceptSnapshot(next) { snapshot=next;displayClock.accept(next); }
-bindStrategyView(document,{onChange:()=>renderStrategyFamilies()});
+bindStrategyView(document,{onChange:()=>{renderStrategyFamilies();renderDailyReview();}});
+function renderDailyReview() {
+  const report=dailySelectedDay?dailyHistory:snapshot?.daily_review;
+  const selected=$('strategy-view').value;
+  $('daily-review-title').textContent=dailySelectedDay?'Saved trading review':'Today’s trading review';
+  $('daily-review-message').textContent=dailyReviewLoading?'Loading the saved review…':dailyReviewError;
+  $('daily-review-message').hidden=!dailyReviewLoading&&!dailyReviewError;
+  $('daily-review-today').disabled=!dailySelectedDay&&!dailyReviewLoading;
+  $('daily-review-show').disabled=dailyReviewLoading;
+  if(!report&&!dailySelectedDay&&!dailyReviewLoading&&!dailyReviewError){
+    $('daily-review-summary').textContent='Waiting for saved records';
+    $('daily-review-content').innerHTML='<p class="help">The daily review is not available in the latest app update.</p>';
+    return;
+  }
+  const today=reviewDay(displayClock.now());
+  if(!dailySelectedDay&&validReviewDay(report?.day)&&report.day!==today){
+    $('daily-review-title').textContent='Latest saved trading review';
+    if(!dailyReviewLoading&&!dailyReviewError){$('daily-review-message').textContent='Today’s review has not arrived. The dated records below are from an earlier day.';$('daily-review-message').hidden=false;}
+  }
+  const day=dailySelectedDay||(validReviewDay(report?.day)?report.day:today);
+  $('daily-review-day').max=today;
+  if(document.activeElement!==$('daily-review-day'))$('daily-review-day').value=day;
+  $('daily-review-summary').textContent=dailyReviewLoading?'Loading…':dailyReviewView(report,selected).summary;
+  const opened=new Set([...$('daily-review-content').querySelectorAll('details[open]')].map(node=>node.dataset.reviewDetails));
+  $('daily-review-content').innerHTML=dailyReviewLoading?'<p class="help">Checking the saved review for this date.</p>':dailyReviewMarkup(report,selected);
+  for(const node of $('daily-review-content').querySelectorAll('details'))node.open=opened.has(node.dataset.reviewDetails);
+}
+async function loadDailyReview(day) {
+  if(!validReviewDay(day)||day>reviewDay(displayClock.now())){dailyReviewError='Choose today or an earlier date.';renderDailyReview();return;}
+  const request=++dailyReviewGeneration;
+  dailySelectedDay=day;dailyHistory=null;dailyReviewLoading=true;dailyReviewError='';renderDailyReview();
+  try {
+    const report=await fetchDailyReview(fetch,api,day,{signal:AbortSignal.timeout(10000)});
+    if(request===dailyReviewGeneration)dailyHistory=report;
+  }catch(error){if(request===dailyReviewGeneration)dailyReviewError=error.name==='TimeoutError'?'The saved review took too long to load. Try again.':'Could not load the saved review. Try again.';}
+  finally{if(request===dailyReviewGeneration){dailyReviewLoading=false;renderDailyReview();}}
+}
 function renderStrategyFamilies() {
   $('crypto-watch-content').innerHTML=cryptoWatchMarkup(snapshot,displayClock.now());
   const reviewOpen=$('crypto-check-history')?.open;
@@ -133,6 +171,7 @@ function render() {
   const s=snapshot; if(!s)return;const now=displayClock.now();
   renderStrategyFamilies();
   renderStrategyControls();
+  renderDailyReview();
   $('runtime-status').textContent=s.hosting?.message || 'Checking where the app is running…';
   const release=releaseStatus(s,now);
   $('installed-version').textContent=release.label;
@@ -296,6 +335,9 @@ $('strategy-review-form').addEventListener('submit',event=>{event.preventDefault
   changeStrategies(strategyReview);
 });
 $('settings-form').addEventListener('input',()=>{dirty=true;saveError='';formChanged();});
+$('daily-review-today').addEventListener('click',()=>{dailyReviewGeneration++;dailySelectedDay=null;dailyHistory=null;dailyReviewLoading=false;dailyReviewError='';renderDailyReview();});
+$('daily-review-previous').addEventListener('click',()=>loadDailyReview(previousReviewDay(dailySelectedDay||snapshot?.daily_review?.day||reviewDay(displayClock.now()))));
+$('daily-review-date-form').addEventListener('submit',event=>{event.preventDefault();loadDailyReview($('daily-review-day').value);});
 $('settings-form').addEventListener('submit',async event=>{
   event.preventDefault();if(saving||strategySaving||toggling)return;const settings=formSettings();const error=settingsError(settings,snapshot,displayClock.now());if(error){$('save-message').textContent=error;return;}
   saving=true;generation++;saveError='';formChanged();$('save-message').textContent='Saving…';

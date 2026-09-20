@@ -1078,13 +1078,16 @@ class Executor:
             self.message = 'Protective stop submitted. Waiting for broker confirmation.'
 
     def _start_exit(self, trade, reason):
+        # Completion has its own reconciliation message; retain the original
+        # trigger so a daily review can distinguish targets, stops and incidents.
+        trade.setdefault('exit_reason', reason)
         trade.update(stage='exiting', reason=reason)
         if not trade.get('exit_pending'):
             now = self.now()
             trade['exit_pending'] = {'first_observed_at': now.isoformat(),
                 'confirmation_deadline': (now + timedelta(seconds=EXIT_CONFIRM_SECONDS)).isoformat()}
         self.store.save_trade(trade)
-        self.store.event('exit_started', {'symbol': 'QQQ', 'reason': reason})
+        self.store.event('exit_started', {'symbol': 'QQQ', 'trade_id': trade['id'], 'reason': reason})
 
     def _check_exit_incident(self, trade):
         """Escalate a stalled close without replacing, racing or abandoning it."""
