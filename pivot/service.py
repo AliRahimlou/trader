@@ -87,6 +87,17 @@ class Service:
         self.range_watch_error = None
         self.extra_range_watches = {}
         self.extra_range_errors = {}
+        self.activity_ledger = None
+        self.daily_reviews = None
+        self.review_collection = {'status': 'starting', 'last_attempt_at': None,
+                                  'last_success_at': None}
+        try:
+            from .activity_ledger import ActivityLedger
+            from .daily_review import DailyReviewStore
+            self.activity_ledger = ActivityLedger(str(store.path) + '.activities.sqlite3')
+            self.daily_reviews = DailyReviewStore(str(store.path) + '.daily-reviews.sqlite3')
+        except Exception:
+            self.review_collection['status'] = 'unavailable'
         try:
             self.archive = ObservationArchive(str(store.path) + '.observations.sqlite3')
         except Exception:
@@ -137,6 +148,12 @@ class Service:
         monitor = Thread(target=self._monitor_loop, name='pivot-monitor', daemon=True)
         self.threads.append(monitor)
         monitor.start()
+        # Read-only accounting is independent of order management and container
+        # readiness: a reporting outage must not restart a protective exit worker.
+        if self.activity_ledger is not None and callable(getattr(self.feeds, 'get', None)):
+            review_thread = Thread(target=self._review_loop, name='pivot-daily-review', daemon=True)
+            self.threads.append(review_thread)
+            review_thread.start()
         if self.range_watch:
             try:
                 self.range_watch.start(self.stop_event)
@@ -212,9 +229,123 @@ class Service:
                 self.state.update(account=values[0],positions=values[1],orders=values[2],clock=values[3],
                                   account_at=datetime.now(timezone.utc).isoformat(),account_error=None,
                                   quote=quote, quote_at=datetime.now(timezone.utc).isoformat() if quote else None, quote_error=quote_error)
+            if self.activity_ledger is not None and values[0].get('account_ref'):
+                try:
+                    self.activity_ledger.record_equity(values[0]['account_ref'], values[0],
+                                                       datetime.now(timezone.utc))
+                    with self.lock:
+                        self.review_collection['equity_status'] = 'current'
+                except Exception:
+                    with self.lock:
+                        self.review_collection['equity_status'] = 'unavailable'
         except Exception:
             with self.lock:
                 self.state['account_error']='Account update unavailable; showing the last confirmed snapshot'
+
+    def _review_loop(self):
+        while not self.stop_event.is_set():
+            self.refresh_daily_review()
+            with self.lock:
+                ready = self.state.get('account_at') is not None
+            self.stop_event.wait(300 if ready else 30)
+
+    def refresh_daily_review(self, now=None):
+        """Refresh broker evidence off the HTTP and trading paths, then save reports.
+
+        Rebuild recent completed days too: crypto fees can arrive after midnight.
+        A revision records new evidence, never an automatic change to live rules.
+        """
+        from zoneinfo import ZoneInfo
+        from .models import timestamp
+        from .daily_review import build_review
+        now = now or datetime.now(timezone.utc)
+        with self.lock:
+            account = deepcopy(self.state.get('account')) or {}
+            account_at = self.state.get('account_at')
+            account_error = self.state.get('account_error')
+            self.review_collection.update(status='refreshing', last_attempt_at=now.isoformat(),
+                                          account_ref=account.get('account_ref'))
+        try:
+            if (self.activity_ledger is None or self.daily_reviews is None
+                    or not account.get('account_ref') or account_error or not account_at
+                    or not 0 <= (now - timestamp(account_at)).total_seconds() <= 90):
+                raise ValueError('Fresh account identity is unavailable')
+            account_ref = account['account_ref']
+            collected = self.activity_ledger.refresh(self.feeds, account_ref, now)
+            local_day = now.astimezone(ZoneInfo('America/New_York')).date()
+            days = {(local_day - timedelta(days=offset)).isoformat() for offset in range(8)}
+            from datetime import date
+            for changed_day in collected.get('changed_days', []):
+                changed = date.fromisoformat(changed_day)
+                if local_day - timedelta(days=364) <= changed <= local_day:
+                    days.add(changed.isoformat())
+            for day in sorted(days):
+                accounting = self.activity_ledger.summary(account_ref, day, now)
+                report = build_review(self.store, self.crypto_store, accounting, account_ref, day, now)
+                self.daily_reviews.save(account_ref, report)
+            with self.lock:
+                if (self.state.get('account') or {}).get('account_ref') != account_ref:
+                    self.review_collection['status'] = 'account_changed'
+                elif collected.get('status') == 'current' and collected.get('data_complete'):
+                    self.review_collection.update(status='current', last_success_at=now.isoformat())
+                else:
+                    self.review_collection['status'] = collected.get('status', 'unavailable')
+        except Exception:
+            with self.lock:
+                self.review_collection['status'] = 'unavailable'
+
+    def daily_review(self, day=None, *, account_snapshot=None):
+        """Return cached private evidence only; viewing a report makes no broker call."""
+        from datetime import date
+        from zoneinfo import ZoneInfo
+        now = datetime.now(timezone.utc)
+        day = now.astimezone(ZoneInfo('America/New_York')).date().isoformat() if day is None else day
+        if not isinstance(day, str) or date.fromisoformat(day).isoformat() != day:
+            raise ValueError('Use a review date in YYYY-MM-DD format')
+        with self.lock:
+            collection = deepcopy(self.review_collection)
+            context = self.state if account_snapshot is None else account_snapshot
+            account = deepcopy(context.get('account')) or {}
+            account_error = context.get('account_error')
+            account_at = context.get('account_at')
+        collection_ref = collection.pop('account_ref', None)
+        if collection_ref != account.get('account_ref'):
+            collection = {'status': 'waiting_account', 'last_attempt_at': None,
+                          'last_success_at': None}
+        report = None
+        if self.daily_reviews is not None and account.get('account_ref'):
+            try:
+                report = self.daily_reviews.get(account['account_ref'], day)
+            except Exception:
+                collection['status'] = 'unavailable'
+        if collection.get('last_success_at'):
+            try:
+                if (now - datetime.fromisoformat(collection['last_success_at'])).total_seconds() > 660:
+                    collection['status'] = 'overdue'
+            except (ValueError, TypeError):
+                collection['status'] = 'unavailable'
+        if account_error:
+            collection['account_status'] = 'unavailable'
+        else:
+            from .models import timestamp
+            try:
+                if not 0 <= (now - timestamp(account_at)).total_seconds() <= 90:
+                    collection['account_status'] = 'stale'
+            except (ValueError, TypeError, OverflowError):
+                collection['account_status'] = 'unavailable'
+        return {**(report or {'schema': 'daily-trading-review-v1', 'status': 'unavailable', 'day': day,
+                             'timezone': 'America/New_York', 'families': {},
+                             'missing_evidence': ['A saved daily review is not available yet.']}),
+                'collection': collection}
+
+    def daily_review_history(self, limit=30):
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('Review limit must be between 1 and 100')
+        with self.lock:
+            account = deepcopy(self.state.get('account')) or {}
+        if self.daily_reviews is None or not account.get('account_ref'):
+            return {'status': 'unavailable', 'reviews': []}
+        return {'status': 'available', 'reviews': self.daily_reviews.history(account['account_ref'], limit=limit)}
 
     def refresh_analysis(self):
         now=datetime.now(timezone.utc)
@@ -398,6 +529,7 @@ class Service:
             result['session_review'] = self.store.session_review()
         except Exception:
             result['session_review'] = {'status':'unavailable', 'historical_only':True}
+        result['daily_review'] = self.daily_review(account_snapshot=result)
         result.update(settings=self.store.settings(), rulebook=rulebook(), events=self.store.events(),
                       trade_results=self.store.trade_results(),
                       execution_policy={**POLICY, 'summary': [

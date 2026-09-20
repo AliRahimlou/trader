@@ -217,6 +217,20 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
         except ValueError:
             raise HTTPException(422, detail='Use a valid session date in YYYY-MM-DD format') from None
 
+    @app.get('/api/reviews')
+    def daily_review(day: str | None = None):
+        try:
+            return service.daily_review(day)
+        except ValueError:
+            raise HTTPException(422, detail='Use a valid review date in YYYY-MM-DD format') from None
+
+    @app.get('/api/reviews/history')
+    def daily_review_history(limit: int = 30):
+        try:
+            return service.daily_review_history(limit)
+        except ValueError:
+            raise HTTPException(422, detail='Review limit must be between 1 and 100') from None
+
     @app.get('/api/native-history')
     def native_history():
         collector = getattr(service, 'native_capture', None)
