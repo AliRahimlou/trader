@@ -124,6 +124,34 @@ class CryptoStore:
     def trade_exists(self, identity):
         return self.get_trade(identity) is not None
 
+    @staticmethod
+    def _retryable_unsent_entry(trade):
+        """Only exact, finished evidence of no submission permits a fresh plan."""
+        reasons = {'Entry expired before submission; no crypto order sent',
+                   'Executable crypto price changed before submission; no order sent',
+                   'Available cash changed before submission; no crypto order sent'}
+        try:
+            entry = trade['ops']['entry']
+            return (trade['stage'] == 'finished' and trade.get('reason') in reasons
+                    and set(trade['ops']) == {'entry'} and entry['state'] == 'prepared'
+                    and not any(key in entry for key in ('last_seen', 'attempted_at', 'uncertain_since'))
+                    and not any(key in trade for key in ('filled_qty', 'net_entry_qty', 'partial_entry', 'exit_pending'))
+                    and entry['payload']['client_order_id'] == f'cr-{trade["id"]}-entry')
+        except (KeyError, TypeError):
+            return False
+
+    @staticmethod
+    def _entry_claim_exists(db, identity):
+        return db.execute('SELECT 1 FROM session_entry_allowances WHERE family=? AND trade_id=? LIMIT 1',
+                          ('range_reversal', identity)).fetchone() is not None
+
+    def entry_consumed(self, identity):
+        with self.connect() as db:
+            db.execute('BEGIN')
+            row = db.execute('SELECT finished,version,body FROM crypto_trades WHERE id=?', (identity,)).fetchone()
+            return row is not None and not (row[0] == 1 and self._retryable_unsent_entry(self._row(row[1:]))
+                                            and not self._entry_claim_exists(db, identity))
+
     def reserve_trade(self, trade, *, expected_control=None):
         """The unique event and active symbol are reserved atomically, before any POST."""
         try:
@@ -136,9 +164,31 @@ class CryptoStore:
                     if Store._entry_authorization(db) != trade['authorization']['global']:
                         return False
                 body = {k: v for k, v in trade.items() if k != '_version'}
-                db.execute('INSERT INTO crypto_trades VALUES(?,?,0,0,?)', (trade['id'], trade['symbol'], _json(body)))
+                row = db.execute('SELECT finished,version,body FROM crypto_trades WHERE id=?', (trade['id'],)).fetchone()
+                version = 0
+                if row is None:
+                    db.execute('INSERT INTO crypto_trades VALUES(?,?,0,0,?)', (trade['id'], trade['symbol'], _json(body)))
+                else:
+                    old = self._row(row[1:])
+                    if row[0] != 1 or not self._retryable_unsent_entry(old) or self._entry_claim_exists(db, trade['id']):
+                        return False
+                    try:
+                        original, candidate = old['signal']['current_event'], trade['signal']['current_event']
+                        if (old['symbol'] != trade['symbol'] or old['account_ref'] != trade['account_ref']
+                                or any(original[key] != candidate[key] for key in ('event_id', 'confirmation_at'))):
+                            return False
+                    except (KeyError, TypeError):
+                        return False
+                    # Preserve the original abandoned plan in the retained
+                    # audit journal. A newer quote may narrow its deadline, but
+                    # checked_signal still enforces this same confirmation's
+                    # original 90-second window before reserve and before POST.
+                    self._event(db, 'unsubmitted_entry_retried', old)
+                    version = old['_version'] + 1
+                    db.execute('UPDATE crypto_trades SET finished=0,version=?,body=? WHERE id=?',
+                               (version, _json(body), trade['id']))
                 self._event(db, 'entry_reserved', {'trade_id': trade['id'], 'symbol': trade['symbol'], 'amount': trade['amount']})
-            trade['_version'] = 0
+            trade['_version'] = version
             return True
         except sqlite3.IntegrityError:
             return False

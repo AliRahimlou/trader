@@ -325,6 +325,7 @@ class CryptoRangeExecutor:
         if not self.tick_lock.acquire(blocking=False):
             return
         decisions = {}
+        retired_unsent = set()
         self.entry_preflights_remaining = 1
         try:
             trades = self.store.active_trades()
@@ -343,6 +344,11 @@ class CryptoRangeExecutor:
                     self._incident(trade, 'management_error', self.message)
                 self.market_messages[trade['symbol']] = self.message
                 decisions[trade['symbol']] = ('management', self.message, checked_at)
+                if trade.get('stage') == 'finished' and trade['ops']['entry']['state'] == 'prepared':
+                    # Retiring an old plan is this cycle's action. A later cycle
+                    # may build a new authorized plan inside the same original
+                    # signal deadline; it never revives the expired payload.
+                    retired_unsent.add(trade['symbol'])
             if not self.enabled():
                 self.message = 'Crypto entries are off. Existing crypto positions continue their exits.'
                 for symbol in self.store.control()['symbols']:
@@ -358,7 +364,7 @@ class CryptoRangeExecutor:
                 start = symbols.index(self.last_preflight_symbol) + 1
                 symbols = symbols[start:] + symbols[:start]
             for symbol in symbols:
-                if self.store.active_trade(symbol):
+                if symbol in retired_unsent or self.store.active_trade(symbol):
                     continue
                 checked_at = self.now()
                 try:
@@ -406,7 +412,7 @@ class CryptoRangeExecutor:
         if event['direction'] != 'long':
             raise CryptoWaiting('A short setup is present. Alpaca crypto cannot open short positions; no buy is substituted.')
         identity = sha256((POLICY_VERSION + '|' + symbol + '|' + event['event_id']).encode()).hexdigest()[:24]
-        if self.store.trade_exists(identity):
+        if self.store.entry_consumed(identity):
             raise CryptoWaiting('This range-reversal event has already been handled; waiting for a new excursion')
         # These checks execute under the shared portfolio admission lock and
         # before any broker read. Uncertain/pending lifecycles occupy capacity;
@@ -540,6 +546,12 @@ class CryptoRangeExecutor:
         return self._accept_order(trade, name, result)
 
     def _submit_claimed(self, trade, name):
+        # Broker reads may have used the plan's remaining lifetime. Retire a
+        # demonstrably unsent entry before reserving an irreversible allowance.
+        # A deadline crossed during the claim still stays consumed below.
+        if name == 'entry' and self._entry_expired(trade):
+            self._finish(trade, 'Entry expired before submission; no crypto order sent')
+            return None
         if not self.store.claim_operation(trade, name, expected_control=trade['authorization']['crypto'] if name == 'entry' else None,
                                           attempted_at=self.now()):
             raise ConcurrentChange('Crypto order intent changed; reloading its broker state')
