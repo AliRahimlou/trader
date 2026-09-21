@@ -190,3 +190,64 @@ def test_future_or_previous_day_signals_do_not_fill():
                            [signal(day="2026-08-31"), signal("11:00", setup="future")], frictionless())
     assert not result["trades"]
     assert {r["reason"] for r in result["rejections"]} == {"expired_session", "no_executable_bar_after_signal"}
+
+
+def test_session_cap_is_shared_by_candidate_list_and_does_not_block_exits():
+    bars = [bar("10:15", h=111), bar("10:30", h=111), bar("10:45", h=111),
+            bar("10:15", h=111, day="2026-09-02")]
+    signals = [signal(setup="method-a"), signal("10:15", setup="method-b"),
+               signal("10:30", setup="method-c"),
+               signal(day="2026-09-02", setup="next-session")]
+    result = run_execution(bars, signals, frictionless(max_entries_per_session=2))
+    assert [t['setup_id'] for t in result['trades']] == ['method-a', 'method-b', 'next-session']
+    assert result['summary']['session_submission_attempts'] == {'2026-09-01': 2, '2026-09-02': 1}
+    assert result['rejections'][0]['reason'] == 'session_entry_limit'
+    assert result['open_position'] is None
+
+
+def test_rejected_submissions_consume_cap_but_preflight_rejections_do_not():
+    bars = [bar('10:15', o=102, h=103, l=101, c=102), bar('10:30'), bar('10:45'), bar('11:00')]
+    signals = [signal(), signal('10:15'), signal('10:30', setup='second'), signal('10:45', setup='third')]
+    result = run_execution(bars, signals, frictionless(max_entries_per_session=2, reject_every_n=1))
+    assert [r['reason'] for r in result['rejections']] == [
+        'entry_drift_limit', 'simulated_broker_rejection', 'simulated_broker_rejection', 'session_entry_limit']
+    assert result['summary']['attempted_setup_count'] == 2
+    assert result['summary']['session_submission_attempts'] == {'2026-09-01': 2}
+
+
+@pytest.mark.parametrize('cap', [-1, 1.5, True, '2'])
+def test_invalid_entry_caps_fail_closed(cap):
+    with pytest.raises(ValueError, match='Session entry cap'):
+        frictionless(max_entries_per_session=cap)
+
+
+def test_zero_entry_cap_blocks_new_entries():
+    result = run_execution([bar('10:15')], [signal()], frictionless(max_entries_per_session=0))
+    assert result['summary']['attempted_setup_count'] == 0
+    assert result['rejections'][0]['reason'] == 'session_entry_limit'
+
+
+def test_simultaneous_candidates_keep_caller_rank_not_opaque_identifier_order():
+    result = run_execution([bar('10:15', h=111)], [signal(setup='z-first'), signal(setup='a-second')],
+                           frictionless(max_entries_per_session=2))
+    assert result['trades'][0]['setup_id'] == 'z-first'
+    assert result['rejections'][0]['setup_id'] == 'a-second'
+
+
+def test_missing_intraday_prices_while_exposed_censor_the_simulated_path():
+    from research.metrics import summarize
+    result = run_execution([bar('10:15'), bar('16:00')], [signal()], frictionless())
+    assert result['summary']['price_path_complete'] is False
+    assert result['unobserved_exposure_intervals'] == [{
+        'after': dt('10:15').isoformat(), 'before': dt('15:45').isoformat(),
+        'day': '2026-09-01', 'setup_id': 's1'}]
+    metrics = summarize(result)
+    assert metrics['price_path_complete'] is False
+    assert metrics['unobserved_exposure_interval_count'] == 1
+    assert not metrics['uncertainty']['available']
+
+
+def test_missing_prices_while_flat_do_not_censor_exposure():
+    result = run_execution([bar('10:15', h=111), bar('16:00')], [signal()], frictionless())
+    assert result['summary']['price_path_complete'] is True
+    assert result['unobserved_exposure_intervals'] == []

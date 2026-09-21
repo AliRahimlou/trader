@@ -30,7 +30,7 @@ def analyses(broker, symbols=SYMBOLS):
     return {symbol: signal(symbol, broker.at) for symbol in symbols}
 
 
-def test_two_lifecycles_fill_capacity_and_a_confirmed_exit_frees_a_slot(engine):
+def test_confirmed_exit_frees_capacity_but_not_the_session_entry_allowance(engine):
     e, b, store, main, _ = engine
     store.configure({'symbols': list(SYMBOLS)})
     controls = store.control(), main.control()
@@ -51,9 +51,11 @@ def test_two_lifecycles_fill_capacity_and_a_confirmed_exit_frees_a_slot(engine):
     assert counts == Counter(account=2, lookup=4, positions=2, orders=2, quote=2)
     b.fill(b.sent[1]['client_order_id'])
     e.tick(analyses(b))
-    assert {t['symbol'] for t in store.active_trades()} == {'ETH/USD', 'SOL/USD'}
-    assert len([order for order in b.sent if order['side'] == 'buy']) == 3
-    assert store.decision_review(b.at)['order_attempts'] == 3
+    assert {t['symbol'] for t in store.active_trades()} == {'ETH/USD'}
+    assert len([order for order in b.sent if order['side'] == 'buy']) == 2
+    assert store.decision_review(b.at)['order_attempts'] == 2
+    assert 'two new entry attempts' in store.decision_review(b.at)['latest_by_symbol']['SOL/USD']['reason']
+    assert main.session_entry_allowance(b.at)['remaining'] == 0
     assert controls == (store.control(), main.control())
 
 
@@ -109,18 +111,17 @@ def test_reduced_capacity_does_not_block_any_existing_position_exit(engine, monk
     import pivot.crypto_execution as module
     e, b, store, _, _ = engine
     store.configure({'symbols': list(SYMBOLS)})
-    monkeypatch.setattr(module, 'MAX_ACTIVE_CRYPTO_TRADES', 3)
-    for _ in range(3):
+    for _ in range(2):
         e.tick(analyses(b))
-    assert len(store.active_trades()) == 3
-    monkeypatch.setattr(module, 'MAX_ACTIVE_CRYPTO_TRADES', 2)
+    assert len(store.active_trades()) == 2
+    monkeypatch.setattr(module, 'MAX_ACTIVE_CRYPTO_TRADES', 1)
     for stop in [row for row in b.sent if row['type'] == 'stop_limit']:
         b.fill(stop['client_order_id'])
-    # Off still reconciles all three positions even though they exceed the cap.
+    # Off still reconciles both positions even though they exceed the reduced cap.
     store.configure({'enabled': False})
     e.tick(analyses(b))
-    assert not store.active_trades() and len(b.sent) == 6
-    assert len(store.history()) == 3
+    assert not store.active_trades() and len(b.sent) == 4
+    assert len(store.history()) == 2
 
 
 def test_management_status_is_not_borrowed_from_another_market(engine, monkeypatch):

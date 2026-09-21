@@ -515,6 +515,13 @@ class Service:
         global_live = control.get('enabled') is True and control.get('policy') == POLICY_VERSION
         result['live_enabled'] = global_live
         result['portfolio'] = self.portfolio_snapshot(global_live)
+        try:
+            result['entry_allowance'] = self.store.session_entry_allowance()
+        except Exception:
+            # Reporting cannot interfere with existing position supervision.
+            result['entry_allowance'] = {'status': 'blocked', 'limit': 2, 'used': None,
+                'remaining': 0, 'timezone': 'America/New_York',
+                'reason': 'Session entry allowance could not be verified.'}
         result['crypto_execution'] = self.crypto_executor.snapshot() if self.crypto_executor else {
             'message':'Crypto broker execution is not configured for this runtime.', 'at':None, 'trades':[], 'incidents':[]}
         result['worker_health'] = self.worker_health()

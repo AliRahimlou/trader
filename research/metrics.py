@@ -76,6 +76,8 @@ def summarize(result: dict, *, seed: int = 1729, bootstrap_samples: int = 2000,
         uncertainty["reason"] = f"Only {len(daily)} observed sessions; at least {minimum_sessions} required by this reporting rule."
     elif unresolved_days or summary.get("unresolved_exposure"):
         uncertainty["reason"] = "Incomplete session liquidation or unresolved exposure makes the result censored."
+    elif summary.get("price_path_complete") is False:
+        uncertainty["reason"] = "Missing intraday prices while exposed may hide stop/target events; the result is censored."
     elif sum(n > 0 for n in counts) < 5:
         uncertainty["reason"] = "Fewer than five sessions contain completed trades; uncertainty is inconclusive."
     else:
@@ -120,6 +122,8 @@ def summarize(result: dict, *, seed: int = 1729, bootstrap_samples: int = 2000,
             "turnover_over_starting_capital": summary["turnover_over_starting_capital"],
             "max_observed_position_notional": summary["max_observed_position_notional"],
             "unresolved_exposure": summary.get("unresolved_exposure", False),
+            "price_path_complete": summary.get("price_path_complete"),
+            "unobserved_exposure_interval_count": len(result.get("unobserved_exposure_intervals", [])),
             "incomplete_session_count": unresolved_days,
             "rejection_count": len(result["rejections"]),
             "rejection_reasons": {reason: sum(r["reason"] == reason for r in result["rejections"])

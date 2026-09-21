@@ -35,6 +35,7 @@ CONTAINER = 'pivot-video'
 STATUS_KEYS = {'state', 'reason', 'active_revision', 'candidate_revision', 'checked_at', 'deployed_at'}
 TOKEN = re.compile(r'[a-f0-9]{64}\Z')
 HOLD_ID = re.compile(r'[a-f0-9]{32}\Z')
+SESSION_ENTRY_PROTOCOL = 'ny-session-two-v1'
 
 
 class UpdateError(RuntimeError):
@@ -203,7 +204,7 @@ def aware(value):
 def valid_hold(value):
     try:
         required = {'version', 'id', 'previous_revision', 'candidate_revision', 'created_at', 'legacy_bootstrap'}
-        optional = {'permission_token', 'saved_live_enabled'}
+        optional = {'permission_token', 'saved_live_enabled', 'session_entry_protocol'}
         return (isinstance(value, dict) and required <= value.keys() and not value.keys() - required - optional
                 and value.get('version') == 'entry-hold-v1'
                 and isinstance(value.get('id'), str) and bool(HOLD_ID.fullmatch(value['id']))
@@ -215,6 +216,7 @@ def valid_hold(value):
                 and (value.get('permission_token') is None or
                      isinstance(value['permission_token'], str) and bool(TOKEN.fullmatch(value['permission_token'])))
                 and ('saved_live_enabled' not in value or type(value['saved_live_enabled']) is bool)
+                and ('session_entry_protocol' not in value or value['session_entry_protocol'] == SESSION_ENTRY_PROTOCOL)
                 and type(value.get('legacy_bootstrap')) is bool)
     except (ValueError, TypeError, KeyError, AttributeError):
         return False
@@ -237,6 +239,9 @@ def readiness_allowed(value, revision, hold, locked_at, now, *, permission_token
     if (value.get('ok') is not True or value.get('revision') != revision
             or value.get('deployment_protocol') != 'entry-gate-v1'):
         return False, 'The runtime has not verified this revision and entry-gate protocol'
+    if ('session_entry_protocol' in hold
+            and value.get('session_entry_protocol') != hold['session_entry_protocol']):
+        return False, 'The runtime has not preserved the shared session entry limit; new entries remain held'
     gate = value.get('gate')
     if (not isinstance(gate, dict) or gate.get('configured') is not True or gate.get('locked') is not True
             or gate.get('error') or gate.get('hold_present') is not True
@@ -500,6 +505,8 @@ def update(root, *, build_only=False):
                     raise UpdateError('Current container and API revisions disagree; automatic replacement is paused')
                 if health.get('ok') is not True or health.get('legacy_loaded') is not False:
                     raise UpdateError('Current app health is not verified; automatic replacement is paused')
+                if health.get('session_entry_protocol') not in (None, SESSION_ENTRY_PROTOCOL):
+                    raise UpdateError('Current session entry protocol is not supported by this updater')
                 legacy = health.get('deployment_protocol') != 'entry-gate-v1'
                 if legacy:
                     snapshot = read_local('/api/snapshot')
@@ -516,6 +523,8 @@ def update(root, *, build_only=False):
                 hold = {'version': 'entry-hold-v1', 'id': uuid4().hex, 'previous_revision': previous_revision,
                         'candidate_revision': revision, 'created_at': utcnow().isoformat(),
                         'permission_token': None, 'legacy_bootstrap': legacy}
+                if health.get('session_entry_protocol') == SESSION_ENTRY_PROTOCOL:
+                    hold['session_entry_protocol'] = SESSION_ENTRY_PROTOCOL
                 if legacy:
                     hold['saved_live_enabled'] = False
                 if os.path.lexists(hold_path(root)):

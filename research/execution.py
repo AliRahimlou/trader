@@ -47,6 +47,9 @@ class ExecutionConfig:
     # ISO date -> new shares / old shares. Needed only if incomplete data leaves
     # overnight exposure. Signals must already use contemporaneous price units.
     split_factors: dict[str, float] | None = None
+    # A durable live submission also consumes a slot when its outcome is
+    # rejected/unknown. This simulator models rejected outcomes, not timeouts.
+    max_entries_per_session: int | None = None
 
     def __post_init__(self):
         positive = (self.starting_capital, self.trade_notional, self.min_trade_notional)
@@ -77,6 +80,9 @@ class ExecutionConfig:
                 raise ValueError("Session close must belong to its local date")
         if not all(isfinite(v) and v > 0 for v in (self.split_factors or {}).values()):
             raise ValueError("Split factors must be finite and positive")
+        if (self.max_entries_per_session is not None
+                and (type(self.max_entries_per_session) is not int or self.max_entries_per_session < 0)):
+            raise ValueError("Session entry cap must be a nonnegative integer or None")
 
 
 def _aware(value: datetime) -> None:
@@ -97,7 +103,9 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
     cfg = config or ExecutionConfig()
     tz = ZoneInfo(cfg.timezone)
     ordered_bars = sorted(bars, key=lambda b: b.end)
-    ordered_signals = sorted(signals, key=lambda s: (s.at, s.setup_id))
+    # Stable chronological sorting retains the caller's point-in-time rank
+    # among simultaneous candidates. An opaque event ID is not a ranking rule.
+    ordered_signals = sorted(signals, key=lambda s: s.at)
     previous_end = None
     for bar in ordered_bars:
         _aware(bar.end)
@@ -123,6 +131,9 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
     last_mark = cfg.starting_capital
     day_start = cfg.starting_capital
     daily = []
+    session_attempts = {}
+    exposure_gaps = []
+    previous_observed_end = None
     haircut = (cfg.spread_bps / 2 + cfg.slippage_bps) / 10000
 
     def event(kind, at, **details):
@@ -181,6 +192,14 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
             continue
         deadline = regular_close - timedelta(minutes=cfg.flatten_minutes_before_close)
         closing_bar = start >= deadline or bar.end > deadline or bar.end == regular_close
+
+        if (position is not None and previous_observed_end is not None
+                and start > previous_observed_end and last_day == day):
+            # Missing prices may hide a stop/target hit. Endpoint accounting
+            # remains a simulation, but cannot support an uncensored return.
+            exposure_gaps.append({'after': previous_observed_end.isoformat(),
+                                  'before': start.isoformat(), 'day': day,
+                                  'setup_id': position['setup_id']})
 
         if last_day != day:
             if last_day is not None:
@@ -253,7 +272,12 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
             if qty <= 0 or qty * price < cfg.min_trade_notional:
                 reject(signal, "below_minimum_size", start)
                 continue
+            if (cfg.max_entries_per_session is not None
+                    and session_attempts.get(day, 0) >= cfg.max_entries_per_session):
+                reject(signal, "session_entry_limit", start)
+                continue
             attempted_setups.add(signal.setup_id)
+            session_attempts[day] = session_attempts.get(day, 0) + 1
             attempt += 1
             if cfg.reject_every_n and attempt % cfg.reject_every_n == 0:
                 reject(signal, "simulated_broker_rejection", start)
@@ -290,6 +314,7 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
             # No second trade on an OHLC bar whose internal sequencing is unknown.
             had_position_at_open = True
         mark(bar)
+        previous_observed_end = bar.end
 
     for signal in ordered_signals[cursor:]:
         reject(signal, "no_executable_bar_after_signal", signal.at)
@@ -305,6 +330,7 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
     return {"config": serialized_cfg, "trades": trades, "events": events,
             "rejections": rejections, "equity": equity, "daily_equity": daily,
             "open_position": {k: v for k, v in position.items() if k != "entered_dt"} if position else None,
+            "unobserved_exposure_intervals": exposure_gaps,
             "summary": {"starting_capital": cfg.starting_capital, "ending_cash": cash,
                         "ending_equity": last_mark, "net_pnl": last_mark - cfg.starting_capital,
                         "realized_net_pnl": sum(t["net_pnl"] for t in trades),
@@ -313,6 +339,8 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
                         "max_observed_position_notional": max_notional,
                         "independent_setup_count": len(accepted_setups),
                         "attempted_setup_count": len(attempted_setups),
+                        "session_submission_attempts": session_attempts,
+                        "price_path_complete": not exposure_gaps,
                         "closed_trade_count": len(trades), "unresolved_exposure": position is not None},
             "assumptions": ["Research simulation only; costs are hypothetical, not broker quotes or fees.",
                             "Long fractional QQQ, fixed dollar target, one position, no borrowing or shorts.",
@@ -324,4 +352,6 @@ def run_execution(bars: list[Bar], signals: list[TradeSignal],
                             "Exit uses open of bar spanning close buffer; no invented intrabar exit quote.",
                             "Without injected calendar, observed dates use 09:30–16:00 New York hours.",
                             "Missing closing data is explicitly flagged; later open bears overnight gap.",
+                            "Missing intraday prices while exposed censor the path; returned P&L is an endpoint simulation, not a verified stop/target outcome.",
+                            "Caller order ranks simultaneous candidates; a configured NY-session cap counts every attempted submission including rejection.",
                             "No dividends, financing interest, taxes, market impact, or borrow costs modeled."]}

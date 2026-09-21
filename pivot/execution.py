@@ -551,6 +551,8 @@ class Executor:
             raise Waiting('Live money is on — data verification expired; waiting for a fresh update')
         setup = snapshot.get('setup') if isinstance(snapshot.get('setup'), dict) else {}
         setup, expires, key = self._entry_candidate(setup, now)
+        self._gate('entry_reservation')
+        self.store.assert_session_entry_available(self.now())
         authorization = self.store.entry_authorization()
         self._gate('broker_snapshot')
         account = self.broker.account()
@@ -737,7 +739,8 @@ class Executor:
         try:
             if op['state'] == 'prepared':
                 # Commit BEFORE POST. A crash or timeout can never produce an automatic second POST.
-                if self.store.claim_operation(trade['id'], name, expected_entry=trade if name == 'entry' else None):
+                if self.store.claim_operation(trade['id'], name, expected_entry=trade if name == 'entry' else None,
+                                              attempted_at=self.now()):
                     op['state'] = 'attempted'
                     if name == 'entry':
                         # Waiting for the durable claim can cross an evidence
@@ -792,8 +795,28 @@ class Executor:
                 self._check_unknown_protection(trade)
             raise Waiting('Order status is uncertain. Waiting for its broker identifier; no duplicate will be sent.')
         self._gate('order_identity')
-        if order.get('client_order_id') != op['payload']['client_order_id'] or order.get('symbol') != 'QQQ' or order.get('side') != op['payload']['side']:
-            raise Waiting('Broker order identity mismatch; manual review required')
+        try:
+            self._validate_order_payload(order, op['payload'], op.get('last_seen') or {})
+        except (ValueError, KeyError, TypeError):
+            # Keep the lifecycle and last verified evidence intact. A later good
+            # lookup must still resume supervision, including while entries are
+            # paused; malformed evidence cannot authorize a competing sale.
+            if self.store.control().get('enabled') is True:
+                self.store.set_control(False)
+            incidents = trade.setdefault('order_validation', {})
+            if name not in incidents or incidents[name].get('resolved_at'):
+                incidents[name] = {'first_observed_at': self.now().isoformat(),
+                                   'reason': 'Broker order does not match its durable request'}
+                self.store.save_trade(trade)
+                self.store.event('order_validation_failed', {'trade_id': trade['id'], 'operation': name,
+                                                            'symbol': trade['symbol']})
+            self._diagnostic_outcome = 'attention'
+            raise Waiting('Broker order details do not match the saved request. New entries paused; reconciling the existing order without another submission.') from None
+        incident = trade.get('order_validation', {}).get(name)
+        if incident and not incident.get('resolved_at'):
+            incident['resolved_at'] = self.now().isoformat()
+            self.store.save_trade(trade)
+            self.store.event('order_validation_reconciled', {'trade_id': trade['id'], 'operation': name})
         if order.get('status') == 'rejected':
             self._gate('order_rejection')
             self._diagnostic_outcome = 'order_rejected'
@@ -805,13 +828,61 @@ class Executor:
             if (op.get('last_seen') or {}).get('status') != 'rejected':
                 self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol'],
                                                    'evidence': 'broker_status'})
-        evidence = {k:order.get(k) for k in ('id','client_order_id','symbol','side','status','qty','filled_qty','filled_avg_price','updated_at','filled_at')}
+        evidence = {k:order.get(k) for k in ('id','client_order_id','symbol','side','status','qty','notional',
+                    'type','time_in_force','stop_price','limit_price','extended_hours','order_class',
+                    'filled_qty','filled_avg_price','updated_at','filled_at')}
         if op.get('last_seen') != evidence:
             op['last_seen'] = evidence
             self.store.save_trade(trade)
         if not self._diagnostic_outcome:
             self._gate('order_reconciliation')
         return order
+
+    @staticmethod
+    def _validate_order_payload(order, payload, previous):
+        """Validate actual broker evidence without imposing requested-qty on notional buys.
+
+        Alpaca documents stop -> market election. Its legacy official order
+        documentation also describes buy-stop -> stop-limit collars (4% below
+        $50, 2.5% otherwise). Preserve these legal transitions while verifying the
+        original stop, requested quantity, DAY lifetime and immutable identity.
+        """
+        if (not isinstance(order, dict) or not isinstance(order.get('id'), str) or not order['id']
+                or any(order.get(key) != payload[key] for key in ('client_order_id', 'symbol', 'side', 'time_in_force'))
+                # Unknown future statuses remain unconfirmed, so the existing
+                # cancellation-safe protection deadline can still recover them.
+                or not isinstance(order.get('status'), str) or not order['status']
+                or order.get('order_class') not in (None, '', 'simple') or order.get('legs')
+                or order.get('extended_hours', False) is not payload.get('extended_hours', False)
+                or previous.get('id') and order['id'] != previous['id']):
+            raise ValueError('Order identity or execution scope differs')
+        requested_type, reported_type = payload['type'], order.get('type')
+        if requested_type == 'stop':
+            stop = decimal(payload['stop_price'])
+            if stop <= 0 or decimal(order.get('stop_price')) != stop:
+                raise ValueError('Stop changed')
+            if reported_type not in ('stop', 'market'):
+                if payload['side'] != 'buy' or reported_type not in ('stop_limit', 'limit'):
+                    raise ValueError('Unsupported stop conversion')
+                collar = stop * decimal('1.04' if stop < 50 else '1.025')
+                if abs(decimal(order.get('limit_price')) - collar) > decimal('.01'):
+                    raise ValueError('Buy-stop collar differs')
+        elif reported_type != requested_type:
+            raise ValueError('Order type differs')
+        for key in ('qty', 'notional', 'limit_price'):
+            if key in payload and (decimal(payload[key]) <= 0 or decimal(order.get(key)) != decimal(payload[key])):
+                raise ValueError('Requested size or limit differs')
+        filled = decimal(order.get('filled_qty'))
+        if filled < 0 or filled < decimal(previous.get('filled_qty') or '0'):
+            raise ValueError('Invalid cumulative fill quantity')
+        if order.get('qty') is not None:
+            qty = decimal(order['qty'])
+            if qty < 0 or filled > qty or ('qty' in payload and qty <= 0):
+                raise ValueError('Fill exceeds order quantity')
+        if filled > 0 and decimal(order.get('filled_avg_price')) <= 0:
+            raise ValueError('Filled order needs a valid execution price')
+        if order['status'] == 'filled' and (filled <= 0 or ('qty' in payload and filled != decimal(payload['qty']))):
+            raise ValueError('Terminal fill does not match requested quantity')
 
     def _expire_entry(self, trade):
         self._gate('trade_finish')

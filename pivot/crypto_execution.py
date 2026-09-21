@@ -413,6 +413,7 @@ class CryptoRangeExecutor:
         # their management above is never limited by this new-entry budget.
         if len(self.store.active_trades()) >= MAX_ACTIVE_CRYPTO_TRADES:
             raise CryptoWaiting('Crypto execution capacity is full (two active positions); waiting for an existing position to finish.')
+        self.main_store.assert_session_entry_available(self.now())
         if self.entry_preflights_remaining <= 0:
             raise CryptoWaiting('Waiting for next broker-check slot; the original signal deadline still applies.')
         self.entry_preflights_remaining -= 1
@@ -539,7 +540,8 @@ class CryptoRangeExecutor:
         return self._accept_order(trade, name, result)
 
     def _submit_claimed(self, trade, name):
-        if not self.store.claim_operation(trade, name, expected_control=trade['authorization']['crypto'] if name == 'entry' else None):
+        if not self.store.claim_operation(trade, name, expected_control=trade['authorization']['crypto'] if name == 'entry' else None,
+                                          attempted_at=self.now()):
             raise ConcurrentChange('Crypto order intent changed; reloading its broker state')
         if name == 'entry' and self._entry_expired(trade):
             trade['ops'][name]['state'] = 'aborted_before_submit'

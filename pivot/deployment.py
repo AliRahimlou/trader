@@ -15,6 +15,7 @@ import stat
 from threading import local
 
 PROTOCOL = 'entry-gate-v1'
+SESSION_ENTRY_PROTOCOL = 'ny-session-two-v1'
 READINESS_MAX_SECONDS = 45
 
 
@@ -78,7 +79,7 @@ class EntryGate:
                 return result
             value = json.loads(raw, object_pairs_hook=_unique_object)
             required = {'version', 'id', 'previous_revision', 'candidate_revision', 'created_at'}
-            optional = {'permission_token', 'saved_live_enabled', 'legacy_bootstrap'}
+            optional = {'permission_token', 'saved_live_enabled', 'legacy_bootstrap', 'session_entry_protocol'}
             if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - optional:
                 return result
             if _hex(value.get('id'), 32):
@@ -90,6 +91,7 @@ class EntryGate:
                      and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)', value['created_at']) is not None
                      and created.tzinfo is not None and created.utcoffset() == timedelta(0)
                      and (value.get('permission_token') is None or _hex(value['permission_token'], 64))
+                     and ('session_entry_protocol' not in value or value['session_entry_protocol'] == SESSION_ENTRY_PROTOCOL)
                      and all(key not in value or type(value[key]) is bool for key in ('saved_live_enabled', 'legacy_bootstrap')))
             result['hold_valid'] = bool(valid)
             if valid and permission_details:
@@ -225,6 +227,7 @@ def deployment_readiness(executor, store, revision):
     """Fresh broker reads only. No snapshot cache, permission writes or order methods."""
     gate = getattr(executor, 'entry_gate', None) if executor is not None else None
     result = {'ok': False, 'revision': revision, 'deployment_protocol': PROTOCOL if gate else None,
+              'session_entry_protocol': SESSION_ENTRY_PROTOCOL,
               'read_started_at': None, 'checked_at': None,
               'gate': gate.status() if gate else {'configured': False, 'locked': False, 'hold_present': False, 'hold_id': None, 'hold_valid': False},
               'account_ready': None, 'account_identity_matches': None, 'positions_count': None,

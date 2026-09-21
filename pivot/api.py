@@ -14,7 +14,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .version import APP_VERSION
-from .deployment import EntryGate, PROTOCOL, deployment_readiness
+from .deployment import EntryGate, PROTOCOL, SESSION_ENTRY_PROTOCOL, deployment_readiness
 
 
 @dataclass(frozen=True)
@@ -198,7 +198,8 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
         control = service.store.control() if service.executor else {}
         from .policy import POLICY_VERSION
         result = {'ok': True, 'version': 'video-execution-v3', 'live_enabled': control.get('enabled') is True and control.get('policy') == POLICY_VERSION if service.executor else False,
-                  'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION}
+                  'legacy_loaded': False, 'revision': hosting.revision, 'app_version': APP_VERSION,
+                  'session_entry_protocol': SESSION_ENTRY_PROTOCOL}
         result['worker_health'] = service.worker_health()
         result['ready'] = result['worker_health']['ready']
         if service.executor is not None and service.executor.entry_gate is not None:

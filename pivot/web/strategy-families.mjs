@@ -48,19 +48,33 @@ export function globalCryptoAlert(snapshot) {
 export function portfolioView(snapshot) {
   const p=snapshot?.portfolio;
   const globalOn=typeof p?.global_live_enabled==='boolean'?p.global_live_enabled:snapshot?.live_enabled===true;
+  const entryAllowance=sessionEntryStatus(snapshot?.entry_allowance);
   const families=[['socrates','Socrates'],['range_reversal','4H Range Reversal']].map(([id,label])=>{
     const raw=p?.[id] || {};
     const enabled=p?raw.enabled===true:id==='socrates';
     const available=id==='socrates'?snapshot?.execution_available===true:raw.execution_available===true;
     return {id,label,enabled,available,target:raw.target_dollars || (id==='socrates'?snapshot?.settings?.target_dollars:'5.00'),
       symbols:id==='socrates'?['QQQ']:(Array.isArray(raw.symbols)?raw.symbols.filter(s=>CRYPTO_MARKETS.includes(s)):['BTC/USD']),
-      status:!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':'On · entries enabled',
+      status:!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':entryAllowance.blocked?'On · new entries paused':'On · entries enabled',
       reviewRequired:raw.review_required===true,
       policyVersion:raw.policy_version,policy:Array.isArray(raw.policy_summary)?raw.policy_summary:[],
       shortSupported:raw.capabilities?.short===true};
   });
-  return {configured:!!p,globalOn,families,enabled:families.filter(f=>f.enabled),
+  return {configured:!!p,globalOn,families,enabled:families.filter(f=>f.enabled),entryAllowance,
     scope:families.filter(f=>f.enabled).map(f=>f.label).join(' + ') || 'No strategies enabled'};
+}
+
+export function sessionEntryStatus(value) {
+  if(!value || value.status!=='available' || value.limit!==2
+      || !Number.isInteger(value.used) || value.used<0
+      || !Number.isInteger(value.remaining) || value.remaining!==Math.max(0,2-value.used)
+      || !/^\d{4}-\d{2}-\d{2}$/.test(value.session_day || '')
+      || value.timezone!=='America/New_York')return {
+    blocked:true,text:'Session entry allowance unverified. New entries require a verified allowance; existing positions remain managed.'};
+  const blocked=value.remaining===0;
+  return {blocked,text:`${value.session_day} · New York session: ${value.used} of 2 entry attempts used across both strategies. `+
+    (blocked?'Session limit reached. ':'')+
+    'Rejected or uncertain submissions count; exits do not. Existing positions remain managed.'};
 }
 
 export function portfolioStatus(snapshot,fallback) {
@@ -75,6 +89,9 @@ export function portfolioStatus(snapshot,fallback) {
   if(snapshot.review_required || snapshot.execution?.review_required || (gate?.configured===true &&
       (gate.locked===true || gate.hold_present===true || gate.error)))return fallback;
   const open=trades.length+(snapshot.execution?.trade?1:0);
+  if(p.globalOn && p.entryAllowance.blocked)return {
+    title:open?`Managing ${open} position${open===1?'':'s'} · new entries paused`:'New entries paused · session allowance',
+    text:p.entryAllowance.text};
   return {title:open?`Managing ${open} position${open===1?'':'s'}`:p.globalOn?`Live money on · ${p.scope}`:'Live money off · new entries paused',
     text:p.globalOn?`${p.scope}. Each enabled strategy waits for its own data and entry checks. Existing positions continue their exits.`:
       'No strategy can open a new position. Existing positions continue their exits; saved strategy selections are preserved.'};

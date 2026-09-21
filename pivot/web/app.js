@@ -80,6 +80,8 @@ function reconcileLive(next) {
 function renderStrategyControls() {
   const p=portfolioView(snapshot),busy=strategySaving||saving||toggling||familyConnectionUnavailable;
   $('strategy-run-summary').textContent=`Global Live ${p.globalOn?'On':'Off'} · ${p.families.map(f=>`${f.label} ${f.enabled?'On':'Off'} (${money(f.target)} per purchase)`).join(' · ')}. Changing views does not change trading.`;
+  $('entry-allowance').textContent=familyConnectionUnavailable
+    ? 'Session entry allowance unverified while the app reconnects.' : p.entryAllowance.text;
   $('execution-scope').textContent=`Global Live · ${p.scope}`;
   for(const f of p.families){
     const prefix=f.id==='socrates'?'socrates':'range';
