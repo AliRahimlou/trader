@@ -1,0 +1,13 @@
+# Version 4.3.1 — preserve still-valid crypto entry opportunities
+
+A crypto entry could be prepared, rejected by a later quote check before any broker submission, and then permanently excluded by its saved event identifier. A one-cent ask increase was sufficient to reproduce this even when the original signal, price-drift and cost checks remained valid.
+
+The executor can now build a fresh plan for an event whose retained evidence proves that its previous plan was never submitted or claimed. Only exact pre-submission expiry, price-change or cash-change outcomes qualify. The same original event, confirmation timestamp and account must match; the fresh plan must pass current permissions, data, quote, cost, cash, exposure, sizing and session-allowance checks. Retiring an old prepared plan ends its work for that cycle. The original 90-second signal window is never extended. Rejected, uncertain, partial, zero-fill or otherwise attempted entries remain consumed and cannot be resubmitted.
+
+Slow account and quote checks could also expire a prepared plan before its submission claim. The executor now checks expiry immediately before claiming, keeping an already-expired unsent plan from consuming an entry allowance. The existing check after the claim remains: an authorization or deadline change during that final race still consumes its durable claim and sends no order. No existing claim is refunded.
+
+Replanning is transactional, advances the saved version, and retains the abandoned plan in the bounded event journal. Concurrent replans and stale workers cannot overwrite the winning plan. No database migration is required. This release preserves strategy rules, purchase sizes, market selections, saved activation and the shared two-attempt New York session limit.
+
+Regression fixtures use invented native candle sequences and strict fake broker responses to cover valid entry/protection, quote movement, original expiry, slow reads, restart, contention, settings changes, unknown submissions and exhausted allowance. These are engineering checks, not live fills or profitability evidence. The standard release image requires isolated Python and browser tests and a frontend build before installation.
+
+Deploy through the existing AllSpark updater, which holds new entries while preserving supervision, verifies a flat account before replacement, preserves persistent state and permissions, and checks the installed revision and worker progress before reopening entries. A corrective rollback must preserve the session-entry capability marker and all financial state; do not restore an old database or clear an unverified hold. Version 4.3.0 retains the required cap protocol but lacks this opportunity repair.
