@@ -9,6 +9,7 @@ import pytest
 
 from pivot.crypto_store import CryptoStore
 from pivot.daily_review import DailyReviewStore, build_review
+from pivot.diagnostics import build_decision_trace
 from pivot.store import Store
 
 NOW = datetime(2026, 9, 20, 16, tzinfo=timezone.utc)
@@ -61,10 +62,19 @@ def insert_trade(stores, trade, crypto=False):
             db.execute('INSERT INTO trades VALUES(?,?,?)', (trade['id'], int(trade['stage']=='finished'), json.dumps(trade)))
 
 
-def trace(stores, reason, at='2026-09-19T15:00:00+00:00'):
-    value = {'captured_at': at, 'first_blocker': {'name': reason}}
+def trace(stores, reason, at='2026-09-19T15:00:00+00:00', session_open=True):
+    value = {'captured_at': at, 'first_blocker': {'name': reason},
+             'execution': {'regular_session_open': session_open, 'clock_at': at}}
     with stores[0].connect() as db:
-        db.execute('INSERT INTO decision_traces VALUES(NULL,?,?,?,?,?,?)', (at, reason, at, at, 1, json.dumps(value)))
+        db.execute('INSERT INTO decision_traces VALUES(NULL,?,?,?,?,?,?)', (at, reason or 'qualified', at, at, 1, json.dumps(value)))
+
+
+def execution_check(stores, gate, **changes):
+    value = {'version': 'execution-check-v1', 'captured_at': '2026-09-19T15:00:00+00:00',
+             'checkpoint_at': '2026-09-19T15:00:00+00:00', 'outcome': 'waiting',
+             'gate': gate, 'trade': None, 'historical_only': True, 'order_authorized': False,
+             **changes}
+    stores[0].record_execution_check(value)
 
 
 def test_no_trades_and_missing_fees_are_not_invented_profit(stores):
@@ -91,6 +101,173 @@ def test_actual_blockers_are_recorded_without_rule_change_recommendation(stores)
     assert 'short setup' in result['families']['range_reversal']['blockers'][0]['reason']
     assert len([item for item in result['investigations'] if item['code']=='entry_blocker']) == 2
     assert all('rules' in item['reason'] for item in result['investigations'] if item['code']=='entry_blocker')
+
+
+@pytest.mark.parametrize('session_open', [True, False, None])
+def test_signal_blockers_require_a_known_open_session(stores, session_open):
+    at = datetime(2026, 9, 19, 15, tzinfo=timezone.utc)
+    observation = build_decision_trace(None, {}, None, at, broker_clock={
+        'timestamp': at.isoformat(), 'is_open': session_open}, live_permission=True)
+    stores[0].record_decision(observation)
+    result = report(stores)
+    family = result['families']['socrates']
+    expected = [{'reason': 'Current Nasdaq observation', 'count': 1}]
+    assert family['checks_recorded'] == 1 and family['submission_attempts'] == 0
+    assert family['blockers'] == (expected if session_open is True else [])
+    assert family['closed_session_checks'] == int(session_open is False)
+    assert family['session_unknown_checks'] == int(session_open is None)
+    assert family['closed_session_observations'] == (expected if session_open is False else [])
+    assert family['session_unknown_observations'] == (expected if session_open is None else [])
+    assert any(row['code'] == 'entry_blocker' and row['family'] == 'socrates'
+               for row in result['investigations']) == (session_open is True)
+    assert any('market-session state' in value for value in family['missing_evidence']) == (session_open is None)
+
+
+@pytest.mark.parametrize('session_open', [True, False])
+@pytest.mark.parametrize('clock_at,known', [
+    ('2026-09-19T15:00:00+00:00', True),
+    ('2026-09-19T14:59:45+00:00', True),
+    ('2026-09-19T14:59:44+00:00', False),
+    ('2026-09-18T19:59:00+00:00', False),
+    ('2026-09-19T15:00:01+00:00', False),
+    (None, False),
+    ('absent', False),
+    ('malformed', False),
+    ('2026-09-19T15:00:00', False),
+])
+def test_signal_session_clock_must_be_fresh_at_observation(stores, session_open, clock_at, known):
+    at = datetime(2026, 9, 19, 15, tzinfo=timezone.utc)
+    observation = build_decision_trace(None, {}, None, at, broker_clock={
+        'timestamp': at.isoformat(), 'is_open': session_open}, live_permission=True)
+    # Include older/malformed retained records as well as the builder's valid
+    # timestamps. The report must assess freshness at capture, not at review.
+    if clock_at == 'absent':
+        observation['execution'].pop('clock_at')
+    else:
+        observation['execution']['clock_at'] = clock_at
+    stores[0].record_decision(observation)
+    result = report(stores)
+    family = result['families']['socrates']
+    expected = [{'reason': 'Current Nasdaq observation', 'count': 1}]
+    assert family['checks_recorded'] == 1 and family['submission_attempts'] == 0
+    assert family['blockers'] == (expected if known and session_open else [])
+    assert family['closed_session_checks'] == int(known and not session_open)
+    assert family['session_unknown_checks'] == int(not known)
+    assert family['closed_session_observations'] == (expected if known and not session_open else [])
+    assert family['session_unknown_observations'] == ([] if known else expected)
+    assert any(row['code'] == 'entry_blocker' and row['family'] == 'socrates'
+               for row in result['investigations']) == (known and session_open)
+    assert any('current broker clock' in value for value in family['missing_evidence']) == (not known)
+
+
+def test_legacy_signal_without_session_evidence_is_preserved_separately(stores):
+    stores[0].record_decision({'version': 'decision-trace-v3',
+                              'captured_at': '2026-09-19T15:00:00+00:00',
+                              'checkpoint_at': '2026-09-19T15:00:00+00:00',
+                              'first_blocker': {'name': 'Nasdaq level event'}})
+    family = report(stores)['families']['socrates']
+    assert family['checks_recorded'] == family['session_unknown_checks'] == 1
+    assert family['blockers'] == []
+    assert family['session_unknown_observations'] == [{'reason': 'Nasdaq level event', 'count': 1}]
+
+
+def test_pretrade_account_blockers_survive_account_switch_without_becoming_attempts(stores):
+    trace(stores, None)
+    execution_check(stores, 'account_status', account_ref=ACCOUNT, regular_session_open=True)
+    execution_check(stores, 'buying_power', account_ref='private-account-B', regular_session_open=True)
+    for account, expected in ((ACCOUNT, 'account_status'), ('private-account-B', 'buying_power')):
+        result = report(stores, account_ref=account, accounting_summary=accounting(account=account))
+        family = result['families']['socrates']
+        assert family['blockers'] == [{'reason': expected, 'count': 1}]
+        assert family['execution_checks_recorded'] == 1 and family['unassigned_execution_checks'] == 0
+        assert family['submission_attempts'] == family['filled_entries'] == 0
+        assert any(row['code'] == 'entry_blocker' and row['family'] == 'socrates'
+                   for row in result['investigations'])
+        assert ACCOUNT not in json.dumps(result) and 'private-account-B' not in json.dumps(result)
+
+
+def test_legacy_pretrade_checks_stay_unassigned_with_missing_evidence(stores):
+    execution_check(stores, 'unassigned_sensitive_reason')
+    execution_check(stores, 'also_unassigned', account_ref=None)
+    for account in (ACCOUNT, 'private-account-B'):
+        result = report(stores, account_ref=account, accounting_summary=accounting(account=account))
+        family = result['families']['socrates']
+        assert family['blockers'] == [] and family['execution_checks_recorded'] == 0
+        assert family['unassigned_execution_checks'] == 2 and family['submission_attempts'] == 0
+        assert any('account association' in value for value in family['missing_evidence'])
+        assert 'unassigned_sensitive_reason' not in json.dumps(result)
+        assert 'also_unassigned' not in json.dumps(result)
+
+
+def test_legacy_trade_link_proves_account_but_conflicting_explicit_identity_does_not(stores):
+    for identity, account in (('trade-a', ACCOUNT), ('trade-b', 'private-account-B')):
+        trade = lifecycle(identity=identity, account=account)
+        trade['ops'] = {}
+        insert_trade(stores, trade)
+    execution_check(stores, 'account_status', trade={'id': 'trade-a'})
+    execution_check(stores, 'buying_power', trade={'id': 'trade-b'})
+    execution_check(stores, 'conflicting_reason', account_ref='private-account-B', trade={'id': 'trade-a'})
+    for account, expected in ((ACCOUNT, 'account_status'), ('private-account-B', 'buying_power')):
+        result = report(stores, account_ref=account, accounting_summary=accounting(account=account))
+        family = result['families']['socrates']
+        assert family['blockers'] == [{'reason': expected, 'count': 1}]
+        assert family['execution_checks_recorded'] == family['unassigned_execution_checks'] == 1
+        assert family['submission_attempts'] == 0
+        assert 'conflicting_reason' not in json.dumps(result)
+
+
+def test_closed_session_execution_wait_is_separate_from_owned_trade_attention(stores):
+    trace(stores, 'Current Nasdaq observation', session_open=False)
+    execution_check(stores, 'market_session', account_ref=ACCOUNT, regular_session_open=False)
+    result = report(stores)
+    family = result['families']['socrates']
+    assert family['blockers'] == [] and family['submission_attempts'] == 0
+    assert family['closed_session_checks'] == family['closed_session_execution_checks'] == 1
+    assert family['closed_session_observations'] == [
+        {'reason': 'Current Nasdaq observation', 'count': 1}, {'reason': 'market_session', 'count': 1}]
+    assert not any(row['code'] == 'entry_blocker' and row['family'] == 'socrates'
+                   for row in result['investigations'])
+    trade = lifecycle(completed=None)
+    trade.update(stage='attention', ops={})
+    insert_trade(stores, trade)
+    execution_check(stores, 'protection', account_ref=ACCOUNT, trade={'id': trade['id']},
+                    outcome='attention', regular_session_open=False)
+    family = report(stores)['families']['socrates']
+    assert family['blockers'] == [{'reason': 'protection', 'count': 1}]
+    assert family['execution_checks_recorded'] == 2 and family['closed_session_execution_checks'] == 1
+
+
+def test_execution_observation_without_decision_trace_still_raises_recorded_blocker(stores):
+    execution_check(stores, 'account_status', account_ref=ACCOUNT, regular_session_open=True)
+    result = report(stores)
+    codes = {row['code'] for row in result['investigations'] if row['family'] == 'socrates'}
+    assert {'observation_coverage', 'entry_blocker'} <= codes
+    assert result['families']['socrates']['submission_attempts'] == 0
+
+
+@pytest.mark.parametrize('session_open', [True, False])
+def test_executor_pretrade_diagnostics_round_trip_into_account_review(stores, session_open):
+    from pivot.execution import Executor
+    from pivot.tests.test_execution import FakeBroker, enable, ready
+
+    broker = FakeBroker()  # In-memory only: no credentials, sockets or real orders.
+    broker.account_data['account_ref'] = sha256(b'synthetic-review-account').hexdigest()
+    executor = Executor(broker, stores[0], now=lambda: broker.at)
+    enable(executor)
+    broker.account_data['status'] = 'INACTIVE'
+    broker.open = session_open
+    snapshot = ready(broker.at)
+    snapshot.update(account=broker.account(), account_at=broker.at.isoformat(), clock=broker.clock())
+    executor.tick(snapshot)
+    account, day = broker.account_data['account_ref'], broker.at.date().isoformat()
+    family = report(stores, account_ref=account, day=day, now=broker.at + timedelta(hours=1),
+                    accounting_summary=accounting(account=account, day=day))['families']['socrates']
+    assert family['execution_checks_recorded'] == 1 and family['unassigned_execution_checks'] == 0
+    assert family['submission_attempts'] == family['filled_entries'] == 0
+    assert family['blockers'] == ([{'reason': 'account_status', 'count': 1}] if session_open else [])
+    assert family['closed_session_observations'] == ([] if session_open else [{'reason': 'market_session', 'count': 1}])
+    assert stores[0].latest_execution_check()['trade'] is None
+    assert not broker.sent and not broker.canceled
 
 
 def test_gross_win_is_not_a_verified_net_win(stores):

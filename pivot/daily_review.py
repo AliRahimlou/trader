@@ -97,6 +97,37 @@ def _bodies(store, table, *, account_ref=None, begin=None, end=None):
         return [json.loads(row[0]) for row in db.execute(query, params)]
 
 
+def _execution_account(row, trade_accounts):
+    """Explicit execution identity wins; old rows need a proven trade owner."""
+    trade = row.get('trade') if isinstance(row.get('trade'), dict) else {}
+    owner = trade_accounts.get(trade.get('id'))
+    identity = row.get('account_ref')
+    if isinstance(identity, str) and identity.strip():
+        # Contradictory evidence must not be assigned to either account.
+        return None if owner is not None and owner != identity else identity
+    return owner
+
+
+def _signal_session_state(row):
+    """A copied session flag needs a current broker clock at this observation.
+
+    Fifteen seconds matches the account poll interval and stock executor clock
+    admission. Decision traces retain the raw clock flag even after outages;
+    unlike execution checks, that flag was not validated when it was recorded.
+    """
+    execution = row.get('execution') if isinstance(row.get('execution'), dict) else {}
+    state = execution.get('regular_session_open')
+    captured, clock = _at(row.get('captured_at')), _at(execution.get('clock_at'))
+    if type(state) is not bool or captured is None or clock is None:
+        return None
+    return state if 0 <= (captured - clock).total_seconds() <= 15 else None
+
+
+def _ranked_observations(counts):
+    return [{'reason': reason, 'count': count}
+            for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:12]]
+
+
 def _accounting(summary, account_ref, day):
     """Allowlist aggregate facts; never reuse another account/day's evidence."""
     value = summary if isinstance(summary, dict) else {}
@@ -224,7 +255,10 @@ def build_review(store, crypto_store, accounting_summary, account_ref, day, now)
     families = {}
     investigations = []
     for family, table, source in (('socrates', 'trades', store), ('range_reversal', 'crypto_trades', crypto_store)):
-        trades = _bodies(source, table, account_ref=account_ref)
+        # Retain stock trade ownership for legacy execution checks, including
+        # the proof that a check belongs to a different account after a switch.
+        retained_trades = _bodies(source, table, account_ref=None if family == 'socrates' else account_ref)
+        trades = [trade for trade in retained_trades if trade.get('account_ref') == account_ref]
         attempts, entries, closed, open_count = 0, 0, [], 0
         unknown_fill_day = False
         visible = []
@@ -259,21 +293,48 @@ def build_review(store, crypto_store, accounting_summary, account_ref, day, now)
                     closed.append(row)
         blockers = Counter()
         checks = 0
+        session_counts = {'closed_session_checks': 0, 'session_unknown_checks': 0,
+                          'execution_checks_recorded': 0, 'unassigned_execution_checks': 0,
+                          'closed_session_execution_checks': 0}
+        closed_observations, unknown_observations = Counter(), Counter()
         if family == 'socrates':
             for row in _bodies(store, 'decision_traces', begin=begin, end=end):
                 if within(_at(row.get('captured_at'))):
                     checks += 1
                     first = row.get('first_blocker') or {}
                     reason = _text(first.get('name'), account_ref)
+                    session_open = _signal_session_state(row)
+                    if session_open is False:
+                        session_counts['closed_session_checks'] += 1
+                        observations = closed_observations
+                    elif session_open is not True:
+                        session_counts['session_unknown_checks'] += 1
+                        observations = unknown_observations
+                    else:
+                        observations = blockers
                     if reason:
-                        blockers[reason] += 1
-            known_ids = {trade.get('id') for trade in trades}
+                        observations[reason] += 1
+            trade_accounts = {trade['id']: trade['account_ref'] for trade in retained_trades
+                              if isinstance(trade.get('id'), str) and trade['id']
+                              and isinstance(trade.get('account_ref'), str) and trade['account_ref'].strip()}
             for row in _bodies(store, 'execution_checks', begin=begin, end=end):
-                if within(_at(row.get('captured_at'))) and (row.get('trade') or {}).get('id') in known_ids:
-                    if row.get('outcome') in ('waiting', 'feed_error', 'invalid_data', 'unexpected_error', 'attention', 'order_rejected'):
-                        reason = _text(row.get('gate'), account_ref)
-                        if reason:
-                            blockers[reason] += 1
+                if not within(_at(row.get('captured_at'))):
+                    continue
+                owner = _execution_account(row, trade_accounts)
+                if owner is None:
+                    session_counts['unassigned_execution_checks'] += 1
+                    continue
+                if owner != account_ref:
+                    continue
+                session_counts['execution_checks_recorded'] += 1
+                trade = row.get('trade') if isinstance(row.get('trade'), dict) else {}
+                closed_entry_check = row.get('regular_session_open') is False and not trade.get('id')
+                if closed_entry_check:
+                    session_counts['closed_session_execution_checks'] += 1
+                if row.get('outcome') in ('waiting', 'feed_error', 'invalid_data', 'unexpected_error', 'attention', 'order_rejected'):
+                    reason = _text(row.get('gate'), account_ref)
+                    if reason:
+                        (closed_observations if closed_entry_check else blockers)[reason] += 1
         else:
             for row in _bodies(crypto_store, 'crypto_decisions', begin=begin, end=end):
                 if within(_at(row.get('checked_at'))):
@@ -286,6 +347,10 @@ def build_review(store, crypto_store, accounting_summary, account_ref, day, now)
         net_status = ('no_closed_trades' if not closed else 'complete' if len(verified) == len(closed)
                       else 'partial' if verified else 'unavailable')
         family_missing = []
+        if session_counts['session_unknown_checks']:
+            family_missing.append('Some retained signal observations lack a known market-session state from a current broker clock; they are shown separately and are not actionable entry blockers.')
+        if session_counts['unassigned_execution_checks']:
+            family_missing.append('Some retained execution observations lack a consistent account association; their reasons are excluded from this account report.')
         if unknown_fill_day:
             family_missing.append('Some confirmed entry fills lack a broker fill timestamp; exact daily entry/open counts are unknown.')
         if len(verified) < len(closed):
@@ -314,14 +379,18 @@ def build_review(store, crypto_store, accounting_summary, account_ref, day, now)
             'verified_net_pnl': format(sum((Decimal(row['net_pnl']) for row in verified), Decimal(0)), 'f') if verified else None,
             'net_pnl_status': net_status, 'known_fees': None,
             'fees_status': 'verified' if closed and len(verified) == len(closed) else 'pending',
-            'blockers': [{'reason': reason, 'count': count} for reason, count in sorted(blockers.items(), key=lambda item: (-item[1], item[0]))[:12]],
+            'blockers': _ranked_observations(blockers),
             'trades': sorted(visible, key=lambda row: row['completed_at'] or row['created_at'] or '', reverse=True)[:MAX_TRADES],
             'missing_evidence': family_missing,
         }
+        if family == 'socrates':
+            families[family].update(session_counts,
+                                    closed_session_observations=_ranked_observations(closed_observations),
+                                    session_unknown_observations=_ranked_observations(unknown_observations))
         if not checks:
             investigations.append({'code': 'observation_coverage', 'family': family, 'title': 'Check observation coverage',
                                    'reason': 'No retained decisions establish what this strategy observed during the day.'})
-        elif not attempts and blockers:
+        if not attempts and blockers:
             reason = sorted(blockers.items(), key=lambda item: (-item[1], item[0]))[0][0]
             investigations.append({'code': 'entry_blocker', 'family': family, 'title': 'Review the recorded entry blocker',
                                    'reason': reason + '. Compare source timestamps and frozen rules; do not relax rules just to create a trade.'})
