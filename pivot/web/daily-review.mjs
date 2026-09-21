@@ -60,6 +60,9 @@ function familyView(id,raw) {
   });
   return {id,label:FAMILIES[id],entries:count(row.filled_entries),closed:count(row.closed_trades),open:count(row.open_at_end),
     attempts:count(row.submission_attempts),checks:count(row.checks_recorded),wins:count(row.wins),losses:count(row.losses),
+    closedSessionChecks:count(row.closed_session_checks),sessionUnknownChecks:count(row.session_unknown_checks),
+    executionChecks:count(row.execution_checks_recorded),unassignedExecutionChecks:count(row.unassigned_execution_checks),
+    closedSessionExecutionChecks:count(row.closed_session_execution_checks),
     even:count(row.breakeven),unverified:count(row.unverified_outcomes),net,netLabel,trades,
     netDetail:net!==null?'Closed-trade result after verified costs.':row.net_pnl_status==='no_closed_trades'
       ?'There is no closed-trade return to assess.':'Missing fills or costs are not counted as zero.',
@@ -107,6 +110,11 @@ function familyMarkup(family) {
     <p class="daily-result"><span>Closed results</span><strong>${esc(family.netLabel)}</strong></p><p class="help">${esc(family.netDetail)}</p>
     <p class="help">Verified outcomes: ${esc(countText(family.wins))} gains · ${esc(countText(family.losses))} losses · ${esc(countText(family.even))} even. ${esc(countText(family.unverified))} outcomes awaiting verification.</p>
     <details class="evidence" data-review-details="${family.id}"><summary>Entry checks and recorded reasons</summary><p>${esc(countText(family.checks))} checks recorded · ${esc(countText(family.attempts))} entry attempts. Attempts are not fills.</p>
+      ${family.closedSessionChecks>0?`<p class="help">Stock market closed: ${esc(countText(family.closedSessionChecks))} observations.</p>`:''}
+      ${family.sessionUnknownChecks>0?`<p class="help">Market hours were not recorded for ${esc(countText(family.sessionUnknownChecks))} observations.</p>`:''}
+      ${family.executionChecks!==null?`<p class="help">Execution checks matched to this account: ${esc(countText(family.executionChecks))}.</p>`:''}
+      ${family.closedSessionExecutionChecks>0?`<p class="help">Market closed during ${esc(countText(family.closedSessionExecutionChecks))} of these execution checks.</p>`:''}
+      ${family.unassignedExecutionChecks>0?`<p class="help">${esc(countText(family.unassignedExecutionChecks))} execution checks have no verified account identity; their reasons are excluded.</p>`:''}
       ${family.blockers.length?`<ul class="daily-review-list">${family.blockers.map(row=>`<li>${esc(row.reason)} <span>(${esc(countText(row.count))} recorded)</span></li>`).join('')}</ul>`:'<p>No detailed entry blockers recorded.</p>'}
       ${family.trades.map(trade=>`<div class="daily-trade"><strong>${esc(trade.symbol)}</strong><p>${esc(trade.netLabel)} · ${esc(trade.outcome)}</p>${trade.grossLabel?`<p>${esc(trade.grossLabel)} · ${esc(trade.grossDetail)}</p>`:''}<p>Entry plan: ${esc(trade.entry)} · ${esc(trade.entryReason)}</p><p>Exit recorded: ${esc(trade.exit)} · ${esc(trade.exitReason)}</p></div>`).join('')||'<p>No individual trade records in this review.</p>'}
     </details></article>`;

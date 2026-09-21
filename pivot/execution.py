@@ -193,6 +193,7 @@ class Executor:
         self._execution_check_from_current_process = False
         self._diagnostic_gate = 'runtime_state'
         self._diagnostic_trade = None
+        self._diagnostic_broker_snapshot = {}
         self._selected_entry_signal = None
         self._diagnostic_outcome = None
         self._submission_attempted = False
@@ -213,6 +214,34 @@ class Executor:
     def _diagnostic_time(value):
         try:
             return timestamp(value).astimezone(timezone.utc).isoformat() if value is not None else None
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    @staticmethod
+    def _safe_account_ref(account):
+        """The broker adapter supplies a hash; never persist raw account identifiers."""
+        value = account.get('account_ref') if isinstance(account, dict) else None
+        return value if isinstance(value, str) and re.fullmatch(r'[a-f0-9]{64}', value) else None
+
+    def _snapshot_account_ref(self, snapshot, now):
+        account = snapshot.get('account')
+        if (not isinstance(account, dict) or account.get('mode') != self.expected_account_mode
+                or snapshot.get('account_error')):
+            return None
+        try:
+            if not 0 <= elapsed(snapshot.get('account_at'), now) <= 30:
+                return None
+        except (ValueError, TypeError, OverflowError):
+            return None
+        return self._safe_account_ref(account)
+
+    @staticmethod
+    def _regular_session_state(clock, now):
+        """Only a current, explicit broker clock proves an open or closed session."""
+        if not isinstance(clock, dict) or type(clock.get('is_open')) is not bool:
+            return None
+        try:
+            return clock['is_open'] if 0 <= elapsed(clock.get('timestamp'), now) <= 15 else None
         except (ValueError, TypeError, OverflowError):
             return None
 
@@ -263,6 +292,13 @@ class Executor:
                 }
             identity = trade.get('id')
             trade_state = trade.get('stage')
+            if trade:
+                account_ref = self._safe_account_ref(trade)
+            elif 'account' in self._diagnostic_broker_snapshot:
+                account_ref = self._safe_account_ref(self._diagnostic_broker_snapshot['account'])
+            else:
+                account_ref = self._snapshot_account_ref(snapshot, now)
+            clock = self._diagnostic_broker_snapshot.get('clock', snapshot.get('clock'))
             record = {
                 'version': 'execution-check-v1', 'captured_at': now.isoformat(),
                 'checkpoint_at': now.replace(minute=now.minute // 15 * 15, second=0, microsecond=0).isoformat(),
@@ -270,6 +306,8 @@ class Executor:
                 'revision': self.revision if isinstance(self.revision, str) and re.fullmatch(r'[a-f0-9]{40}', self.revision) else None,
                 'execution_policy': POLICY_VERSION,
                 'account_mode': self.expected_account_mode,
+                'account_ref': account_ref,
+                'regular_session_open': self._regular_session_state(clock, now),
                 'evidence_kind': 'synthetic_commissioning' if self.expected_account_mode == 'paper' else 'strategy_observation',
                 'outcome': outcome if outcome in EXECUTION_OUTCOMES else 'unexpected_error',
                 'gate': self._diagnostic_gate if self._diagnostic_gate in EXECUTION_GATES else 'runtime_state',
@@ -353,6 +391,7 @@ class Executor:
             return
         self._diagnostic_gate = 'runtime_state'
         self._diagnostic_trade = None
+        self._diagnostic_broker_snapshot = {}
         self._selected_entry_signal = None
         self._diagnostic_outcome = None
         self._submission_attempted = False
@@ -495,6 +534,12 @@ class Executor:
                 raise Waiting('Paper commissioning requires its explicitly labeled workflow fixture')
         elif snapshot.get('commissioning_only') or snapshot.get('synthetic_evidence'):
             raise Waiting('Synthetic commissioning evidence cannot authorize a live entry')
+        # A known closed session is the entry wait even when overnight strategy
+        # feeds are unavailable. Unknown clocks still follow the existing checks.
+        # This runs only after live/deployment admission and never during management.
+        if self._regular_session_state(snapshot.get('clock'), now) is False:
+            self._gate('market_session')
+            raise Waiting('Live money is on — waiting for the regular market session')
         self._gate('vix_candles')
         if snapshot.get('feeds', {}).get('vix') != 'current':
             raise Waiting('Live money is on — waiting for actual VIX data. No entry can be sent yet.')
@@ -508,7 +553,10 @@ class Executor:
         setup, expires, key = self._entry_candidate(setup, now)
         authorization = self.store.entry_authorization()
         self._gate('broker_snapshot')
-        account, positions, orders, clock = (self.broker.account(), self.broker.positions(), self.broker.orders(), self.broker.clock())
+        account = self.broker.account()
+        self._diagnostic_broker_snapshot['account'] = account
+        positions, orders, clock = (self.broker.positions(), self.broker.orders(), self.broker.clock())
+        self._diagnostic_broker_snapshot['clock'] = clock
         self._gate('account_status')
         self._account_ready(account)
         self._gate('account_identity')
@@ -674,6 +722,7 @@ class Executor:
                                         self.broker.orders(), excluding_trade_id=trade['id'])
             self._gate('market_session')
             clock = self.broker.clock()
+            self._diagnostic_broker_snapshot['clock'] = clock
             if self._prepared_entry_expired(trade, clock):
                 self._expire_entry(trade)
                 return None
@@ -905,6 +954,7 @@ class Executor:
         if self.broker.account().get('account_ref') != trade['account_ref']:
             raise Waiting('This position belongs to a different Alpaca connection; restore its account to manage it')
         clock = self.broker.clock()
+        self._diagnostic_broker_snapshot['clock'] = clock
         now = self.now()
         opened = session_open(clock, now)
         if trade['stage'] == 'entering':

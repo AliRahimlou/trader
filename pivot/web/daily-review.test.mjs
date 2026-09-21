@@ -211,3 +211,28 @@ test('an older snapshot review is never titled as today',()=>{
   assert.match(h.element('daily-review-message').textContent,/Today’s review has not arrived/);
   assert.equal(h.element('daily-review-message').hidden,false);
 });
+
+test('closed-market and account-scoped checks remain separate from entry failures',()=>{
+  const r=report();Object.assign(r.families.socrates,{closed_session_checks:289,session_unknown_checks:2,
+    execution_checks_recorded:7,closed_session_execution_checks:6,unassigned_execution_checks:96});
+  r.families.socrates.blockers=[{reason:'Account temporarily unavailable',count:1}];
+  const html=daily.dailyReviewMarkup(r,'socrates');
+  assert.match(html,/Stock market closed: 289 observations/);
+  assert.match(html,/Market hours were not recorded for 2 observations/);
+  assert.match(html,/Execution checks matched to this account: 7/);
+  assert.match(html,/Market closed during 6 of these execution checks/);
+  assert.match(html,/96 execution checks have no verified account identity/);
+  assert.match(html,/Account temporarily unavailable/);
+  assert.doesNotMatch(daily.dailyReviewMarkup(r,'range_reversal'),/Stock market closed|verified account identity/);
+});
+
+test('legacy and malformed session counts never become fabricated reporting coverage',()=>{
+  for(const value of [undefined,null,false,true,'0','',NaN,-1,1.1]){
+    const r=report();Object.assign(r.families.socrates,{closed_session_checks:value,session_unknown_checks:value,
+      execution_checks_recorded:value,closed_session_execution_checks:value,unassigned_execution_checks:value});
+    const html=daily.dailyReviewMarkup(r);
+    assert.doesNotMatch(html,/Stock market closed:|Market hours were not recorded|Execution checks matched|Market closed during|have no verified account identity/);
+  }
+  const r=report();r.families.socrates.execution_checks_recorded=0;
+  assert.match(daily.dailyReviewMarkup(r),/Execution checks matched to this account: 0/);
+});
