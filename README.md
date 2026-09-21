@@ -6,6 +6,8 @@ Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 re
 
 See [execution behavior and remaining limits](docs/live-execution.md).
 
+Both engines share a durable maximum of **two new entry attempts per New York calendar session**. Rejected, uncertain and already-claimed attempts consume the allowance; completing a trade or restarting does not refund it. Protection and exits remain available after the allowance is exhausted. The dashboard reports the shared allowance separately from fills. See [version 4.3.0 repair notes](docs/production-v4.3.0.md).
+
 ## Hosted app
 
 Open [Pivot on AllSpark](https://media.mytap.net/pivot/) using the existing login. AllSpark runs independently of the laptop. The [hosting guide](docs/allspark-hosting.md) explains remote updates: commit to GitHub `main`, and the installed updater builds and tests the release, briefly holds new entries, and verifies that there are no open positions, orders or active trade before switching versions. Routine updates preserve the saved Live money setting; a changed execution policy requires owner review in the app. Update status appears in the app footer. Credentials and runtime databases stay on the server.

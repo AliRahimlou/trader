@@ -223,7 +223,8 @@ def multiple_ready_snapshot(kind):
 def consumed_event(store, candidate):
     # A durable, already-finished attempt, without simulating another broker POST.
     key = sha256(f'{POLICY_VERSION}|QQQ|{candidate["event_id"]}'.encode()).hexdigest()[:24]
-    trade = {'id': key, 'stage': 'finished'}
+    trade = {'id': key, 'stage': 'finished', 'created_at': NOW.isoformat(),
+             'ops': {'entry': {'state': 'attempted', 'payload': {'client_order_id': f'pvt-{key}-entry'}}}}
     assert store.reserve_trade(trade)
     store.save_trade(trade, finished=True)
 

@@ -15,7 +15,9 @@ def make_run(days=5):
     for n in range(days):
         at = first + timedelta(days=n)
         signals.append(TradeSignal(f"s{n}", at, "long", 100, 90, 120))
-        bars.append(Bar(at + timedelta(minutes=15), 15, 100, 101, 99, 100))
+        # A complete synthetic path is required for an uncensored interval.
+        for minutes in range(15, 346, 15):
+            bars.append(Bar(at + timedelta(minutes=minutes), 15, 100, 101, 99, 100))
         end = at.replace(hour=16)
         price = 102 if n % 2 == 0 else 99
         bars.append(Bar(end, 15, price, price + 1, price - 1, price))
@@ -78,6 +80,14 @@ def test_unresolved_exposure_invalidates_confidence():
     run = make_run(25)
     run["daily_equity"][0]["unresolved_exposure"] = True
     assert not summarize(run)["uncertainty"]["available"]
+
+
+def test_missing_held_price_path_invalidates_otherwise_large_sample():
+    run = make_run(25)
+    run['summary']['price_path_complete'] = False
+    result = summarize(run)
+    assert result['uncertainty']['available'] is False
+    assert 'Missing intraday prices' in result['uncertainty']['reason']
 
 
 def test_costs_reconciled():

@@ -11,8 +11,9 @@ __pycache__/
 *.pem
 *.key
 runtime/
+audit/
 .live_state_*.json
-dashboard/node_modules/
+dashboard/node_modules
 dashboard/dist/
 deploy/site/
 deploy/private/

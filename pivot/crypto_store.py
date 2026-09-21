@@ -9,6 +9,7 @@ import sqlite3
 from zoneinfo import ZoneInfo
 from .crypto_markets import SYMBOLS
 from .models import timestamp
+from .store import _create_entry_allowance_schema, _reserve_session_entry
 
 DECISION_LIMIT = 12000
 NY = ZoneInfo('America/New_York')
@@ -29,6 +30,7 @@ class CryptoStore:
         self.path = str(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            _create_entry_allowance_schema(db)
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS crypto_control (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS crypto_trades (id TEXT PRIMARY KEY, symbol TEXT NOT NULL,
@@ -151,7 +153,7 @@ class CryptoStore:
                 raise ConcurrentChange('Crypto state changed; reloading the durable order ledger')
         trade['_version'] += 1
 
-    def claim_operation(self, trade, name, *, expected_control=None):
+    def claim_operation(self, trade, name, *, expected_control=None, attempted_at=None):
         """One irreversible POST claim; attempted intents can only be looked up afterward."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -166,8 +168,9 @@ class CryptoStore:
                     from .store import Store
                     if Store._entry_authorization(db) != saved['authorization']['global']:
                         return False
+                _reserve_session_entry(db, saved, 'range_reversal', attempted_at or datetime.now(timezone.utc))
             saved['ops'][name]['state'] = 'attempted'
-            saved['ops'][name]['attempted_at'] = datetime.now(timezone.utc).isoformat()
+            saved['ops'][name]['attempted_at'] = (attempted_at or datetime.now(timezone.utc)).isoformat()
             body = {k: v for k, v in saved.items() if k != '_version'}
             db.execute('UPDATE crypto_trades SET body=?,version=version+1 WHERE id=?', (_json(body), trade['id']))
         trade.update(saved)

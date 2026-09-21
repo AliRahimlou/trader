@@ -2,14 +2,98 @@
 import json
 import sqlite3
 from hashlib import sha256
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from copy import deepcopy
 from time import monotonic
+from zoneinfo import ZoneInfo
+
+from .portfolio import PortfolioBlocked
 
 DEFAULTS = {'sizing_mode': 'target', 'target_dollars': '25.00'}
 DECISION_TRACE_RETENTION = 24000  # Row bound; does not imply a guaranteed number of sessions.
 EXECUTION_CHECK_RETENTION = 24000
+SESSION_ENTRY_LIMIT = 2  # Explicit owner-approved restriction; never a tunable uplift.
+SESSION_TIMEZONE = ZoneInfo('America/New_York')
+
+
+def _allowance_time(value):
+    at = datetime.fromisoformat(value.replace('Z', '+00:00')) if isinstance(value, str) else value
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError('Entry allowance timestamps must include a timezone')
+    return at.astimezone(timezone.utc)
+
+
+def _allowance_days(at):
+    # Entry freshness is rechecked after claiming and permits at most ten seconds
+    # from preparation. Reserve both dates if claim -> POST could cross midnight.
+    return {at.astimezone(SESSION_TIMEZONE).date().isoformat(),
+            (at + timedelta(seconds=10)).astimezone(SESSION_TIMEZONE).date().isoformat()}
+
+
+def _create_entry_allowance_schema(db):
+    db.execute('CREATE TABLE IF NOT EXISTS session_entry_allowances ('
+               'family TEXT NOT NULL, trade_id TEXT NOT NULL, session_day TEXT NOT NULL,'
+               'claimed_at TEXT NOT NULL, source TEXT NOT NULL,'
+               'PRIMARY KEY(family,trade_id,session_day))')
+    db.execute('CREATE INDEX IF NOT EXISTS entry_allowances_day ON session_entry_allowances(session_day)')
+
+
+def _entry_allowance_rows(db):
+    """Read durable claims plus all retained legacy attempts without modifying either.
+
+    A finished/rejected/unknown attempt is never refunded. Legacy prepared intents
+    remain unsent; malformed or contradictory evidence prevents new risk, without
+    interfering with opening the database or managing an existing position.
+    """
+    rows = [dict(zip(('family', 'trade_id', 'session_day', 'claimed_at', 'source'), row))
+            for row in db.execute('SELECT family,trade_id,session_day,claimed_at,source FROM session_entry_allowances')]
+    covered = {(row['family'], row['trade_id']) for row in rows}
+    for table, family in (('trades', 'socrates'), ('crypto_trades', 'range_reversal')):
+        if not db.execute('SELECT 1 FROM sqlite_master WHERE type=? AND name=?', ('table', table)).fetchone():
+            continue
+        for identity, body in db.execute(f'SELECT id,body FROM {table}'):
+            if (family, identity) in covered:
+                continue
+            try:
+                trade = json.loads(body)
+                entry = trade['ops']['entry']
+                state = entry['state']
+                if trade['id'] != identity:
+                    raise ValueError
+                if (state in ('prepared', 'aborted_before_submit') and not entry.get('last_seen')
+                        and 'filled_qty' not in trade and trade.get('stage') in ('entering', 'finished')):
+                    continue
+                if state not in ('attempted', 'rejected'):
+                    raise ValueError
+                at = _allowance_time(entry.get('attempted_at') or trade['created_at'])
+                for day in _allowance_days(at):
+                    rows.append({'family': family, 'trade_id': identity, 'session_day': day,
+                                 'claimed_at': at.isoformat(), 'source': 'retained_legacy_attempt'})
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise PortfolioBlocked('Session entry history needs reconciliation before any new entry') from None
+    return rows
+
+
+def _reserve_session_entry(db, trade, family, at):
+    """Called inside the same write transaction as prepared -> attempted, before POST."""
+    at = _allowance_time(at)
+    rows = _entry_allowance_rows(db)
+    identity = (family, trade['id'])
+    # A stale ledger overwrite must not obtain a second POST claim for an identity
+    # already irreversibly consumed, including an attempt on a previous date.
+    if any((row['family'], row['trade_id']) == identity for row in rows):
+        raise PortfolioBlocked('This entry already consumed its durable submission allowance; reconciliation is required')
+    days = _allowance_days(at)
+    if any(sum(row['session_day'] == day for row in rows) >= SESSION_ENTRY_LIMIT for day in days):
+        raise PortfolioBlocked('The shared limit of two new entry attempts for this New York session is reached; existing positions remain managed')
+    # Backfill in place, without changing controls, history, trade state or IDs.
+    for row in rows:
+        db.execute('INSERT OR IGNORE INTO session_entry_allowances VALUES(?,?,?,?,?)',
+                   tuple(row[key] for key in ('family', 'trade_id', 'session_day', 'claimed_at', 'source')))
+    for day in days:
+        db.execute('INSERT INTO session_entry_allowances VALUES(?,?,?,?,?)',
+                   (family, trade['id'], day, at.isoformat(), 'atomic_entry_claim'))
 
 
 class Store:
@@ -18,6 +102,7 @@ class Store:
         self._session_cache = {}
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            _create_entry_allowance_schema(db)
             db.executescript('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);'
                              'CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL);')
             db.executescript('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);'
@@ -49,6 +134,30 @@ class Store:
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=5)
+
+    def session_entry_allowance(self, now=None):
+        """Strictly read-only status; retained legacy attempts count before migration."""
+        at = _allowance_time(now or datetime.now(timezone.utc))
+        day = at.astimezone(SESSION_TIMEZONE).date().isoformat()
+        result = {'session_day': day, 'timezone': str(SESSION_TIMEZONE), 'limit': SESSION_ENTRY_LIMIT,
+                  'accounting': 'Durable new-entry attempts across both strategies, including rejected and unknown outcomes; exits do not count.'}
+        try:
+            with self.connect() as db:
+                db.execute('BEGIN')
+                rows = _entry_allowance_rows(db)
+            used = sum(row['session_day'] == day for row in rows)
+            return {**result, 'status': 'available', 'used': used, 'remaining': max(0, SESSION_ENTRY_LIMIT - used)}
+        except PortfolioBlocked as exc:
+            return {**result, 'status': 'blocked', 'used': None, 'remaining': 0, 'reason': str(exc)}
+
+    def assert_session_entry_available(self, now):
+        """Early planning gate; the same check is repeated atomically at POST claim."""
+        with self.connect() as db:
+            db.execute('BEGIN')
+            rows = _entry_allowance_rows(db)
+        if any(sum(row['session_day'] == day for row in rows) >= SESSION_ENTRY_LIMIT
+               for day in _allowance_days(_allowance_time(now))):
+            raise PortfolioBlocked('The shared limit of two new entry attempts for this New York session is reached; existing positions remain managed')
 
     def settings(self):
         with self.connect() as db:
@@ -394,7 +503,7 @@ class Store:
                        (completed_at, 'trade_finished', json.dumps({'symbol': trade['symbol'], 'reason': trade['reason']})))
             return trade
 
-    def claim_operation(self, trade_id, name, *, expected_entry=None):
+    def claim_operation(self, trade_id, name, *, expected_entry=None, attempted_at=None):
         """Durably mark the single allowed POST attempt before making a network call."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -409,6 +518,8 @@ class Store:
                     return False
             if trade['ops'][name]['state'] != 'prepared':
                 return False
+            if name == 'entry':
+                _reserve_session_entry(db, trade, 'socrates', attempted_at or datetime.now(timezone.utc))
             trade['ops'][name]['state'] = 'attempted'
             db.execute('UPDATE trades SET body=? WHERE id=?', (json.dumps(trade), trade_id))
             return True

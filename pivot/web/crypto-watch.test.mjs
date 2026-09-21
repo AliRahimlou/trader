@@ -6,6 +6,7 @@ const at='2026-09-19T21:40:20Z',now=Date.parse(at);
 const analysis=(symbol,extra={})=>({symbol,source:'alpaca_crypto_us',analyzed_at:at,observed_at:at,last_refresh_at:at,state:'WATCHING',
   coverage:{expected_completed_bars:212,received_completed_bars:212,missing_count:0,opening_range_missing_count:0},candidates:[],...extra});
 const state=()=>({portfolio:{global_live_enabled:true,socrates:{enabled:true},range_reversal:{enabled:true,execution_available:true,symbols:['BTC/USD'],target_dollars:'5.00'}},
+  entry_allowance:{status:'available',session_day:'2026-09-19',timezone:'America/New_York',limit:2,used:0,remaining:2},
   strategy_families:{range_reversal:{analyses:Object.fromEntries(CRYPTO_MARKETS.map(symbol=>[symbol,analysis(symbol)]))}},
   crypto_execution:{markets:{'BTC/USD':'BTC waiting','SOL/USD':'SOL stale'},message:'Unrelated global message'}});
 

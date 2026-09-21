@@ -150,6 +150,47 @@ def test_open_trade_leaves_old_runner_running(pipeline):
     assert status(root)['state'] == 'blocked_exposure'
 
 
+def test_session_limit_survives_successful_release_and_permission_is_unchanged(pipeline):
+    root, state = pipeline
+    state['health']['session_entry_protocol'] = updater.SESSION_ENTRY_PROTOCOL
+    state['readiness'].update(session_entry_protocol=updater.SESSION_ENTRY_PROTOCOL,
+                              saved_live_enabled=True, live_enabled=True)
+    updater.update(root)
+    assert state['revision'] == NEW
+    assert status(root)['state'] == 'updated'
+    assert not updater.hold_path(root).exists()
+    assert state['readiness']['saved_live_enabled'] is True
+
+
+def test_release_without_session_limit_rolls_back_to_guarded_worker(pipeline):
+    root, state = pipeline
+    state['health']['session_entry_protocol'] = updater.SESSION_ENTRY_PROTOCOL
+    state['revision_readiness'][OLD] = {'session_entry_protocol': updater.SESSION_ENTRY_PROTOCOL}
+    updater.update(root)
+    assert state['rollouts'] == [f'pivot-video:{NEW}', f'pivot-video:{OLD}']
+    assert status(root)['state'] == 'rolled_back'
+    assert not updater.hold_path(root).exists()
+
+
+def test_recovery_cannot_clear_session_limit_hold_on_old_unguarded_worker(pipeline):
+    root, state = pipeline
+    updater.save_hold(root, hold_record(session_entry_protocol=updater.SESSION_ENTRY_PROTOCOL))
+    with pytest.raises(updater.UpdateError):
+        updater.recover_hold(root)
+    assert updater.hold_path(root).exists()
+    assert status(root)['state'] == 'recovery_required'
+    assert state['rollouts'] == []
+
+
+def test_runtime_acknowledges_extended_hold_without_changing_permission(tmp_path):
+    hold = hold_record(session_entry_protocol=updater.SESSION_ENTRY_PROTOCOL)
+    updater.save_hold(tmp_path, hold)
+    status = EntryGate(tmp_path / 'data' / 'pivot-v2' / 'deployment.lock').status()
+    assert status['hold_valid'] is True
+    assert status['hold_present'] is True
+    assert updater.valid_hold(hold)
+
+
 def test_safe_release_validates_new_revision_and_refreshes_installed_updater(pipeline):
     root, state = pipeline
     updater.update(root)
