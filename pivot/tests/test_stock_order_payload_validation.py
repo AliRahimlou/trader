@@ -66,28 +66,36 @@ def test_valid_broker_evidence_resumes_supervision_without_rearming_or_duplicate
     assert store.active_trade()['order_validation']['stop']['resolved_at']
 
 
+BUY_STOP = {'symbol': 'QQQ', 'side': 'buy', 'qty': '1', 'type': 'stop', 'stop_price': '110',
+            'time_in_force': 'day', 'extended_hours': False, 'client_order_id': 'pvt-x-stop'}
+
+
+def buy_stop_order(**changes):
+    return {**BUY_STOP, 'id': 'broker-1', 'status': 'new', 'filled_qty': '0', **changes}
+
+
 @pytest.mark.parametrize('order_type', ['stop', 'stop_limit', 'market'])
-def test_buy_stop_allows_documented_conversion_but_retains_stop_and_quantity(engine, order_type):
-    executor, broker, store = engine
-    store.save({'sizing_mode': 'target', 'target_dollars': '100.00'})
-    enable(executor)
-    executor.tick(ready(direction='short'))
-    assert len(broker.sent) == 2 and broker.sent[1]['side'] == 'buy'
-    order = broker.book[broker.sent[1]['client_order_id']]
-    order['type'] = order_type
+def test_buy_stop_allows_documented_conversion_but_retains_stop_and_quantity(order_type):
+    # Since 4.5.0 no live path places a buy stop (shorts buy PSQ and protect with a
+    # sell stop); the validator keeps Alpaca's documented buy-stop collar rule.
+    order = buy_stop_order(type=order_type)
     if order_type == 'stop_limit':
         order['limit_price'] = '112.75'  # Alpaca's documented 2.5% collar above $50.
-    assert executor._order(store.active_trade(), 'stop')['type'] == order_type
-    assert store.strategy_selection()['socrates']
+    Executor._validate_order_payload(order, BUY_STOP, {})
 
 
-def test_buy_stop_rejects_changed_stop_even_when_type_conversion_is_legal(engine):
+def test_buy_stop_rejects_changed_stop_even_when_type_conversion_is_legal():
+    with pytest.raises(ValueError):
+        Executor._validate_order_payload(buy_stop_order(type='stop_limit', stop_price='120', limit_price='123'), BUY_STOP, {})
+
+
+def test_short_setup_protection_is_a_psq_sell_stop_never_a_qqq_buy_stop(engine):
     executor, broker, store = engine
-    store.save({'sizing_mode': 'target', 'target_dollars': '100.00'})
     enable(executor)
     executor.tick(ready(direction='short'))
+    assert [(o['symbol'], o['side'], o['type']) for o in broker.sent] == [('PSQ', 'buy', 'market'), ('PSQ', 'sell', 'stop')]
     order = broker.book[broker.sent[1]['client_order_id']]
-    order.update(type='stop_limit', stop_price='120', limit_price='123')
+    order.update(type='stop_limit', limit_price='31')  # Not a legal sell-stop substitution.
     with pytest.raises(Waiting, match='Broker order'):
         executor._order(store.active_trade(), 'stop')
 
