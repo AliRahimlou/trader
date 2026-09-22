@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,portfolioView,globalCryptoAlert,STRATEGY_VIEW_KEY,STRATEGY_VIEW_SECTIONS,cryptoWatchMarkup,cryptoReviewMarkup} from './strategy-families.mjs';
+import {bindStrategyView,rangeFamilyView,rangeFamilyMarkup,portfolioView,globalCryptoAlert,STRATEGY_VIEW_KEY,STRATEGY_VIEW_SECTIONS,cryptoWatchMarkup,cryptoReviewMarkup,cryptoPause,sessionEntryStatus} from './strategy-families.mjs';
 import {createDisplayClock} from './model.mjs';
 
 const at='2026-09-19T12:10:10+00:00',now=Date.parse(at);
@@ -76,8 +76,8 @@ test('shipped page switches the whole strategy workspace while shared controls a
   h.element('global-crypto-alert').textContent=incident;
   bindStrategyView(h.document,{storage:()=>null});
   const stockContent=['socrates-toggle','amount','data-connections','session-review','market-overview','strategy-cards','audit','trade-results'];
-  const cryptoContent=['range-toggle','range-settings-form','range-content','crypto-execution-status','crypto-history','crypto-watch-content','crypto-review-content'];
-  const shared=['balance','live-status','status-title','strategy-run-summary','run-both','holdings','journal','global-crypto-alert'];
+  const cryptoContent=['range-toggle','run-both','range-settings-form','range-content','crypto-execution-status','crypto-history','crypto-watch-content','crypto-review-content'];
+  const shared=['balance','live-status','status-title','strategy-run-summary','holdings','journal','global-crypto-alert','daily-review'];
   for(const view of ['range_reversal','socrates','all','range_reversal','all','socrates']){
     h.select(view);
     for(const id of stockContent)assert.equal(h.visible(id),view!=='range_reversal',`${view}: ${id}`);
@@ -203,6 +203,46 @@ test('all scoped wrappers exist in the shipped HTML and own their actual family 
     'crypto-history':'crypto-management','crypto-execution-status':'crypto-management'};
   for(const [child,owner] of Object.entries(ownership))assert.ok(h.ancestors(child).includes(owner),`${child} must belong to ${owner}`);
   const scoped=new Set(Object.values(STRATEGY_VIEW_SECTIONS).flat());
-  for(const id of ['balance','live-status','strategy-run-summary','run-both','holdings','journal','global-crypto-alert'])
+  for(const id of ['balance','live-status','strategy-run-summary','holdings','journal','global-crypto-alert','daily-review'])
     assert.equal(h.ancestors(id).some(parent=>scoped.has(parent)),false,`${id} must remain shared`);
+  assert.ok(h.ancestors('readiness-content').includes('socrates-readiness'));
+  assert.ok(h.ancestors('run-both').includes('range-control'),'the combined-run button belongs to the crypto card');
+  for(const id of ['range-family','crypto-watchlist','crypto-review','crypto-management'])assert.ok(h.ancestors(id).includes('crypto-area'));
+});
+const pausedSnapshot=(flag)=>{
+  const value=snapshot();
+  value.portfolio={global_live_enabled:true,socrates:{enabled:true},range_reversal:{enabled:true,execution_available:true,symbols:['BTC/USD'],target_dollars:'15.00'}};
+  value.crypto_execution={message:'Crypto is paused: Socrates-only focus. Existing crypto positions, if any, keep their exits.',trades:[],incidents:[]};
+  if(flag==='strategy_pause')value.strategy_pause={range_reversal:{paused:true,reason:'Socrates-only focus.',source:'environment'}};
+  if(flag==='portfolio')value.portfolio.range_reversal.paused=true;
+  if(flag==='execution')value.crypto_execution.paused=true;
+  if(flag==='family')value.strategy_families.range_reversal={family_id:'range_reversal',label:'4H Range Reversal',state:'PAUSED',detail:'Paused: Socrates-only focus.'};
+  return value;
+};
+for(const flag of ['strategy_pause','portfolio','execution','family'])test(`crypto reads as paused from the ${flag} flag alone and is never listed as running`,()=>{
+  const value=pausedSnapshot(flag),before=JSON.stringify(value);
+  assert.equal(cryptoPause(value).paused,true);
+  const view=portfolioView(value),range=view.families[1];
+  assert.equal(range.status,'Paused · Socrates-only focus');assert.equal(range.available,false);assert.equal(range.ownerPaused,true);
+  assert.equal(range.enabled,true,'the saved selection is shown unchanged');
+  assert.equal(view.scope,'Socrates');assert.deepEqual(view.enabled.map(f=>f.id),['socrates']);
+  assert.equal(JSON.stringify(value),before);
+});
+test('paused crypto cards and watchlist say Paused instead of showing stale signals',()=>{
+  const value=pausedSnapshot('family');value.strategy_pause={range_reversal:{paused:true,reason:'Socrates-only focus.',source:'code_default'}};
+  const view=rangeFamilyView(value,now);
+  assert.equal(view.state,'Paused');assert.equal(view.currentSignal,null);assert.equal(view.paused,true);
+  const markup=rangeFamilyMarkup(view);
+  assert.match(markup,/BTC\/USD · Paused/);assert.match(markup,/class="pill paused">Paused/);assert.doesNotMatch(markup,/range-signal|Entry reference/);
+  const watch=cryptoWatchMarkup(value,now);
+  assert.equal((watch.match(/class="pill paused">Paused/g)||[]).length,5);assert.doesNotMatch(watch,/buy setups/);
+  // Without the pause the same snapshot shape keeps the normal observation view.
+  assert.equal(cryptoPause(snapshot()).paused,false);assert.equal(rangeFamilyView(snapshot(),now).state,'Reversal observed');
+});
+test('the Socrates-only allowance sentence hides the paused crypto count',()=>{
+  const view=sessionEntryStatus({status:'available',session_day:'2026-09-22',timezone:'America/New_York',limit:2,used:2,remaining:2,
+    families:{socrates:{used:2,remaining:0},range_reversal:{used:0,remaining:2}}});
+  assert.match(view.socratesText,/Socrates entries today: 2 of 2 attempts used · limit reached/);
+  assert.doesNotMatch(view.socratesText,/Range Reversal/);
+  assert.equal(sessionEntryStatus(undefined).socratesText,undefined,'an unverified allowance keeps its unverified text');
 });
