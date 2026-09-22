@@ -25,7 +25,7 @@ SYMBOLS = ('QQQ', *MAG7)
 # Production interpretations the replay can freeze; v3 and later confirm
 # leaders from genuine five-minute candles only.
 SUPPORTED_ANALYSIS_VERSIONS = ('nasdaq-video-interpretation-v2', 'nasdaq-video-interpretation-v3',
-                               'nasdaq-video-interpretation-v4')
+                               'nasdaq-video-interpretation-v4', 'nasdaq-video-interpretation-v5')
 FIVE_MINUTE_LEADER_VERSIONS = SUPPORTED_ANALYSIS_VERSIONS[1:]
 METHODS = ('four_hour_retest', 'prior_day_sweep')
 ENGINE_FILES = ('models.py', 'strategy.py', 'history_health.py', 'feeds.py', 'data_health.py')

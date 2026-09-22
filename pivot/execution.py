@@ -21,7 +21,8 @@ from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
 from .deployment import DeploymentHold
 from .portfolio import PortfolioBlocked
-from .strategy import ANALYSIS_VERSION, LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS
+from .strategy import (ANALYSIS_VERSION, LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS, MAX_PERSISTENCE_BARS,
+                       event_expiry)
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
 WORKING_PROTECTION = {'new', 'partially_filled'}
@@ -142,8 +143,8 @@ def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
             raise ValueError
         if (established >= origin - timedelta(minutes=60)
                 or not origin <= event <= evidence <= now
-                or expires != origin + timedelta(minutes=180)
-                or leader_deadline > now + timedelta(minutes=15)
+                or not origin < expires <= event_expiry(origin)
+                or leader_deadline > now + timedelta(minutes=LEADER_MINUTES * MAX_PERSISTENCE_BARS)
                 or setup.get('leader_observations_synchronized') is not True
                 or observation_at > now
                 or observation_deadline != observation_at + timedelta(
@@ -153,8 +154,7 @@ def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
         raise Waiting('Waiting for a current setup under the active video rules') from None
     if (now >= expires or now >= leader_deadline or now >= observation_deadline
             or (now - evidence).total_seconds() > 3690
-            or any(at.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()
-                   for at in (origin, event, evidence))):
+            or evidence.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()):
         raise ExpiredSignal('Waiting for a current setup under the active video rules')
     return min(expires, leader_deadline, observation_deadline)
 
