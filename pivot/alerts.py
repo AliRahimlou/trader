@@ -15,9 +15,13 @@ ENV_VAR = 'PIVOT_ALERT_WEBHOOK_URL'
 TIMEOUT_SECONDS = 5
 # Journal kinds worth an interruption: each one either pauses a strategy or
 # leaves broker state the owner should look at. Routine fills are not alerted.
+# 'protection_failed' and 'exit_needs_attention' are alerted in their own right
+# because the strategy pause that accompanies them is a no-op once Socrates is
+# already Off, and an unprotected or stalled live position must not go quiet.
 ALERT_KINDS = frozenset({
     'strategy_paused', 'execution_needs_attention', 'partial_entry_needs_attention',
     'order_rejected', 'order_not_found', 'crypto_order_not_found', 'incident_opened',
+    'protection_failed', 'exit_needs_attention',
 })
 
 

@@ -809,16 +809,25 @@ class Executor:
                         self._gate('order_submit')
                         self._submission_attempted = True
                         order = self.broker.submit(op['payload'])
-                    except BrokerRejected:
+                    except BrokerRejected as exc:
                         self._gate('order_rejection')
                         self._diagnostic_outcome = 'order_rejected'
+                        # The cause (HTTP status and Alpaca's numeric error code,
+                        # never the response text) travels with the trade record,
+                        # the pause reason, the journal and the webhook alert: a
+                        # 4xx POST creates no order at Alpaca, so the app is the
+                        # only place the owner can read why.
+                        detail = exc.detail()
                         op['state'] = 'rejected'
                         op['last_seen'] = {'symbol':op['payload']['symbol'],'side':op['payload']['side'],
                                           'status':'rejected','qty':op['payload'].get('qty'),'filled_qty':'0',
-                                          'client_order_id':op['payload']['client_order_id'],'evidence':'http_rejection'}
+                                          'client_order_id':op['payload']['client_order_id'],'evidence':'http_rejection',
+                                          'reason':detail}
                         self.store.save_trade(trade)
-                        self._pause(f'The broker rejected a QQQ {name} order. Review Alpaca before enabling Socrates again.')
-                        self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol']})
+                        self._pause(f'The broker rejected a QQQ {name} order ({detail}); no order was created at Alpaca. '
+                                    'Review the account and this code before enabling Socrates again.')
+                        self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol'],
+                                                           'evidence': 'http_rejection', 'reason': detail})
                         return {'status': 'rejected', 'filled_qty': '0'}
                 else:
                     if name == 'entry':
@@ -1271,7 +1280,14 @@ class Executor:
         self._diagnostic_trade = trade
         self._diagnostic_outcome = 'protection_failure'
         self._pause(reason + '. Review Alpaca before enabling Socrates again.')
-        trade['protection_failure'] = {'at': self.now().isoformat(), 'reason': reason}
+        if not trade.get('protection_failure'):
+            # The pause above is a no-op once Socrates is already Off (an owner
+            # toggle or an earlier pause), so this alert-kind journal entry is
+            # what tells the owner a live position lost its protection and is
+            # being closed at market.
+            trade['protection_failure'] = {'at': self.now().isoformat(), 'reason': reason}
+            self.store.save_trade(trade)
+            self.store.event('protection_failed', {'symbol': 'QQQ', 'trade_id': trade['id'], 'reason': reason})
         self._start_exit(trade, reason + '. New entries paused; canceling before closing remaining shares.')
 
     def _check_unknown_protection(self, trade):

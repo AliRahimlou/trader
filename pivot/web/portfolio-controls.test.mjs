@@ -377,3 +377,17 @@ test('only accepted responses reset display time and render calls do not refresh
   elapsed+=1000;assert.equal(h.app.displayNow(),server+11000);
   answer(h.calls[2],next);await flush();assert.equal(h.app.displayNow(),server+10000);
 });
+
+test('a Socrates permission saved under an older policy reads review required, accepted through the Live switch',()=>{
+  const state=initial();state.live_enabled=false;state.portfolio.global_live_enabled=false;state.review_required=true;
+  Object.assign(state.portfolio.socrates,{enabled:true,review_required:true});
+  const view=portfolioView(state);
+  assert.equal(view.families[0].status,'Review updated rules');
+  assert.equal(view.families[0].reviewRequired,true);
+  assert.equal(appStatus(state,new Date('2026-09-22T14:00:00Z')).title,'Review updated live rules');
+  const h=harness({state});h.app.renderStrategyControls();
+  assert.equal(h.element('socrates-run-state').textContent,'Review updated rules');
+  assert.equal(h.element('range-review').hidden,true);
+  delete state.portfolio.socrates.review_required;
+  assert.equal(portfolioView(state).families[0].status,'Selected · global Live Off');
+});

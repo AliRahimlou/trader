@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 import re
 from urllib.parse import quote
 import requests
-from .broker import BrokerRejected
+from .broker import BrokerRejected, rejection
 from .feeds import FeedError
 from .crypto_store import SYMBOLS
 from .crypto_markets import ALIASES
@@ -34,7 +34,7 @@ class CryptoBroker:
         if method == 'DELETE' and response.status_code in (204, 404, 422):
             return None  # Always confirm by GET before a competing sell.
         if method == 'POST' and response.status_code in (400, 401, 403, 422):
-            raise BrokerRejected(f'Crypto broker rejected the order (HTTP {response.status_code})')
+            raise rejection(response, 'Crypto broker rejected the order')
         if response.status_code not in (200, 201):
             raise FeedError(f'Crypto broker state unavailable (HTTP {response.status_code})')
         try:

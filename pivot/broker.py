@@ -4,7 +4,34 @@ from .feeds import FeedError
 
 
 class BrokerRejected(FeedError):
-    pass
+    """A definitive POST rejection (HTTP 4xx): no order exists at the broker.
+
+    Only the HTTP status and Alpaca's numeric error ``code`` are retained. The
+    response ``message`` is never embedded: it can echo request or account
+    details, and everything in this exception reaches the journal and alerts.
+    """
+    def __init__(self, message, *, status=None, code=None):
+        super().__init__(message)
+        self.status, self.code = status, code
+
+    def detail(self):
+        """Short owner-facing cause: 'HTTP 422, Alpaca error code 40310000'."""
+        if self.status is None:
+            return str(self)
+        return f'HTTP {self.status}' + (f', Alpaca error code {self.code}' if self.code is not None else '')
+
+
+def rejection(response, prefix):
+    """Build a BrokerRejected from a 4xx POST response without leaking its body."""
+    code = None
+    try:
+        body = response.json()
+        if isinstance(body, dict) and type(body.get('code')) is int:
+            code = body['code']
+    except Exception:
+        code = None
+    return BrokerRejected(f'{prefix} (HTTP {response.status_code}' + (f', Alpaca error code {code}' if code is not None else '') + ')',
+                          status=response.status_code, code=code)
 
 
 class AlpacaBroker:
@@ -42,7 +69,7 @@ class AlpacaBroker:
             # A cancellation response never proves the order was canceled; the worker reads it again.
             return None
         if method == 'POST' and response.status_code in (400, 401, 403, 422):
-            raise BrokerRejected(f'Broker rejected the order (HTTP {response.status_code}); new entries paused')
+            raise rejection(response, 'Broker rejected the order')
         if response.status_code not in (200, 201):
             raise FeedError(f'Broker response uncertain (HTTP {response.status_code}); waiting for reconciliation')
         try:

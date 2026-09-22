@@ -634,9 +634,10 @@ class CryptoRangeExecutor:
             op = trade['ops'][name]
             op['state'] = 'rejected'
             result = {**op['payload'], 'status': 'rejected', 'filled_qty': '0', 'id': None}
-            op['last_seen'] = result
+            op['last_seen'] = {**result, 'reason': exc.detail()}
             self.store.save_trade(trade)
-            self._incident(trade, name + '_rejected', 'A crypto order was rejected. New entries are paused; existing exposure is still managed.')
+            self._incident(trade, name + '_rejected', f'A crypto {name} order was rejected ({exc.detail()}); no order was created. '
+                           'New entries are paused; existing exposure is still managed.')
             return result
         return self._accept_order(trade, name, result)
 

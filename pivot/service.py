@@ -599,6 +599,9 @@ class Service:
             pass
         return {'global_live_enabled':global_live,
                 'socrates':{'enabled':selection['socrates'], 'target_dollars':self.store.settings()['target_dollars'],
+                            # Same rule as the top-level review flag: a saved permission under an older policy
+                            # version shows 'Review updated rules' on the card, accepted through the Live switch.
+                            'review_required':control.get('enabled') is True and control.get('policy') != POLICY_VERSION,
                             'execution_available':self.executor is not None, 'settings_exposure_verified':settings_exposure_verified},
                 'range_reversal':{**{key:crypto[key] for key in ('enabled','target_dollars','symbols')},
                     'policy_version':CRYPTO_POLICY['version'], 'policy_summary':CRYPTO_POLICY['summary'],

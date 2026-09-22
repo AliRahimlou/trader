@@ -4,18 +4,21 @@ Fake brokers and SQLite only. The webhook is exercised through a monkeypatched
 requests.post; the suite never configures a real URL.
 """
 from datetime import timedelta
+from types import SimpleNamespace
 import json
 
 import pytest
 import requests
 
 from pivot import alerts
+from pivot.broker import AlpacaBroker, BrokerRejected
 from pivot.crypto_store import CryptoStore
-from pivot.execution import (Executor, ENTRY_CUTOFF_SECONDS, CLOCK_SKEW_SECONDS, Waiting,
+from pivot.execution import (Executor, ENTRY_CUTOFF_SECONDS, CLOCK_SKEW_SECONDS, PROTECTION_CONFIRM_SECONDS, Waiting,
                              checked_quote, session_open)
 from pivot.policy import POLICY_VERSION
 from pivot.portfolio import Portfolio
 from pivot.store import Store
+from pivot.tests.test_crypto_execution import engine as crypto_engine, tick as crypto_tick  # noqa: F401
 from pivot.tests.test_execution import FakeBroker, NOW, enable, ready
 
 
@@ -285,3 +288,149 @@ def test_prepared_entry_recovered_inside_the_cutoff_expires_without_a_post(tmp_p
     executor.tick(ready())
     assert not broker.sent and store.active_trade() is None
     assert 'expired before submission' in executor.message
+
+
+# --- rejection cause ----------------------------------------------------------
+
+class RejectingSession:
+    """Fake HTTP session: every POST is a definitive 4xx with an Alpaca-shaped body."""
+    def __init__(self, status, body):
+        self.status, self.body = status, body
+
+    def request(self, method, url, **kwargs):
+        return SimpleNamespace(status_code=self.status, json=lambda: self.body)
+
+
+@pytest.mark.parametrize('body,code', [({'code': 40310000, 'message': 'fixture-secret should never leak'}, 40310000),
+                                       ({'code': 'fixture-secret', 'message': 'fixture-secret'}, None),
+                                       (['fixture-secret'], None)])
+def test_stock_broker_rejection_keeps_status_and_numeric_code_but_never_the_message(body, code):
+    feeds = SimpleNamespace(broker_url='https://api.alpaca.markets', alpaca_headers={'APCA-API-SECRET-KEY': 'fixture-secret'})
+    broker = AlpacaBroker(feeds, RejectingSession(403, body))
+    with pytest.raises(BrokerRejected) as exc:
+        broker.submit({'client_order_id': 'fake'})
+    assert exc.value.status == 403 and exc.value.code == code
+    expected = 'HTTP 403' + (f', Alpaca error code {code}' if code is not None else '')
+    assert exc.value.detail() == expected and expected in str(exc.value)
+    assert 'fixture-secret' not in str(exc.value) and 'fixture-secret' not in exc.value.detail()
+
+
+def test_http_rejection_cause_reaches_the_ledger_pause_journal_and_alert(tmp_path, monkeypatch):
+    posted = Posted()
+    monkeypatch.setattr(requests, 'post', posted)
+    monkeypatch.setenv(alerts.ENV_VAR, 'https://hooks.example.test/pivot')
+    threads = []
+    real = alerts.notify
+    monkeypatch.setattr('pivot.store.notify', lambda kind, body: threads.append(real(kind, body)))
+    executor, broker, store = engine(tmp_path)
+    enable(executor)
+
+    def submit(payload):
+        broker.sent.append(payload)
+        raise BrokerRejected('Broker rejected the order (HTTP 403, Alpaca error code 40310000)', status=403, code=40310000)
+    broker.submit = submit
+    executor.tick(ready())
+    for thread in threads:
+        thread.join(timeout=2)
+    detail = 'HTTP 403, Alpaca error code 40310000'
+    assert len(broker.sent) == 1 and not executor.enabled()
+    rejected = next(event for event in store.events() if event['kind'] == 'order_rejected')
+    assert rejected['detail'] == {'purpose': 'entry', 'symbol': 'QQQ', 'evidence': 'http_rejection', 'reason': detail}
+    paused = next(event for event in store.events() if event['kind'] == 'strategy_paused')
+    assert detail in paused['detail']['reason'] and 'no order was created' in paused['detail']['reason']
+    assert 'Socrates' in paused['detail']['reason']
+    alerted = {call[1]['json']['kind']: call[1]['json']['body'] for call in posted.calls}
+    assert alerted['order_rejected']['reason'] == detail and detail in alerted['strategy_paused']['reason']
+    with store.connect() as db:
+        (row,), = db.execute('SELECT body FROM trades').fetchall()
+    entry = json.loads(row)['ops']['entry']
+    assert entry['state'] == 'rejected' and entry['last_seen']['evidence'] == 'http_rejection'
+    assert entry['last_seen']['reason'] == detail
+    assert 'fixture' not in json.dumps(store.events()) and 'fixture' not in row
+
+
+def test_crypto_rejection_incident_names_the_cause(crypto_engine):
+    e, b, store, _, _ = crypto_engine
+
+    def submit(payload):
+        b.sent.append(payload)
+        raise BrokerRejected('Crypto broker rejected the order (HTTP 422, Alpaca error code 42210000)', status=422, code=42210000)
+    b.submit = submit
+    crypto_tick(e)
+    assert len(b.sent) == 1 and not store.active_trades()
+    (incident,) = store.incidents()
+    assert 'HTTP 422, Alpaca error code 42210000' in incident['message'] and 'no order was created' in incident['message']
+    with store.connect() as db:
+        (row,), = db.execute('SELECT body FROM crypto_trades').fetchall()
+    assert json.loads(row)['ops']['entry']['last_seen']['reason'] == 'HTTP 422, Alpaca error code 42210000'
+
+
+# --- alerts while Socrates is already Off ------------------------------------
+
+def socrates_off(store):
+    with store.connect() as db:
+        db.execute('UPDATE strategy_selection SET body=? WHERE id=1', (json.dumps({'socrates': False}),))
+
+
+@pytest.mark.parametrize('scenario', ['protection_timeout', 'exit_unconfirmed'])
+def test_protection_and_exit_failures_alert_even_when_socrates_is_already_off(tmp_path, monkeypatch, scenario):
+    posted = Posted()
+    monkeypatch.setattr(requests, 'post', posted)
+    monkeypatch.setenv(alerts.ENV_VAR, 'https://hooks.example.test/pivot')
+    threads = []
+    real = alerts.notify
+    monkeypatch.setattr('pivot.store.notify', lambda kind, body: threads.append(real(kind, body)))
+    executor, broker, store = engine(tmp_path)
+    enable(executor)
+    executor.tick(ready())
+    trade = store.active_trade()
+    assert trade['stage'] == 'open' and [o['type'] for o in broker.sent] == ['market', 'stop']
+    # The owner stops further entries from the card while the position stays managed.
+    socrates_off(store)
+    if scenario == 'protection_timeout':
+        broker.book[broker.sent[1]['client_order_id']]['status'] = 'pending_new'
+        executor.tick(ready())
+        broker.at += timedelta(seconds=PROTECTION_CONFIRM_SECONDS + 1)
+        executor.tick(ready())
+        trade = store.active_trade()
+        assert trade['stage'] == 'exiting' and trade['protection_failure']
+        expected = 'protection_failed'
+    else:
+        trade['stage'] = 'exiting'
+        trade['exit_pending'] = {'first_observed_at': NOW.isoformat(),
+                                 'confirmation_deadline': (NOW - timedelta(seconds=1)).isoformat()}
+        store.save_trade(trade)
+        broker.cancel = lambda oid: None  # Cancellation never confirms.
+        executor.tick(ready())
+        expected = 'exit_needs_attention'
+    for thread in threads:
+        thread.join(timeout=2)
+    assert 'strategy_paused' not in kinds(store), 'an already-Off family is not re-paused'
+    assert kinds(store).count(expected) == 1
+    assert [call[1]['json']['kind'] for call in posted.calls] == [expected]
+    body = posted.calls[0][1]['json']['body']
+    assert body['symbol'] == 'QQQ' and body['reason']
+    assert not any(key in json.dumps(body) for key in ('client_order_id', 'APCA'))
+    # Another tick does not repeat the alert.
+    executor.tick(ready())
+    for thread in threads:
+        thread.join(timeout=2)
+    assert kinds(store).count(expected) == 1 and len(posted.calls) == 1
+
+
+def test_protection_failure_still_pauses_and_alerts_once_when_socrates_is_on(tmp_path, monkeypatch):
+    posted = Posted()
+    monkeypatch.setattr(requests, 'post', posted)
+    monkeypatch.setenv(alerts.ENV_VAR, 'https://hooks.example.test/pivot')
+    threads = []
+    real = alerts.notify
+    monkeypatch.setattr('pivot.store.notify', lambda kind, body: threads.append(real(kind, body)))
+    executor, broker, store = engine(tmp_path)
+    enable(executor)
+    broker.reject_stop = True
+    executor.tick(ready())
+    executor.tick(ready())
+    for thread in threads:
+        thread.join(timeout=2)
+    assert kinds(store).count('protection_failed') == 1 and kinds(store).count('strategy_paused') == 1
+    assert sorted(call[1]['json']['kind'] for call in posted.calls) == ['order_rejected', 'protection_failed', 'strategy_paused']
