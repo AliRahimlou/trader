@@ -27,22 +27,26 @@ class AnalysisPolicy:
     ``min_reward_risk`` is the smallest (target - entry) / (entry - stop)
     multiple an opposing premarked level must offer before it can be the
     target; ``vix_zone_tolerance`` is the half-width fraction of an actual VIX
-    swing area (0.015 is about 0.2 index points at VIX 15, versus ~1.5 ticks at
+    swing area (0.01 is about 0.15 index points at VIX 15, versus ~1.5 ticks at
     the former 0.001); ``vix_persistence_bars`` is how many of the latest
     closed fifteen-minute VIX candles of the current session may hold the
-    qualifying opposite reaction. Defaults are placeholders pending the
-    replay study and are plain fields so they stay easy to change.
+    qualifying opposite reaction; ``min_stop_fraction`` is the smallest stop
+    distance, as a fraction of the entry price, that a plan may use (a
+    three-cent stop on a $735 ETF is noise, not a level). The defaults were
+    chosen by the September 22, 2026 replay on sixty days of QQQ, twenty
+    sessions of actual VIX and sixty days of native crypto candles.
     """
     zone_tolerance: float = 0.001
     persistence_bars: int = 3
     minimum_leaders: int = 5
     maximum_opposition: int = 1
-    min_reward_risk: float = 1.5
-    vix_zone_tolerance: float = 0.015
-    vix_persistence_bars: int = 3
+    min_reward_risk: float = 1.0
+    vix_zone_tolerance: float = 0.01
+    vix_persistence_bars: int = 2
+    min_stop_fraction: float = 0.001
 
     def __post_init__(self):
-        fractions = (self.zone_tolerance, self.min_reward_risk, self.vix_zone_tolerance)
+        fractions = (self.zone_tolerance, self.min_reward_risk, self.vix_zone_tolerance, self.min_stop_fraction)
         counts = (self.persistence_bars, self.minimum_leaders, self.maximum_opposition, self.vix_persistence_bars)
         if (any(isinstance(v, bool) or not isinstance(v, (float, int)) or not isfinite(v) for v in fractions)
                 or any(isinstance(v, bool) or not isinstance(v, int) for v in counts)):
@@ -50,7 +54,7 @@ class AnalysisPolicy:
         if not (0 < self.zone_tolerance <= 0.01 and self.persistence_bars in (1, 2, 3)
                 and 1 <= self.minimum_leaders <= 7 and 0 <= self.maximum_opposition < self.minimum_leaders
                 and 0 < self.min_reward_risk <= 10 and 0 < self.vix_zone_tolerance <= 0.05
-                and 1 <= self.vix_persistence_bars <= 8):
+                and 1 <= self.vix_persistence_bars <= 8 and 0 <= self.min_stop_fraction <= 0.05):
             raise ValueError('Invalid analysis policy')
 
 
@@ -558,14 +562,23 @@ def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
     stop = (min(zone.low, origin.low, confirmed.low, current.low) - .01 if direction == 'long' else
             max(zone.high, origin.high, confirmed.high, current.high) + .01)
     stop = round(stop, 2)
-    target, target_zone, reward_risk = _target(all_levels, zone, origin, direction, current.close, stop, policy)
+    risk = abs(current.close - stop)
+    minimum_risk = current.close * policy.min_stop_fraction
+    if risk < minimum_risk:
+        # A stop a few cents away is noise, not a level: the plan would be
+        # stopped by ordinary spread. App interpretation, not a video rule.
+        target, target_zone, reward_risk = None, None, None
+        detail = (f'Execution interpretation: the {risk:.2f} stop distance is below the minimum '
+                  f'{policy.min_stop_fraction * 100:g}% of the entry price ({minimum_risk:.2f}); no plan')
+    else:
+        target, target_zone, reward_risk = _target(all_levels, zone, origin, direction, current.close, stop, policy)
+        detail = ((f'Execution interpretation: stop beyond event/zone; target {target_zone.source} at {reward_risk:.2f}R, '
+                   f'the nearest opposing pre-existing level at least {policy.min_reward_risk:g}R away') if target is not None else
+                  (f'Execution interpretation: no opposing pre-existing 4-hour or previous-day level offers at least '
+                   f'{policy.min_reward_risk:g}R against the {risk:.2f} stop distance; '
+                   f'the event area itself is never the target'))
     geometry = target is not None and (stop < current.close < target if direction == 'long' else target < current.close < stop)
-    _checked(result, 'Stop and target', geometry,
-             (f'Execution interpretation: stop beyond event/zone; target {target_zone.source} at {reward_risk:.2f}R, '
-              f'the nearest opposing pre-existing level at least {policy.min_reward_risk:g}R away') if geometry else
-             (f'Execution interpretation: no opposing pre-existing 4-hour or previous-day level offers at least '
-              f'{policy.min_reward_risk:g}R against the {abs(current.close - stop):.2f} stop distance; '
-              f'the event area itself is never the target'))
+    _checked(result, 'Stop and target', geometry, detail)
     result.update(stop=stop, target=target, reward_risk=reward_risk,
                   target_source=target_zone.source if target_zone else None,
                   target_zone=_zone_dict(target_zone) if target_zone else None)
@@ -668,7 +681,7 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
                                'persistence_minutes': LEADER_MINUTES * policy.persistence_bars},
                   vix_rule={'zone_tolerance': policy.vix_zone_tolerance,
                             'persistence_minutes': VIX_MINUTES * policy.vix_persistence_bars},
-                  exit_rule={'min_reward_risk': policy.min_reward_risk})
+                  exit_rule={'min_reward_risk': policy.min_reward_risk, 'min_stop_fraction': policy.min_stop_fraction})
     # Preserve every qualified opportunity for admission. A previously handled
     # event must not hide an unhandled area or the other independently valid
     # method. Only the executor knows durable consumption; analysis stays pure.

@@ -13,10 +13,10 @@ The 4.3 target was the nearest opposing pre-existing 0.1% band beyond the refere
 The 4.4 interpretation:
 
 - The event's own area (the four-hour band or previous-day level that produced the sweep or break) is **excluded** as a target. The target is the nearest *other* opposing pre-existing area beyond the reference price; establishment before the origin bar is still required.
-- A plan whose reward-to-risk is below **<<MIN_RR>>** (target distance divided by stop distance, both from the planned entry reference) is skipped with an explicit reason that shows both distances and the ratio. Nothing is resized or moved to manufacture the ratio; a nearer target that fails the ratio is not replaced with a farther one.
-- The stop formula (event/origin/confirming/current extreme ± $0.01) is unchanged.
+- The target must be at least **1.0 R** away (target distance at least the stop distance, both from the planned entry reference). A nearer opposing level below that multiple is skipped and the next one is considered; if no pre-existing opposing level qualifies, the plan is skipped with an explicit reason that names the stop distance and the multiple. Nothing is resized to manufacture the ratio.
+- The stop formula (event/origin/confirming/current extreme ± $0.01) is unchanged, but the stop distance must now be at least **0.1% of the entry price**; a plan with a smaller stop is skipped as noise (the September 21 short had a three-cent stop).
 
-The minimum ratio is an app choice. The videos describe stopping beyond the swept area and aiming for the next pivotal range without naming a number; the September 26 discipline clip supports a preplanned loss only qualitatively.
+The minimum ratio and the minimum stop distance are app choices; the replay (below) showed that higher multiples such as 1.5 R or 2 R lose targets and wins faster than they add reward inside a single session. The videos describe stopping beyond the swept area and aiming for the next pivotal range without naming a number; the September 26 discipline clip supports a preplanned loss only qualitatively.
 
 ### VIX gate at a VIX-scaled swing tolerance, with persistence and invalidation
 
@@ -24,8 +24,8 @@ The 4.3 gate required the latest completed 15-minute VIX candle to react at a zo
 
 The 4.4 interpretation:
 
-- Swing areas are still built from completed 15-minute actual-VIX candles, excluding the two latest bars, using repeated swing extremes. The area tolerance is now **<<VIX_TOL>>** of the VIX level (scaled so that a fifteen-minute bar can plausibly touch and reject an area rather than straddle it by construction).
-- A reaction must **persist**: the reaction candle closes in the reaction direction relative to the area and the next **<<VIX_PERSIST>>** completed candle(s) must not close back through the area. The reaction is **invalidated** by any later completed candle closing beyond the area on the wrong side, or by the reaction ageing past the same 180-minute event window that bounds the Nasdaq event.
+- Swing areas are still built from completed 15-minute actual-VIX candles, excluding the two latest bars, using repeated swing extremes. The area tolerance is now **1% of the VIX level** (a 2% band, about 0.30 index points at VIX 15, roughly three typical fifteen-minute ranges; after adjacent pivots merge, the median area is 3.7% wide).
+- A reaction may sit on **either of the last two** completed candles of the current session (contiguous fifteen-minute candles), so a VIX reaction and a leader quorum no longer have to land on the same bar. It is **invalidated** if any later completed candle closes back through the area against the reaction, and it only counts while the latest close still sits beyond the area boundary in the reaction direction.
 - The direction rule is unchanged: for a QQQ long the VIX reaction must be short (rejecting an area from below), for a QQQ short the VIX reaction must be long.
 - The fresh actual-index quote check before submission is unchanged and separate from candle qualification.
 
@@ -69,26 +69,26 @@ The `session_open` and quote-age checks compared host time with Alpaca's clock a
 
 The 4.0 cost gate required a positive projected target after 0.25%-per-side taker fees plus an execution allowance. With BTC's median five-minute stop distance of 0.119%, a 2 R target of 0.238% minus a 0.55% round trip is negative or a few hundredths of a percent, and the gate admitted trades whose net reward was effectively zero. Over 51 complete replay days the ten gated BTC trades went 6 wins / 4 losses for **−0.19% average net and −$0.29 total at $15**; the ungated population (47 wins / 94 losses) was worse.
 
-The gate now requires the **net** reward after both fees and the execution allowance to be at least **<<CRYPTO_K>>** times the net risk (stop distance plus the same costs). A skipped setup states the fees, the allowance, the gross and net reward, the net risk and the ratio in its visible reason, so the owner can see why a visually valid reversal was not bought. The stop (breakout candle extreme) and the 2 R gross target are unchanged; the gate only decides whether the plan is worth sending.
+The gate now requires the **net** reward after both fees and the execution allowance to be at least **1.0 times** the net risk (stop distance plus the same costs). A skipped setup states the fees, the allowance, the gross and net reward, the net risk and the ratio in its visible reason, so the owner can see why a visually valid reversal was not bought. The stop (breakout candle extreme) and the 2 R gross target are unchanged; the gate only decides whether the plan is worth sending.
 
 ### Gap-tolerant opening range with a minimum bar count
 
-A single missing five-minute candle in the first four hours voided the whole New York day for that market (ETH/USD had 2 complete days out of 59; LINK, SOL and XRP had 13). The opening range now tolerates gaps: it is valid when at least **<<OPENING_MIN>>** of the 48 five-minute bars between 00:00 and 04:00 ET are present, the first and last bars are present, and no gap exceeds the documented maximum. The range high/low come from the present bars only. Reversal confirmation still requires a native five-minute close outside followed by a later native close inside; missing bars during confirmation still invalidate that excursion, never the range. Provenance records the bar count and each gap.
+A single missing five-minute candle in the first four hours voided the whole New York day for that market (ETH/USD had 2 complete days out of 59; LINK, SOL and XRP had 13). The opening range now tolerates gaps: it is valid when at least **44 of the 48** five-minute bars between 00:00 and 04:00 ET are present (at most twenty minutes missing). The range high/low come from the present bars only. After the range, a missing slot has no close, so it cannot start, confirm or invalidate an excursion; the latest expected slot must still be present for a confirmation to be current. Coverage diagnostics still record every missing slot.
 
 ### Rule and policy versions
 
-The crypto rule version advances from `range-reversal-v1` to **<<RANGE_RULE_VERSION>>** and the crypto policy from `range-spot-execution-v1` to **<<CRYPTO_POLICY_VERSION>>**; the Socrates policy advances from `nasdaq-qqq-execution-v5-five-leader-majority` to **<<QQQ_POLICY_VERSION>>**. Event identities include the rule version, so no event confirmed under the old rules can be replayed under the new ones. Saved permissions are bound to the policy version, which is why both strategies require re-review.
+The crypto rule version advances from `range-reversal-v1` to **`range-reversal-v2`** and the crypto policy from `range-spot-execution-v1` to **`range-spot-execution-v2`**; the Socrates policy advances from `nasdaq-qqq-execution-v5-five-leader-majority` to **`nasdaq-qqq-execution-v6-reward-risk-vix-persistence`** (analysis `nasdaq-video-interpretation-v4`). Event identities include the rule version, so no event confirmed under the old rules can be replayed under the new ones. Saved permissions are bound to the policy version, which is why both strategies require re-review.
 
 ## VIX data changes
 
 ### Time-based retries within the free allowance
 
-The InsightSentry slot policy allowed one history attempt per 15-minute period plus one bounded recovery. When a candle was published late, the attempt at the period boundary fetched nothing, the recovery fetched nothing a moment later, and entries then waited up to 14 minutes for the next period with a complete, current candle. Retries are now **time-based**: after a period boundary the worker may retry at fixed offsets until the candle arrives, within the same durable monthly allowance (the September budget used 139 of 900 requests including the 50-request reserve). The durable request limit, the reserve, the quote-before-entry rule and the one-quote-per-period rule are unchanged. The number of retries per period is bounded so a provider outage cannot drain the allowance.
+The InsightSentry slot policy allowed one history attempt per 15-minute period plus one bounded recovery. When a candle was published late, the attempt at the period boundary fetched nothing, the recovery fetched nothing a moment later, and entries then waited up to 14 minutes for the next period with a complete, current candle. Retries are now **time-based**: after a period boundary the worker may retry at fixed offsets until the candle arrives, within the same durable monthly allowance (the September budget used 139 of 900 requests including the 50-request reserve). The durable request limit, the reserve and the quote-before-entry rule are unchanged; up to four successful quote refreshes per period are allowed so a ready setup is not locked out until the next quarter hour. Retries wait 30 seconds, are capped per period, and stop when the projected monthly need would exceed the allowance, so a provider outage cannot drain it.
 
 ## Deferred, and why
 
 - **Inverse-ETF short proxy (e.g. SQQQ/PSQ for a Socrates short).** The account cannot short and a $15 target cannot form a whole QQQ share, so every short setup is skipped. Buying an inverse ETF would let those setups trade, but it is a different instrument with its own daily-reset decay, its own quote and its own areas; the video rule (“Nasdaq short”) says nothing about it. Deferred until the owner decides whether a proxy is an acceptable instrument translation. The skip reason remains visible.
-- **Afternoon four-hour bucket (a second range for the 4H Range Reversal, from 09:30–13:30 ET or 12:00–16:00 ET).** The video demonstrates one range per day anchored at the session open; the app's midnight anchor is already a disclosed interpretation. Adding a second range doubles signals from a rule the source does not state, on markets where the replay is already net negative after fees. Deferred pending replay evidence with the new cost gate.
+- **Afternoon four-hour bucket for QQQ levels.** The app's four-hour frame is one 09:30–13:30 bar per session, so afternoon extremes never become four-hour areas. Including the 13:30–16:00 partial bucket touches the data pipeline, data-health and market-context contracts; deferred to a separate release so it cannot destabilise this one.
 - **Short-capable crypto route (Bullpen/Hyperliquid).** Unchanged from 4.0.0: a different venue with separate authentication and position management; not silently substituted.
 
 ## Replay evidence
@@ -97,15 +97,15 @@ The numbers below come from the audit's 60-day replay of committed native bars (
 
 | Measure | 4.3 interpretation | 4.4 interpretation |
 | --- | --- | --- |
-| QQQ plans, median reward-to-risk (223 rows) | 0.52 R; 67% below 1 R; 20% at or above 2 R | <<REPLAY_TABLE>> |
+| QQQ plans, median reward-to-risk | 0.52 R; 67% below 1 R; 20% at or above 2 R (223 rows) | 1.87 R; 97 of 108 event-direction rows keep a target (43 of 54 longs); blind walk-forward +0.31 R per trade both directions, +0.31 R for longs (about 1.3 cents at $15) versus −0.02 R for longs under 4.3 |
 | QQQ plans targeting the event's own level | admitted | excluded |
-| VIX gate true at random, long / short (495 bars, 20 sessions) | 28.3% / 21.4% at 0.1% band, 56 zones | <<REPLAY_TABLE>> at <<VIX_TOL>> with <<VIX_PERSIST>> persistence |
-| Leader quorum (5/1) reached, September 21 | 11:20–11:24, 11:41–11:44, 11:51–11:54, 12:36–12:39 ET, all blocked by VIX | <<REPLAY_TABLE>> |
-| BTC/USD complete range days (59 days) | 51 (strict, any gap voids the day) | <<REPLAY_TABLE>> at <<OPENING_MIN>> bars |
-| BTC/USD gated long trades (51 days) | 10: 6 W / 4 L, −0.19% avg net, −$0.29 at $15 | <<REPLAY_TABLE>> at k = <<CRYPTO_K>> |
-| ETH / LINK / SOL / XRP gated, total at $15 | −$0.15 / −$1.12 / −$0.85 / −$2.66 (13 or fewer complete days) | <<REPLAY_TABLE>> |
+| VIX gate true at random, long / short (497 bars, 20 sessions) | 28.3% / 21.5% at 0.1% band, 56 zones | 17.6% / 12.6% at the 1% tolerance with two-candle persistence, 13 zones |
+| Leader quorum (5/1) reached, September 21 | 11:20–11:24, 11:41–11:44, 11:51–11:54, 12:36–12:39 ET, all blocked by VIX | Still blocked: VIX rose from 14.60 to 15.09 through those windows, so no opposite reaction existed under any tested setting; separately, QQQ was at new highs with no pre-existing level above, so no target would have qualified either |
+| BTC/USD range days (59 days) | 51 (strict, any gap voids the day) | 59 at the 44-bar minimum; ETH / LINK / SOL / XRP 32 / 48 / 40 / 39 (from 11 / 30 / 21 / 23) |
+| BTC/USD gated long trades | old gate: 18 of 167 long signals, 8 W / 10 L, −0.39% avg net, −$1.06 at $15 | net-ratio 1.0: 0 admitted (the implied minimum stop distance is 1.16% of price; BTC five-minute breakout stops have a median of 0.10%) |
+| ETH / LINK / SOL / XRP gated, total at $15 | −$1.12 / −$2.65 / −$2.48 / −$4.59 under the old gate (44-bar ranges) | 0 / 0 / 1 (+$0.32) / 5 (−$0.96) admitted at net-ratio 1.0; every ungated long population is negative after fees (−0.53% to −0.66% average) |
 
-Replay sensitivity sweeps for `<<MIN_RR>>`, `<<VIX_TOL>>`, `<<VIX_PERSIST>>`, `<<CRYPTO_K>>` and `<<OPENING_MIN>>` are recorded in the release verification artifact; the chosen values are the ones recorded in `pivot/policy.py`, `pivot/strategy.py`, `pivot/range_reversal.py` and `pivot/crypto_execution.py` at the tagged revision.
+The sweeps behind these choices (minimum reward-to-risk 1.0 / 1.25 / 1.5 / 2.0 / 2.5; VIX tolerance 0.1% to 3% with one to three candles of persistence; crypto net ratio 0.75 / 1.0 / 1.5 and opening minimum 40 / 44 / 48) are recorded in the release verification artifact. Socrates outcomes were measured without the leader and VIX gates (no sixty-day leader history offline), on bar prices rather than fills; they establish geometry and rule frequency, not strategy performance. The crypto result means the BTC engine will idle at these stop distances; that is the intended outcome of a gate that refuses fee-negative trades.
 
 ## Owner action required
 

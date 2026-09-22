@@ -21,7 +21,7 @@ from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
 from .deployment import DeploymentHold
 from .portfolio import PortfolioBlocked
-from .strategy import LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS
+from .strategy import ANALYSIS_VERSION, LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
 WORKING_PROTECTION = {'new', 'partially_filled'}
@@ -40,7 +40,7 @@ CLOCK_SKEW_SECONDS = 5
 # Entries stop 30 minutes before the close (positions still start closing at 5),
 # so a fresh entry has room for its stop and target instead of a forced exit.
 ENTRY_CUTOFF_SECONDS = 1800
-SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v3'
+SIGNAL_POLICY_VERSION = ANALYSIS_VERSION  # The executor admits only the analyzer's current interpretation.
 PAPER_SIGNAL_POLICY_VERSION = 'synthetic-paper-commissioning-v1'
 PAPER_SIGNAL_PURPOSE = 'broker_order_lifecycle_only'
 SIGNAL_METHODS = {'four_hour_retest', 'prior_day_sweep'}

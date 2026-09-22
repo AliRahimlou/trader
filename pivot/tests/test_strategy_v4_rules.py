@@ -27,11 +27,12 @@ SESSION = datetime(2026, 9, 16, 9, 30, tzinfo=ET)  # NOW is 12:00 ET on the same
 
 def test_defaults_and_validation_of_the_new_policy_fields():
     assert (BASELINE_POLICY.min_reward_risk, BASELINE_POLICY.vix_zone_tolerance,
-            BASELINE_POLICY.vix_persistence_bars) == (1.5, 0.015, 3)
-    assert AnalysisPolicy(min_reward_risk=2, vix_zone_tolerance=0.01, vix_persistence_bars=1)
+            BASELINE_POLICY.vix_persistence_bars, BASELINE_POLICY.min_stop_fraction) == (1.0, 0.01, 2, 0.001)
+    assert AnalysisPolicy(min_reward_risk=2, vix_zone_tolerance=0.01, vix_persistence_bars=1, min_stop_fraction=0)
     for bad in ({'min_reward_risk': 0}, {'min_reward_risk': float('nan')}, {'min_reward_risk': True},
                 {'min_reward_risk': 11}, {'vix_zone_tolerance': 0}, {'vix_zone_tolerance': 0.06},
-                {'vix_persistence_bars': 0}, {'vix_persistence_bars': 9}, {'vix_persistence_bars': 2.0}):
+                {'vix_persistence_bars': 0}, {'vix_persistence_bars': 9}, {'vix_persistence_bars': 2.0},
+                {'min_stop_fraction': -0.001}, {'min_stop_fraction': 0.06}, {'min_stop_fraction': True}):
         with pytest.raises(ValueError):
             AnalysisPolicy(**bad)
 
@@ -64,7 +65,7 @@ def test_nearest_levels_below_the_multiple_are_skipped_for_the_next_qualifying_l
     relaxed = analyze(market, leaders, vix, now, AnalysisPolicy(min_reward_risk=0.4))
     assert relaxed['target'] == 104.89 and relaxed['target_source'] == '4h repeated interaction'
     assert relaxed['reward_risk'] == pytest.approx(4.89 / 12.01)
-    assert relaxed['exit_rule'] == {'min_reward_risk': 0.4}
+    assert relaxed['exit_rule'] == {'min_reward_risk': 0.4, 'min_stop_fraction': 0.001}
 
 
 @pytest.mark.parametrize('direction', ['long', 'short'])
@@ -76,7 +77,7 @@ def test_no_level_at_the_required_multiple_fails_the_exit_check_without_a_target
     assert result['state'] == 'CONFIRMING' and result['direction'] == direction
     check = result['checks'][-1]
     assert check['name'] == 'Stop and target' and not check['passed']
-    assert 'at least 1.5R' in check['detail'] and '12.01 stop distance' in check['detail']
+    assert 'at least 1R' in check['detail'] and '12.01 stop distance' in check['detail']
     assert result['target'] is None and result['reward_risk'] is None and result['target_source'] is None
     assert result['entry_candidates'] == []
     assert analyze(market, leaders, vix, now, AnalysisPolicy(min_reward_risk=0.8))['state'] == 'SETUP_READY'
@@ -88,13 +89,14 @@ def vix_bar(minutes_after_open, opened, high, low, close):
     return Bar(SESSION + timedelta(minutes=minutes_after_open), 15, opened, high, low, close)
 
 
-def vix_series(reaction=(14.93, 15.10, 14.85, 15.08), follow=((15.08, 15.12, 15.03, 15.06), (15.06, 15.10, 15.04, 15.07)),
+def vix_series(reaction=(14.93, 15.10, 14.85, 15.08), follow=((15.08, 15.12, 15.03, 15.06),),
                before_reaction=(14.95, 15.00, 14.90, 14.95)):
-    """Contiguous 15-minute VIX candles 09:45-12:00 ET with repeated 14.80 lows.
+    """Contiguous 15-minute VIX candles 09:45-11:45 ET with repeated 14.80 lows.
 
     The swing lows at 10:00 and 10:45 form one repeated pivot area, established
     at 11:00 when the second swing is confirmed. The reaction candle closes at
-    11:30, two candles before the 12:00 latest close.
+    11:30, one candle before the 11:45 latest close (the baseline policy keeps
+    a reaction for two closed candles).
     """
     rows = [(15.20, 15.30, 15.10, 15.15), (15.15, 15.20, 14.80, 14.90), (14.90, 15.05, 14.88, 15.00),
             (15.00, 15.10, 14.95, 15.02), (15.02, 15.05, 14.80, 14.92), (14.92, 15.00, 14.85, 14.95),
@@ -106,28 +108,31 @@ def vix_market(bars, now=NOW):
     return Market('I:VIX', {15: bars}, 'massive_indices', True, now)
 
 
-def test_vix_reaction_two_candles_back_confirms_a_short_while_price_holds_beyond_the_area():
+def test_vix_reaction_one_candle_back_confirms_a_short_while_price_holds_beyond_the_area():
     vix = vix_market(vix_series())
     evidence = vix_diagnostics(vix, 'short', NOW)
     assert evidence['okay'] and evidence['reason'] == 'expected reaction present'
-    assert evidence['reaction_at'] == SESSION + timedelta(hours=2) and evidence['age_minutes'] == 30
+    assert evidence['reaction_at'] == SESSION + timedelta(hours=2) and evidence['age_minutes'] == 15
     zone = evidence['zone']
     assert zone.source == '4h repeated pivot' and zone.touches == 2
-    assert zone.low == pytest.approx(14.80 * 0.985) and zone.high == pytest.approx(14.80 * 1.015)
+    assert zone.low == pytest.approx(14.80 * 0.99) and zone.high == pytest.approx(14.80 * 1.01)
     assert zone.established_at == SESSION + timedelta(minutes=90)
-    assert '11:30 ET candle, 30 min before the latest close' in evidence['detail']
+    assert '11:30 ET candle, 15 min before the latest close' in evidence['detail']
     # The same evidence cannot confirm a long, and a one-candle policy no longer sees it.
     assert vix_confirmation(vix, 'long', NOW) == (False, (
         'VIX must rise from demand for a short, or fall from supply for a long; no short reaction within the last '
-        '3 closed 15-minute candles of this session'))
+        '2 closed 15-minute candles of this session'))
     assert not vix_confirmation(vix, 'short', NOW, AnalysisPolicy(vix_persistence_bars=1))[0]
+    # Two candles back is outside the baseline window but inside a three-candle policy.
+    older = vix_market(vix_series(follow=((15.08, 15.12, 15.03, 15.06), (15.06, 15.10, 15.04, 15.07))), NOW + timedelta(minutes=15))
+    assert not vix_confirmation(older, 'short', NOW + timedelta(minutes=15))[0]
+    assert vix_confirmation(older, 'short', NOW + timedelta(minutes=15), AnalysisPolicy(vix_persistence_bars=3))[0]
 
 
 def test_vix_reaction_invalidated_by_a_later_close_through_the_area_fails_even_if_price_recovers():
-    # The 11:45 candle gaps below the area without touching it (so it is not a
-    # short reaction of its own) and the 12:00 recovery closes beyond the area
-    # again but below its open, so it is not a fresh long reaction either.
-    bars = vix_series(follow=((14.50, 14.55, 14.40, 14.45), (15.15, 15.20, 14.90, 15.08)))
+    # The 11:45 candle closes through the area below the 11:30 long reaction,
+    # which invalidates it even though the 11:45 candle is itself a short reaction.
+    bars = vix_series(follow=((14.50, 14.55, 14.40, 14.45),))
     okay, detail = vix_confirmation(vix_market(bars), 'short', NOW)
     assert not okay
     assert 'the long reaction on the 11:30 ET candle was invalidated by subsequent close through zone' in detail
@@ -138,7 +143,7 @@ def test_vix_reaction_invalidated_by_a_later_close_through_the_area_fails_even_i
 
 
 def test_vix_latest_close_back_inside_the_area_has_no_follow_through():
-    bars = vix_series(follow=((15.08, 15.12, 15.03, 15.06), (15.06, 15.08, 14.85, 14.90)))
+    bars = vix_series(follow=((15.06, 15.08, 14.85, 14.90),))
     okay, detail = vix_confirmation(vix_market(bars), 'short', NOW)
     assert not okay and 'reaction has no current directional follow-through' in detail
 
@@ -166,9 +171,9 @@ def test_wider_vix_areas_see_a_reaction_the_tick_sized_band_misses_and_ignore_a_
     narrow_zone = vix_diagnostics(held, 'short', NOW, narrow)['zones'][0]
     assert narrow_zone.high - narrow_zone.low == pytest.approx(0.0296)
     # A wick to 14.80 with a 14.90 close is a reaction for the tick-sized band
-    # but still inside the 14.58-15.02 area, so the wider band does not react.
+    # but still inside the 14.65-14.95 area, so the wider band does not react.
     wick = vix_market(vix_series(before_reaction=(14.95, 15.00, 14.85, 14.85), reaction=(14.85, 14.95, 14.80, 14.90),
-                                 follow=((14.90, 14.95, 14.86, 14.92), (14.92, 14.96, 14.88, 14.93))))
+                                 follow=((14.90, 14.95, 14.86, 14.92),)))
     assert vix_confirmation(wick, 'short', NOW, narrow)[0]
     assert not vix_confirmation(wick, 'short', NOW, wide)[0]
     assert vix_diagnostics(wick, 'short', NOW, wide)['reactions'] == []
@@ -180,13 +185,13 @@ def test_analysis_reports_the_vix_reaction_and_the_trace_stays_consistent():
     result = analyze(market, leaders, vix, now)
     assert result['state'] == 'SETUP_READY' and result['direction'] == 'short'
     assert result['vix_reaction_at'] == (SESSION + timedelta(hours=2)).isoformat()
-    assert result['vix_reaction_age_minutes'] == 30 and result['vix_zone']['source'] == '4h repeated pivot'
-    assert result['vix_rule'] == {'zone_tolerance': 0.015, 'persistence_minutes': 45}
+    assert result['vix_reaction_age_minutes'] == 15 and result['vix_zone']['source'] == '4h repeated pivot'
+    assert result['vix_rule'] == {'zone_tolerance': 0.01, 'persistence_minutes': 30}
     trace = build_decision_trace(result, {**leaders, 'QQQ': market}, vix, now)
     assert trace['vix']['reason'] == 'expected reaction present' and trace['vix']['gate_reached']
     assert trace['vix']['reaction_at'] == result['vix_reaction_at']
-    assert trace['vix']['zone']['low'] == result['vix_zone']['low'] and trace['vix']['age_minutes'] == 30
-    assert trace['vix']['persistence_bars'] == 3 and trace['vix']['zone_tolerance'] == 0.015
+    assert trace['vix']['zone']['low'] == result['vix_zone']['low'] and trace['vix']['age_minutes'] == 15
+    assert trace['vix']['persistence_bars'] == 2 and trace['vix']['zone_tolerance'] == 0.01
     assert trace['setup']['reward_risk'] == result['reward_risk'] and trace['setup']['vix_reaction_at']
     assert [r['status'] for r in trace['vix']['reactions']] == ['active']
 
@@ -263,18 +268,29 @@ def test_versions_and_policy_text_describe_the_v4_rules():
     assert ANALYSIS_VERSION == 'nasdaq-video-interpretation-v4'
     assert POLICY_VERSION == 'nasdaq-qqq-execution-v6-reward-risk-vix-persistence' == POLICY['version']
     text = ' '.join(POLICY['summary'])
-    for phrase in ('at least 1.5 times the stop distance', 'the swept area itself is never the target',
-                   '1.5% bands', 'any of the last three closed candles', 'is neutral',
+    for phrase in ('at least as far away as the stop distance', 'the swept area itself is never the target',
+                   'at least 0.1% of the entry price', '1% bands', 'either of the last two closed candles', 'is neutral',
                    'Each strategy may attempt two new entries per New York session',
                    'pauses the Socrates strategy only', 'final 30 minutes', 'time-based within the free allowance'):
         assert phrase in text, phrase
     book = rulebook()
     assert book['version'] == 'video-evidence-2026-09-22-v4'
-    assert any('1.5R' in line for line in book['unresolved'])
+    assert any('1R minimum' in line for line in book['unresolved'])
     assert any('neutral' in line for line in book['unresolved'])
 
 
-@pytest.mark.xfail(strict=False, reason='pivot/execution.py pins SIGNAL_POLICY_VERSION to the v3 analysis; '
-                                        'its owner must move it to ANALYSIS_VERSION before v4 setups can execute')
 def test_executor_signal_contract_names_the_current_analysis_version():
     assert execution.SIGNAL_POLICY_VERSION == ANALYSIS_VERSION
+
+
+def test_a_stop_closer_than_the_minimum_distance_produces_no_plan():
+    market, leaders, vix, now = setup_scenario('long')
+    # A sweep candle whose low is one cent under the level: risk would be $0.02 on a $100 entry.
+    market.bars[60][-1] = candle(now, 90.05, 90.10, 89.99, 90.00, 60)  # Sweeps yesterday's 90 low by a cent and closes two cents above the stop.
+    result = analyze(market, leaders, vix, now)
+    assert result['state'] != 'SETUP_READY' and result['target'] is None and result['reward_risk'] is None
+    check = next(c for c in result['checks'] if c['name'] == 'Stop and target')
+    assert not check['passed'] and 'below the minimum 0.1% of the entry price' in check['detail']
+    assert 'Stop and target' in result['blockers']
+    # Allowing any stop distance restores the plan.
+    assert analyze(market, leaders, vix, now, AnalysisPolicy(min_stop_fraction=0))['state'] == 'SETUP_READY'

@@ -26,7 +26,7 @@ GROUPS = {
 UNRESOLVED = [
     'Owner clarified V2 and V3 are primary; V1 is supplementary only.',
     'Exact zone, sweep/retest and leader rejection thresholds are absent.',
-    'Stop placement, position risk, invalidation, and exits for the Nasdaq sequence are absent; the minimum 1.5R target multiple is an app choice.',
+    'Stop placement, position risk, invalidation, and exits for the Nasdaq sequence are absent; the 1R minimum target multiple and the 0.1% minimum stop distance are app choices.',
     'V2/V3 do not require the first clip’s tape, 5-minute shift or VWAP target.',
     'QQQ and the documented execution policy are app choices; they are not rules specified by the videos.',
     'VIX area width, how many recent 15-minute candles may hold the reaction, and treating a leader with mixed reactions as neutral rather than blocking are app interpretations of the qualitative clips.'

@@ -52,7 +52,7 @@ def test_outside_then_inside_records_exact_first_candle_stop_and_two_r(closes, d
     assert event['entry_valid_until'] == result['signal_valid_until']
     assert result['candidates'] == [event]
     assert result['range']['native_candle_count'] == result['range']['expected_candle_count'] == 48
-    assert result['range']['minimum_candle_count'] == OPENING_BARS_MINIMUM == 40
+    assert result['range']['minimum_candle_count'] == OPENING_BARS_MINIMUM == 44
     assert result['rule_version'] == event['rule_version'] == RULE_VERSION == 'range-reversal-v2'
     assert len(result['interpretation_warnings']) >= 7
 
@@ -214,7 +214,7 @@ def test_missing_latest_candle_is_not_current_and_cannot_ready_a_signal():
     assert 'missing or stale' in beyond['detail'] and beyond['coverage']['publication_wait'] is False
 
 
-@pytest.mark.parametrize('available,expects_range', [(39, False), (40, True)])
+@pytest.mark.parametrize('available,expects_range', [(43, False), (44, True)])
 def test_opening_range_requires_the_minimum_available_bars(available, expects_range):
     market, now, provenance = sample([89, 95])
     opening = market.bars[5][:48]
@@ -224,11 +224,11 @@ def test_opening_range_requires_the_minimum_available_bars(available, expects_ra
     assert result['coverage']['opening_range_missing_count'] == removed
     if expects_range:
         assert result['state'] == 'SETUP_OBSERVED' and result['signal_ready'] is True
-        assert result['range']['native_candle_count'] == 40
+        assert result['range']['native_candle_count'] == 44
     else:
         assert result['state'] == 'DATA_WAITING' and result['range'] is None
         assert result['signal_ready'] is False and not result['candidates']
-        assert '39 of 48' in result['detail'] and 'at least 40' in result['detail']
+        assert '43 of 48' in result['detail'] and 'at least 44' in result['detail']
 
 
 @pytest.mark.parametrize('index,in_opening_range', [(0, True), (47, True), (48, False)])

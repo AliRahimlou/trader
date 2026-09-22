@@ -23,7 +23,7 @@ FAMILY_ID = 'range_reversal'
 SOURCES = {'alpaca_crypto', 'alpaca_crypto_us', 'alpaca_iex', 'alpaca_sip'}
 STEP = timedelta(minutes=5)
 OPENING_SLOTS = 48  # Four elapsed hours of five-minute candles.
-OPENING_BARS_MINIMUM = 40  # Placeholder app threshold; the integrator may change it.
+OPENING_BARS_MINIMUM = 44  # At most twenty minutes of the four-hour range may be missing; chosen by the Sep 22, 2026 replay.
 MAX_RECEIPT_SECONDS = 90
 PUBLICATION_GRACE_SECONDS = 90
 INTERPRETATION_WARNINGS = (

@@ -41,7 +41,7 @@ WORKING = {'new', 'partially_filled'}
 STATUSES = TERMINAL | WORKING | {'accepted', 'pending_new', 'pending_cancel', 'pending_replace', 'stopped', 'suspended', 'done_for_day', 'calculated'}
 FEE = Decimal('.0025')
 EXIT_ALLOWANCE = Decimal('.001')
-MIN_NET_REWARD_RISK = Decimal('1.0')  # Placeholder net reward-to-risk floor after fees; the integrator may change it.
+MIN_NET_REWARD_RISK = Decimal('1.0')  # Net reward must at least equal net risk after fees; chosen by the Sep 22, 2026 replay.
 ONE = Decimal('1')
 HUNDRED = Decimal('100')
 MAX_ENTRY_DRIFT = Decimal('.001')
@@ -467,7 +467,7 @@ class CryptoRangeExecutor:
         # their management above is never limited by this new-entry budget.
         if len(self.store.active_trades()) >= MAX_ACTIVE_CRYPTO_TRADES:
             raise CryptoWaiting('Crypto execution capacity is full (two active positions); waiting for an existing position to finish.')
-        self.main_store.assert_session_entry_available(self.now())
+        self.main_store.assert_session_entry_available(self.now(), family='range_reversal')
         if self.entry_preflights_remaining <= 0:
             raise CryptoWaiting('Waiting for next broker-check slot; the original signal deadline still applies.')
         self.entry_preflights_remaining -= 1

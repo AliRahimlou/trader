@@ -126,7 +126,7 @@ def test_old_rule_version_is_refused_by_the_execution_contract():
 def test_opening_candle_count_contract(engine, count, accepted):
     e, b, store, _, _ = engine
     analysis = signal(); analysis['range']['native_candle_count'] = count
-    assert OPENING_BARS_MINIMUM == 40
+    assert OPENING_BARS_MINIMUM == 44
     e.tick({'BTC/USD': analysis})
     assert bool(b.sent) is accepted, e.message
 
@@ -147,6 +147,6 @@ def test_missing_opening_candle_in_native_bars_still_produces_an_executable_sign
 def test_policy_text_describes_the_v2_rules():
     assert POLICY_VERSION == POLICY['version'] == 'range-spot-execution-v2'
     text = ' '.join(POLICY['summary'])
-    assert 'at least 40' in text and 'Missing five-minute candles are tolerated' in text
+    assert 'at least 44' in text and 'Missing five-minute candles are tolerated' in text
     assert 'net reward after both taker fees' in text and 'at least the net risk' in text
     assert 'own allowance of two entry attempts per New York session' in text
