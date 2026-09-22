@@ -12,28 +12,45 @@ from zoneinfo import ZoneInfo
 from .models import Zone, MAG7, timestamp
 
 ET = ZoneInfo('America/New_York')
-ANALYSIS_VERSION = 'nasdaq-video-interpretation-v3'
+ANALYSIS_VERSION = 'nasdaq-video-interpretation-v4'
 EVENT_LIFETIME_MINUTES = 180
 LEADER_MINUTES = 5
+VIX_MINUTES = 15
 CANDLE_PUBLICATION_GRACE_SECONDS = 90
 
 
 @dataclass(frozen=True)
 class AnalysisPolicy:
-    """Declared v2 interpretations, frozen before replay; not creator formulas."""
+    """Declared interpretations, frozen before replay; not creator formulas.
+
+    v4 additions (all app choices; the recordings supply no numbers):
+    ``min_reward_risk`` is the smallest (target - entry) / (entry - stop)
+    multiple an opposing premarked level must offer before it can be the
+    target; ``vix_zone_tolerance`` is the half-width fraction of an actual VIX
+    swing area (0.015 is about 0.2 index points at VIX 15, versus ~1.5 ticks at
+    the former 0.001); ``vix_persistence_bars`` is how many of the latest
+    closed fifteen-minute VIX candles of the current session may hold the
+    qualifying opposite reaction. Defaults are placeholders pending the
+    replay study and are plain fields so they stay easy to change.
+    """
     zone_tolerance: float = 0.001
     persistence_bars: int = 3
     minimum_leaders: int = 5
     maximum_opposition: int = 1
+    min_reward_risk: float = 1.5
+    vix_zone_tolerance: float = 0.015
+    vix_persistence_bars: int = 3
 
     def __post_init__(self):
-        if (isinstance(self.zone_tolerance, bool) or not isinstance(self.zone_tolerance, (float, int))
-                or not isfinite(self.zone_tolerance)
-                or any(isinstance(v, bool) or not isinstance(v, int)
-                       for v in (self.persistence_bars, self.minimum_leaders, self.maximum_opposition))):
+        fractions = (self.zone_tolerance, self.min_reward_risk, self.vix_zone_tolerance)
+        counts = (self.persistence_bars, self.minimum_leaders, self.maximum_opposition, self.vix_persistence_bars)
+        if (any(isinstance(v, bool) or not isinstance(v, (float, int)) or not isfinite(v) for v in fractions)
+                or any(isinstance(v, bool) or not isinstance(v, int) for v in counts)):
             raise ValueError('Invalid analysis policy')
         if not (0 < self.zone_tolerance <= 0.01 and self.persistence_bars in (1, 2, 3)
-                and 1 <= self.minimum_leaders <= 7 and 0 <= self.maximum_opposition < self.minimum_leaders):
+                and 1 <= self.minimum_leaders <= 7 and 0 <= self.maximum_opposition < self.minimum_leaders
+                and 0 < self.min_reward_risk <= 10 and 0 < self.vix_zone_tolerance <= 0.05
+                and 1 <= self.vix_persistence_bars <= 8):
             raise ValueError('Invalid analysis policy')
 
 
@@ -143,9 +160,16 @@ def reaction(previous, current, zone):
 def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
     """Five-minute location/rejection plus bounded, still-valid follow-through.
 
-    Without a setup origin these are observations only. An admitted branch
-    supplies its originating break time so unrelated earlier reactions cannot
-    accumulate. No active/recent reaction is inferred from fifteen-minute bars.
+    Without a setup origin these are observations only; the origin is reported
+    but no longer discards reactions that began earlier in the same session
+    (v4 app interpretation: V2/V3 ask whether the leaders are rejecting their
+    areas now, not whether they started after the Nasdaq candle). The
+    persistence window, same-session rule, gap and close-through invalidation
+    still bound the evidence. Follow-through means the latest close is still
+    beyond the area boundary in the vote direction; a one-cent pullback from
+    the reaction close is not a lost vote. Conflicting active areas make a
+    company neutral, with the conflict reported. No reaction is inferred from
+    fifteen-minute bars.
     """
     rows = {}
     for symbol in MAG7:
@@ -186,8 +210,7 @@ def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
                 observed_age = (now - current.end).total_seconds() / 60
                 if observed_age >= LEADER_MINUTES * policy.persistence_bars:
                     break
-                if (current.end.astimezone(ET).date() != now.astimezone(ET).date()
-                        or (setup_at is not None and current.end < setup_at)):
+                if current.end.astimezone(ET).date() != now.astimezone(ET).date():
                     continue
                 if current.end - previous.end != timedelta(minutes=LEADER_MINUTES):
                     continue
@@ -198,7 +221,7 @@ def leader_diagnostics(leaders, now, policy=BASELINE_POLICY, setup_at=None):
                 gap = any(b.end - a.end != timedelta(minutes=LEADER_MINUTES) for a, b in zip(tail, tail[1:]))
                 invalidated = any(b.close < zone.low if vote == 'long' else b.close > zone.high
                                   for b in bars[index+1:])
-                continuing = latest.close >= current.close if vote == 'long' else latest.close <= current.close
+                continuing = latest.close > zone.high if vote == 'long' else latest.close < zone.low
                 item = {'vote': vote, 'at': current.end,
                         'age': (latest.end - current.end).total_seconds() / 60, 'zone': zone}
                 if gap or invalidated or not continuing:
@@ -245,8 +268,9 @@ def _leader_observation_at(rows):
 
 
 def _leader_confirmation(rows, direction, policy):
+    """Missing data vetoes; a conflicting company is neutral, as V2 skips mixed evidence."""
     for symbol, row in rows.items():
-        if row['reason'] == 'current 5-minute data missing' or row.get('conflicting_reactions'):
+        if row['reason'] == 'current 5-minute data missing':
             return False, f'{symbol}: {row["reason"]}'
     if _leader_observation_at(rows) is None:
         return False, 'Leader 5-minute candles are not synchronized; waiting for a common completed timestamp'
@@ -254,23 +278,113 @@ def _leader_confirmation(rows, direction, policy):
     opposite = 'short' if direction == 'long' else 'long'
     okay = (sum(v == direction for v in votes.values()) >= policy.minimum_leaders
             and sum(v == opposite for v in votes.values()) <= policy.maximum_opposition)
-    return okay, ', '.join(f'{symbol}: {vote or "no zone reaction"}' for symbol, vote in votes.items())
+    return okay, ', '.join(
+        f'{symbol}: {vote or ("conflicting, neutral" if row.get("conflicting_reactions") else "no zone reaction")}'
+        for (symbol, vote), row in zip(votes.items(), rows.values()))
 
 
 def leader_confirmation(leaders, direction, now, policy=BASELINE_POLICY, setup_at=None):
     return _leader_confirmation(leader_diagnostics(leaders, now, policy, setup_at), direction, policy)
 
 
-def vix_confirmation(vix, direction, now):
-    if not vix_candles_fresh(vix, now):
-        return False, 'Fresh actual VIX index data required; volatility ETFs and delayed data are not accepted'
-    bars = closed(vix, 15, now)
+VIX_RULE_TEXT = 'VIX must rise from demand for a short, or fall from supply for a long'
+
+
+def vix_reactions(bars, now, policy=BASELINE_POLICY):
+    """Actual VIX area reactions on the latest closed fifteen-minute candles, with status.
+
+    Video rule: VIX reacts at an area where it previously pivoted. App
+    interpretation (v4): the reaction candle may be any of the last
+    ``policy.vix_persistence_bars`` closed candles of the current New York
+    session, contiguous through the latest candle; areas are the repeated
+    swing extremes known before that candle, banded by
+    ``policy.vix_zone_tolerance``; no later close may cross back through the
+    area against the reaction, and the latest close must still sit beyond the
+    area boundary in the reaction direction. The newest reaction per area wins.
+    Each item carries direction, at, age (minutes to the latest close), zone
+    and status, so traces can show discarded reactions beside admitted ones.
+    """
     if len(bars) < 3:
-        return False, 'VIX history is incomplete'
-    levels = zones(bars[:-2], bars[-1].end - timedelta(minutes=15))
-    expected = 'short' if direction == 'long' else 'long'
-    okay = any(reaction(bars[-2], bars[-1], z) == expected for z in levels)
-    return okay, 'VIX must rise from demand for a short, or fall from supply for a long'
+        return []
+    latest = bars[-1]
+    day = now.astimezone(ET).date()
+    step = timedelta(minutes=VIX_MINUTES)
+    results = []
+    for offset in range(policy.vix_persistence_bars):
+        index = len(bars) - 1 - offset
+        if index < 1:
+            break
+        current, previous = bars[index], bars[index - 1]
+        tail = bars[index - 1:]
+        # The scan cannot cross a missing/irregular candle or a session change.
+        if (any(b.end - a.end != step for a, b in zip(tail, tail[1:]))
+                or current.end.astimezone(ET).date() != day):
+            break
+        for zone in zones(bars[:index], current.end - step, policy.vix_zone_tolerance):
+            direction = reaction(previous, current, zone)
+            if direction is None or any(r['zone'] == zone for r in results):
+                continue
+            invalidated = any(b.close < zone.low if direction == 'long' else b.close > zone.high
+                              for b in bars[index + 1:])
+            continuing = latest.close > zone.high if direction == 'long' else latest.close < zone.low
+            results.append({'direction': direction, 'at': current.end,
+                            'age': (latest.end - current.end).total_seconds() / 60, 'zone': zone,
+                            'status': ('invalidated by subsequent close through zone' if invalidated else
+                                       'reaction has no current directional follow-through' if not continuing
+                                       else 'active')})
+    return results
+
+
+def vix_diagnostics(vix, direction, now, policy=BASELINE_POLICY):
+    """Actual-index confirmation with its evidence, shared by analysis and traces.
+
+    ``direction`` is the Nasdaq trade direction (None before one is selected);
+    the expected VIX reaction is the opposite. Only completed candles are
+    used; the fresh actual-index quote is a separate broker-side admission.
+    """
+    expected = {'long': 'short', 'short': 'long'}.get(direction)
+    result = {'okay': False, 'expected_reaction': expected, 'reaction_at': None, 'zone': None,
+              'age_minutes': None, 'reactions': [], 'zones': [], 'fresh': vix_candles_fresh(vix, now),
+              'persistence_bars': policy.vix_persistence_bars, 'zone_tolerance': policy.vix_zone_tolerance,
+              'reason': None, 'detail': VIX_RULE_TEXT}
+    if not result['fresh']:
+        return {**result, 'reason': 'fresh actual VIX data missing',
+                'detail': 'Fresh actual VIX index data required; volatility ETFs and delayed data are not accepted'}
+    bars = closed(vix, VIX_MINUTES, now)
+    if len(bars) < 3:
+        return {**result, 'reason': 'VIX history incomplete', 'detail': 'VIX history is incomplete'}
+    result['zones'] = zones(bars[:-2], bars[-1].end - timedelta(minutes=VIX_MINUTES), policy.vix_zone_tolerance)
+    result['reactions'] = reactions = vix_reactions(bars, now, policy)
+    if not result['zones']:
+        result['reason'] = 'no eligible zones'
+    elif expected is None:
+        result['reason'] = 'Nasdaq direction not selected; VIX gate not reached'
+    else:
+        matching = [r for r in reactions if r['direction'] == expected]
+        active = [r for r in matching if r['status'] == 'active']
+        clock = lambda at: at.astimezone(ET).strftime('%H:%M')
+        if active:
+            chosen = min(active, key=lambda r: (-r['at'].timestamp(), abs(bars[-1].close - r['zone'].mid), r['zone'].low))
+            zone = chosen['zone']
+            result.update(okay=True, reason='expected reaction present', reaction_at=chosen['at'],
+                          zone=zone, age_minutes=chosen['age'],
+                          detail=(f'VIX {expected} reaction at {zone.source} {zone.low:.2f}-{zone.high:.2f} on the '
+                                  f'{clock(chosen["at"])} ET candle, {chosen["age"]:g} min before the latest close; '
+                                  f'no later close crossed back through the area'))
+        elif matching:
+            newest = max(matching, key=lambda r: r['at'])
+            result.update(reason='expected zone reaction absent',
+                          detail=f'{VIX_RULE_TEXT}; the {expected} reaction on the {clock(newest["at"])} ET candle was {newest["status"]}')
+        else:
+            result.update(reason='expected zone reaction absent',
+                          detail=(f'{VIX_RULE_TEXT}; no {expected} reaction within the last '
+                                  f'{policy.vix_persistence_bars} closed 15-minute candles of this session'))
+    return result
+
+
+def vix_confirmation(vix, direction, now, policy=BASELINE_POLICY):
+    evidence = vix_diagnostics(vix, direction, now, policy)
+    return evidence['okay'], evidence['detail']
 
 
 def vix_candles_fresh(vix, now):
@@ -381,6 +495,8 @@ def _zone_dict(zone):
 def _empty_result(method, label):
     return {'id': method, 'label': label, 'state': 'WATCHING', 'can_enter': False,
             'checks': [], 'levels': [], 'direction': None, 'entry': None, 'stop': None, 'target': None,
+            'reward_risk': None, 'target_source': None, 'target_zone': None,
+            'vix_reaction_at': None, 'vix_zone': None, 'vix_reaction_age_minutes': None,
             'event': None, 'event_at': None, 'event_id': None, 'event_origin_at': None,
             'event_expires_at': None, 'latest_evidence_at': None,
             'leader_observation_at': None, 'leader_observations_synchronized': False,
@@ -430,27 +546,61 @@ def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
                     confirmations[direction][1] if direction else confirmations['long'][1]):
         return _finish(result)
     result['direction'] = direction
-    okay, detail = vix_confirmation(vix, direction, now)
-    _checked(result, 'Actual VIX zone reaction', okay, detail)
+    vix_evidence = vix_diagnostics(vix, direction, now, policy)
+    _checked(result, 'Actual VIX zone reaction', vix_evidence['okay'], vix_evidence['detail'])
+    result.update(vix_reaction_at=vix_evidence['reaction_at'].isoformat() if vix_evidence['reaction_at'] else None,
+                  vix_zone=_zone_dict(vix_evidence['zone']) if vix_evidence['zone'] else None,
+                  vix_reaction_age_minutes=vix_evidence['age_minutes'])
     # Location direction is independent of trade direction, as in V3's short
     # after an upward break. The exit policy remains an app interpretation.
     current = bars[-1]
     result['entry'] = current.close
-    before_origin = origin.end - timedelta(minutes=60)
-    targets = [z.low for z in all_levels if z.established_at < before_origin and z.low > current.close] if direction == 'long' else [
-        z.high for z in all_levels if z.established_at < before_origin and z.high < current.close]
-    target = (min(targets) if direction == 'long' else max(targets)) if targets else None
     stop = (min(zone.low, origin.low, confirmed.low, current.low) - .01 if direction == 'long' else
             max(zone.high, origin.high, confirmed.high, current.high) + .01)
     stop = round(stop, 2)
-    target = round(target, 2) if target is not None else None
+    target, target_zone, reward_risk = _target(all_levels, zone, origin, direction, current.close, stop, policy)
     geometry = target is not None and (stop < current.close < target if direction == 'long' else target < current.close < stop)
     _checked(result, 'Stop and target', geometry,
-             'Execution interpretation: stop beyond event/zone; target nearest pre-existing 4-hour or previous-day level')
-    result.update(stop=stop, target=target)
+             (f'Execution interpretation: stop beyond event/zone; target {target_zone.source} at {reward_risk:.2f}R, '
+              f'the nearest opposing pre-existing level at least {policy.min_reward_risk:g}R away') if geometry else
+             (f'Execution interpretation: no opposing pre-existing 4-hour or previous-day level offers at least '
+              f'{policy.min_reward_risk:g}R against the {abs(current.close - stop):.2f} stop distance; '
+              f'the event area itself is never the target'))
+    result.update(stop=stop, target=target, reward_risk=reward_risk,
+                  target_source=target_zone.source if target_zone else None,
+                  target_zone=_zone_dict(target_zone) if target_zone else None)
     if all(c['passed'] for c in result['checks']):
         result.update(state='SETUP_READY', execution_blocker='Owner permission and current broker checks still required')
     return _finish(result)
+
+
+def _target(levels, event_zone, origin, direction, entry, stop, policy):
+    """Nearest opposing premarked level offering the declared minimum reward-to-risk.
+
+    Video: take profit at the next pivotal area (qualitative). App
+    interpretation (v4): candidates are 4-hour interaction areas or
+    previous-day levels established before the origin bar began, excluding the
+    event's own area (a swept level cannot be its own target), beyond the entry
+    in the trade direction, whose distance is at least ``policy.min_reward_risk``
+    times the stop distance. Nearer levels below the multiple are skipped for
+    the next one. Returns (target, zone, reward_risk); all None when absent.
+    """
+    before_origin = origin.end - timedelta(minutes=60)
+    risk = entry - stop if direction == 'long' else stop - entry
+    if risk <= 0:
+        return None, None, None
+    candidates = []
+    for level in levels:
+        if level == event_zone or level.established_at >= before_origin:
+            continue
+        price = round(level.low if direction == 'long' else level.high, 2)
+        reward = price - entry if direction == 'long' else entry - price
+        if reward > 0 and reward / risk >= policy.min_reward_risk:
+            candidates.append((reward, level.established_at, price, level))
+    if not candidates:
+        return None, None, None
+    reward, _, price, level = min(candidates, key=lambda c: c[:2])
+    return price, level, float(reward / risk)
 
 
 def _rank(result):
@@ -464,8 +614,10 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     """Independently evaluate the two source location methods; never authorize orders.
 
     Five-minute leaders, fixed interaction areas, and bounded event/reaction
-    persistence are declared v2 interpretations. QQQ completed-hour sampling
-    and unchanged actual-index fifteen-minute VIX confirmation remain explicit.
+    persistence are declared v2 interpretations. v4 adds the minimum
+    reward-to-risk target rule, wider persistent actual-index VIX areas and
+    neutral (not vetoing) conflicting leaders; QQQ completed-hour sampling and
+    fifteen-minute VIX candles remain explicit app choices.
     """
     methods = [('four_hour_retest', '4-hour areas / hourly break and retest'),
                ('prior_day_sweep', 'Previous-day boundary sweep')]
@@ -513,7 +665,10 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     result.update(strategy_id=selected['id'], strategies=rows, levels=[_zone_dict(z) for z in all_levels],
                   leader_rule={'minimum_agree': policy.minimum_leaders,
                                'maximum_opposing': policy.maximum_opposition,
-                               'persistence_minutes': LEADER_MINUTES * policy.persistence_bars})
+                               'persistence_minutes': LEADER_MINUTES * policy.persistence_bars},
+                  vix_rule={'zone_tolerance': policy.vix_zone_tolerance,
+                            'persistence_minutes': VIX_MINUTES * policy.vix_persistence_bars},
+                  exit_rule={'min_reward_risk': policy.min_reward_risk})
     # Preserve every qualified opportunity for admission. A previously handled
     # event must not hide an unhandled area or the other independently valid
     # method. Only the executor knows durable consumption; analysis stays pure.

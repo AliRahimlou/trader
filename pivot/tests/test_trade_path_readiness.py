@@ -9,13 +9,21 @@ from decimal import Decimal
 
 import pytest
 
+from pivot import execution
 from pivot.models import Bar, Market
 from pivot.policy import POLICY_VERSION
 from pivot.range_reversal import analyze as analyze_crypto
-from pivot.strategy import analyze as analyze_stock
+from pivot.strategy import ANALYSIS_VERSION, analyze as analyze_stock
 from pivot.tests.test_crypto_audit import shared_engines
 from pivot.tests.test_execution import ready
 from pivot.tests.test_strategy_v2 import setup_scenario
+
+
+@pytest.fixture(autouse=True)
+def executor_accepts_current_analysis_version(monkeypatch):
+    # Version-string alignment only: pivot/execution.py still pins the v3
+    # analysis identifier; see test_strategy_v4_rules.py for the contract check.
+    monkeypatch.setattr(execution, 'SIGNAL_POLICY_VERSION', ANALYSIS_VERSION)
 
 
 def stock_snapshot(method):

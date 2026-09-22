@@ -22,6 +22,11 @@ from research.data import load as load_legacy
 from research.offline import disconnected
 
 SYMBOLS = ('QQQ', *MAG7)
+# Production interpretations the replay can freeze; v3 and later confirm
+# leaders from genuine five-minute candles only.
+SUPPORTED_ANALYSIS_VERSIONS = ('nasdaq-video-interpretation-v2', 'nasdaq-video-interpretation-v3',
+                               'nasdaq-video-interpretation-v4')
+FIVE_MINUTE_LEADER_VERSIONS = SUPPORTED_ANALYSIS_VERSIONS[1:]
 METHODS = ('four_hour_retest', 'prior_day_sweep')
 ENGINE_FILES = ('models.py', 'strategy.py', 'history_health.py', 'feeds.py', 'data_health.py')
 
@@ -152,7 +157,7 @@ def freeze_engine(commit, repo=None):
         setattr(package, name, module)
         exec(compile(raw, module.__file__, 'exec'), module.__dict__)
         modules[name], hashes['pivot/' + filename] = module, sha256(raw).hexdigest()
-    if modules['strategy'].ANALYSIS_VERSION not in ('nasdaq-video-interpretation-v2', 'nasdaq-video-interpretation-v3'):
+    if modules['strategy'].ANALYSIS_VERSION not in SUPPORTED_ANALYSIS_VERSIONS:
         raise ValueError('The frozen commit must contain a supported production strategy')
     return SimpleNamespace(**modules, identity={'commit': commit, 'files_sha256': hashes,
                            'analysis_version': modules['strategy'].ANALYSIS_VERSION,
@@ -178,7 +183,7 @@ def at_time(inputs, at, engine):
         frames = {15: bars, 60: engine.feeds.resample(bars, 60, sessions),
                   240: engine.feeds.resample(bars, 240, sessions), 1440: engine.feeds.daily(bars, sessions)}
         if symbol in MAG7:
-            if engine.strategy.ANALYSIS_VERSION == 'nasdaq-video-interpretation-v3':
+            if engine.strategy.ANALYSIS_VERSION in FIVE_MINUTE_LEADER_VERSIONS:
                 frames = {}
             frames[5] = [b for b in inputs.stocks5[symbol]
                          if b.end <= at and b.end - timedelta(minutes=5) >= leader_start]
@@ -195,7 +200,7 @@ def checkpoint(inputs, at, engine):
     markets, vix, sessions, leader_sessions, vix_sessions = at_time(inputs, at, engine)
     health = engine.data_health.stock_health(markets, sessions, at)
     incomplete = []
-    leader_frames = ((5,) if engine.strategy.ANALYSIS_VERSION == 'nasdaq-video-interpretation-v3'
+    leader_frames = ((5,) if engine.strategy.ANALYSIS_VERSION in FIVE_MINUTE_LEADER_VERSIONS
                      else (5, 15, 240))
     for symbol, market in markets.items():
         for minutes in ((15, 60, 240, 1440) if symbol == 'QQQ' else leader_frames):

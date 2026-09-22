@@ -4,19 +4,19 @@ Only market evidence and explicit health fields are admitted. Provider errors,
 account objects, credentials, quotes and raw responses are never copied.
 """
 from copy import deepcopy
-from datetime import timedelta
 from hashlib import sha256
 import json
 from .models import MAG7, timestamp
 from .market_context import market_context
-from .strategy import closed, leader_diagnostics, reaction, vix_candles_fresh, zones
+from .strategy import closed, leader_diagnostics, vix_diagnostics
 
 VERSION = 'decision-trace-v3'
 SOURCES = {'alpaca_iex', 'alpaca_sip', 'insightsentry', 'massive_indices'}
 SETUP_KEYS = ('state', 'strategy_id', 'direction', 'entry', 'stop', 'target', 'event', 'event_at',
               'event_id', 'event_origin_at', 'event_expires_at', 'latest_evidence_at', 'policy_version',
               'leader_observation_at', 'leader_observations_synchronized', 'leader_evidence_valid_until',
-              'leader_observation_valid_until', 'leader_rule')
+              'leader_observation_valid_until', 'leader_rule', 'reward_risk', 'target_source', 'target_zone',
+              'vix_reaction_at', 'vix_zone', 'vix_reaction_age_minutes', 'vix_rule', 'exit_rule')
 ZONE_KEYS = ('low', 'high', 'established_at', 'touches')
 CHECK_NAMES = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
                'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
@@ -121,18 +121,11 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
         row['input'] = _market(markets.get(symbol), now, (5,))
         row['age_at_observation_minutes'] = ((now - timestamp(row['reaction_at'])).total_seconds() / 60
                                              if row.get('reaction_at') else None)
-    vix_bars = closed(vix, 15, now) if vix else []
-    vix_fresh = vix_candles_fresh(vix, now)
-    vix_zones = zones(vix_bars[:-2], vix_bars[-1].end - timedelta(minutes=15)) if len(vix_bars) >= 3 else []
-    reactions = [{'direction': value, 'zone': _zone(zone)} for zone in vix_zones
-                 if (value := reaction(vix_bars[-2], vix_bars[-1], zone))] if len(vix_bars) >= 3 else []
-    expected = {'long': 'short', 'short': 'long'}.get(setup.get('direction'))
-    vix_reason = ('fresh actual VIX data missing' if not vix_fresh else
-                  'VIX history incomplete' if len(vix_bars) < 3 else
-                  'no eligible zones' if not vix_zones else
-                  'Nasdaq direction not selected; VIX gate not reached' if expected is None else
-                  'expected reaction present' if any(r['direction'] == expected for r in reactions) else
-                  'expected zone reaction absent')
+    # The same persistent-reaction builder the analyzer used; discarded
+    # reactions keep their status so an absent gate is explained, not inferred.
+    vix_evidence = vix_diagnostics(vix, setup.get('direction'), now)
+    reactions = [{'direction': r['direction'], 'at': r['at'].isoformat(), 'age_minutes': r['age'],
+                  'status': r['status'], 'zone': _zone(r['zone'])} for r in vix_evidence['reactions']]
     qqq = markets.get('QQQ')
     # Five-minute checkpoints retain missing/stalled input evidence at the leader timeframe.
     checkpoint = now.replace(minute=now.minute // 5 * 5, second=0, microsecond=0)
@@ -156,8 +149,15 @@ def build_decision_trace(setup, markets, vix, now, *, data_health=None, live_per
              'leaders': leaders,
              'leader_counts': {direction: sum(row.get('vote') == direction for row in leaders.values())
                                for direction in ('long', 'short')},
-             'vix': {'input': _market(vix, now, (15,)), 'fresh': vix_fresh, 'expected_reaction': expected,
-                     'zones': [_zone(z) for z in vix_zones], 'reactions': reactions, 'reason': vix_reason,
+             'vix': {'input': _market(vix, now, (15,)), 'fresh': vix_evidence['fresh'],
+                     'expected_reaction': vix_evidence['expected_reaction'],
+                     'zones': [_zone(z) for z in vix_evidence['zones']], 'reactions': reactions,
+                     'reason': vix_evidence['reason'],
+                     'reaction_at': _time(vix_evidence['reaction_at']),
+                     'zone': _zone(vix_evidence['zone']) if vix_evidence['zone'] else None,
+                     'age_minutes': vix_evidence['age_minutes'],
+                     'persistence_bars': vix_evidence['persistence_bars'],
+                     'zone_tolerance': vix_evidence['zone_tolerance'],
                      'gate_reached': any(c['name'] == 'Actual VIX zone reaction' for c in checks)},
              'data_health': _health(data_health),
              'execution': {'live_money_enabled': live_permission if isinstance(live_permission, bool) else None,
