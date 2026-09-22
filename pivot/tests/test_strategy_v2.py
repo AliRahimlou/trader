@@ -50,8 +50,11 @@ def setup_scenario(direction='long', method='prior_day_sweep'):
         prior = candle(NOW-timedelta(hours=1), high=104, low=96, minutes=60)
         current = (candle(NOW, 99, 101, 88, 100, 60) if direction == 'long' else
                    candle(NOW, 101, 112, 99, 100, 60))
-        market = Market('QQQ', {1440: [candle(NOW-timedelta(days=1), high=110, low=90, minutes=1440)],
-                               60: [prior, current], 240: []}, 'alpaca_iex', True, NOW,
+        # The opposing previous-day level sits 20 points from the 100 entry
+        # against a 12.01 stop distance (1.67R), so the v4 target rule admits it.
+        daily = (candle(NOW-timedelta(days=1), high=120, low=90, minutes=1440) if direction == 'long' else
+                 candle(NOW-timedelta(days=1), high=110, low=80, minutes=1440))
+        market = Market('QQQ', {1440: [daily], 60: [prior, current], 240: []}, 'alpaca_iex', True, NOW,
                         previous_session='2026-09-15')
     elif method == 'four_hour_retest':
         bars = ([candle(NOW-timedelta(hours=2), 92, 93, 91, 92, 60),
@@ -144,12 +147,15 @@ def test_later_close_through_area_invalidates_reaction_even_if_price_returns():
     assert row['reason'] == 'invalidated by subsequent close through zone'
 
 
-def test_leader_evidence_before_event_or_on_prior_session_is_not_carried():
+def test_leader_evidence_before_event_counts_but_prior_session_is_not_carried():
+    # v4: a same-session reaction that began before the Nasdaq origin still
+    # describes current rejection; the origin only marks observational scope.
     market = leader_market(at=NOW-timedelta(minutes=5))
     market.observed_at = NOW
     market.bars[5].append(candle(NOW, 106, 106.05, 105.95, 106))
     row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW)['AAPL']
-    assert row['vote'] is None
+    assert row['vote'] == 'long' and row['reaction_at'] == (NOW-timedelta(minutes=5)).isoformat()
+    assert row['observational_only'] is False
     assert leader_diagnostics({'AAPL': market}, NOW)['AAPL']['observational_only'] is True
     # Move a manufactured midnight boundary without pretending it is RTH data.
     old = datetime(2026, 9, 17, 3, 55, tzinfo=timezone.utc)
@@ -443,7 +449,7 @@ def test_new_candle_refreshes_observation_deadline_without_extending_reaction_ag
     assert all(row['reaction_at'] == base.isoformat() for row in result['leader_evidence'].values())
 
 
-def test_conflicting_active_reactions_within_one_company_are_not_arbitrary_neutral_votes():
+def test_conflicting_active_reactions_within_one_company_are_neutral_not_a_veto():
     market = leader_market()
     market.bars[5] = [b for b in market.bars[5] if b.end < NOW-timedelta(minutes=15)]
     market.bars[5] += [candle(NOW-timedelta(minutes=15), 99, 100, 98, 99),
@@ -453,12 +459,16 @@ def test_conflicting_active_reactions_within_one_company_are_not_arbitrary_neutr
     row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
     assert row['vote'] is None and row['conflicting_reactions']
     assert row['reason'] == 'conflicting active area reactions'
-    # Five apparent long votes cannot hide contradictory evidence in the seventh.
+    # v4: the mixed company is skipped (V2: mixed evidence, no trade from it),
+    # so five agreeing companies still confirm; the conflict stays reported.
     leaders = {symbol: leader_market(symbol) for symbol in MAG7}
     leaders['AAPL'] = market
     leaders['TSLA'] = leader_market('TSLA', None)
     okay, reason = leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))
-    assert not okay and 'conflicting active area reactions' in reason
+    assert okay and 'AAPL: conflicting, neutral' in reason
+    # Four agreeing plus the neutral company is still short of the quorum.
+    leaders['GOOGL'] = leader_market('GOOGL', None)
+    assert not leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))[0]
 
 
 def test_future_five_minute_area_or_price_cannot_change_earlier_vote():
@@ -476,13 +486,14 @@ def test_same_bar_poll_keeps_evidence_age_stable_until_wall_clock_expiry():
     assert leader_diagnostics({'AAPL': market}, market.observed_at) == first
 
 
-def test_vix_confirmation_retains_frozen_v1_safeguards():
-    # This release changes leader/level interpretation, not VIX entitlement,
-    # provider freshness, inverse reaction, or fifteen-minute area semantics.
+def test_vix_area_reaction_and_freshness_primitives_retain_frozen_v1_safeguards():
+    # v4 changes which candles may hold the VIX reaction and the area width,
+    # not VIX entitlement, provider freshness, the inverse-reaction geometry
+    # or the swing-area construction itself (vix_confirmation is versioned).
     import inspect
     from pivot import strategy
     from research import baseline_v1
-    for name in ('zones', 'reaction', 'vix_candles_fresh', 'vix_confirmation'):
+    for name in ('zones', 'reaction', 'vix_candles_fresh'):
         current, frozen = getattr(strategy, name), getattr(baseline_v1, name)
         assert inspect.getsource(current) == inspect.getsource(frozen)
 

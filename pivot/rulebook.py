@@ -26,14 +26,15 @@ GROUPS = {
 UNRESOLVED = [
     'Owner clarified V2 and V3 are primary; V1 is supplementary only.',
     'Exact zone, sweep/retest and leader rejection thresholds are absent.',
-    'Stop placement, position risk, invalidation, and exits for the Nasdaq sequence are absent.',
+    'Stop placement, position risk, invalidation, and exits for the Nasdaq sequence are absent; the 1R minimum target multiple and the 0.1% minimum stop distance are app choices.',
     'V2/V3 do not require the first clip’s tape, 5-minute shift or VWAP target.',
-    'QQQ and the documented execution policy are app choices; they are not rules specified by the videos.'
+    'QQQ and the documented execution policy are app choices; they are not rules specified by the videos.',
+    'VIX area width, how many recent 15-minute candles may hold the reaction, and treating a leader with mixed reactions as neutral rather than blocking are app interpretations of the qualitative clips.'
 ]
 
 
 def rulebook():
-    return {'version':'video-evidence-2026-09-17-v3', 'architecture_status':'two_independent_nasdaq_methods',
+    return {'version':'video-evidence-2026-09-22-v4', 'architecture_status':'two_independent_nasdaq_methods',
             'groups':{k:v for k,v in GROUPS.items() if k=='nasdaq_sequence'}, 'rules':[r for r in RULES if r['group']=='nasdaq_sequence'], 'unresolved':UNRESOLVED[1:], 'supplementary_source':'V1 is background only; its tape, structure-shift and VWAP rules are not execution requirements',
             'can_enter':False, 'reason':'Source evidence is informational; the executor checks permission, fresh signals and broker state',
             'execution_choices':'See the versioned policy shown when enabling live money'}

@@ -57,6 +57,31 @@ The saved dollar amount is **purchase notional**, not maximum loss. Planned stop
 
 The primary recordings do not specify these exact stops, target geometry, close-of-session policy or order types. The [September 26 discipline clip](https://www.youtube.com/watch?v=W9ELjAuRur4&t=20s) supports a preplanned loss and next pivotal range qualitatively. It does not certify this exact algorithm.
 
+## Version 4.4 interpretation
+
+Specification date: September 22, 2026. The definitions above remain the v3/4.3 record. Version 4.4.0 ([release note](../production-v4.4.0.md)) replaced the numerical interpretations below after the September 21 replay found that the 4.3 values admitted almost nothing (median target 0.52 R; VIX gate true on 28% of bars at random; one conflicting leader vetoing seven). Each is an app choice behind a new policy version and requires owner re-review; none is a formula the recordings state. The numbers are the committed constants at the tagged revision.
+
+| Component | Version 4.4 interpretation | Replaces |
+| --- | --- | --- |
+| Target | Nearest opposing pre-existing four-hour or previous-day area beyond the reference price, **excluding the event's own area**; establishment before the origin bar still required. | Nearest opposing band including the swept/broken level itself. |
+| Minimum reward-to-risk and stop distance | The nearest qualifying level must satisfy (target − entry) / (entry − stop) ≥ **1.0** (reversed for a short); nearer levels below the multiple are skipped for the next one. The stop distance must be at least **0.1% of the entry price**. Stop formula unchanged. Nothing is resized to reach the ratio. | No minimum; median 0.52 R over 223 replayed plans; three-cent stops admitted. |
+| VIX areas | Repeated swing extremes from completed fifteen-minute actual-VIX candles, excluding the two latest bars, with tolerance **1%** of the VIX level (2% band). | 0.1% fixed band (≈0.015 points at VIX 15; median bar range 0.656%). |
+| VIX reaction | The reaction candle may be either of the **last two** completed candles of the current session (contiguous fifteen-minute candles); no later close may cross back through the area against it, and the latest close must still sit beyond the area boundary. Direction opposite the QQQ trade, as before. Fresh actual-index quote before entry unchanged. | Single latest candle, no persistence, no invalidation. |
+| Conflicting leader | Simultaneous opposing active areas make that company **neutral** (neither agreeing nor opposing). | Conflicting company vetoed the whole vote. |
+| Reaction origin | A reaction may originate **before** the Nasdaq event's origin in the same session if it is still valid at evaluation. | Pre-origin reactions discarded. |
+| Follow-through | Later closes must stay **beyond the area edge** (above the area high for a long vote, below the area low for a short vote); a close back through the area invalidates. | Every later close had to be at least as far as the originating close. |
+| Participation | Unchanged: at least five agreeing, at most one opposing, all seven latest observations synchronized, age under 15 minutes, no missing intervening bar. | — |
+| Session allowance | Two entry attempts **per strategy** per New York session, claimed durably before submission; protocol identifier `ny-session-two-v1` unchanged. | Two attempts shared by both engines. |
+| Rejection response | Strategy-scoped pause with the reason retained; optional `PIVOT_ALERT_WEBHOOK_URL` alert; global Live untouched. | Global Live switched off silently. |
+| Entry cutoff | No new Socrates entries in the final 30 minutes of the regular session; closing window five minutes before the close unchanged. | Ten minutes. |
+| Clock skew | Session-open and quote-age comparisons tolerate 5 seconds of host/broker skew. Submission budgets unchanged. | Exact comparison. |
+| Crypto cost gate | Net reward after 0.25%-per-side fees and the execution allowance ≥ **1.0** × net risk; the skip reason exposes fees, gross/net reward, net risk and ratio. Stop and 2 R gross target unchanged. | Positive net target only (admitted ≈ 0 net reward). |
+| Crypto opening range | Valid with at least **44** of 48 five-minute bars present between 00:00 and 04:00 ET; range from present bars. A missing later slot has no close and cannot start or confirm an excursion; a slot missing inside an excursion retires it. The latest expected slot must be present for a confirmation to be current. | Any missing bar voided the day. |
+| VIX retries | Retries every 30 seconds within the period, at most six attempts per period, stopping when the projected monthly need would exceed the allowance; late publications do not count as recoveries; up to four successful quote refreshes per period. | One attempt plus one recovery per period (up to 14-minute waits); one quote per period. |
+| Versions | Socrates policy **`nasdaq-qqq-execution-v6-reward-risk-vix-persistence`** (analysis `nasdaq-video-interpretation-v4`); crypto rule **`range-reversal-v2`**; crypto policy **`range-spot-execution-v2`**. Event identities carry the rule version. | `nasdaq-qqq-execution-v5-five-leader-majority`, `range-reversal-v1`, `range-spot-execution-v1`. |
+
+Deferred: an inverse-ETF proxy for Socrates shorts (the account cannot short and $15 cannot form a whole QQQ share) and the afternoon four-hour QQQ bucket (a data-pipeline change kept out of this release). The research candidates F1 and X1 below are unaffected and remain isolated from production.
+
 ## F1: closed five-minute location candidate
 
 **Implemented only in the isolated research module; authentic native input evidence is still missing.** The algorithm is `research.five_minute_candidates.fast_location_candidates`. It cannot authorize production orders. No fifteen-minute OHLC is converted into five-minute candles.

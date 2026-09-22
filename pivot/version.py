@@ -1,3 +1,3 @@
 """Human-readable release number; the deployed Git revision identifies the exact build."""
 
-APP_VERSION = '4.3.2'
+APP_VERSION = '4.4.0'

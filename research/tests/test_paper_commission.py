@@ -13,6 +13,7 @@ from pivot.paper_broker import PAPER_HOST, PaperAlpacaBroker
 from pivot.store import Store
 from pivot.tests.test_execution import FakeBroker, enable, ready
 from research.paper_commission import commission, paper_credentials, paper_store, synthetic_snapshot
+from pivot.strategy import ANALYSIS_VERSION
 
 
 class Response:
@@ -185,7 +186,7 @@ def test_paper_mode_requires_its_distinct_durable_contract(paper, change):
     if change == 'missing_purpose':
         snapshot['setup'].pop('commissioning_purpose')
     elif change == 'live_policy':
-        snapshot['setup']['policy_version'] = 'nasdaq-video-interpretation-v3'
+        snapshot['setup']['policy_version'] = ANALYSIS_VERSION  # The live analysis contract must never drive paper commissioning.
     else:
         snapshot['setup']['event_id'] = snapshot['setup']['event_id'].replace('paper_ev1_', 'ev2_')
     executor.tick(snapshot)

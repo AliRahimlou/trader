@@ -199,3 +199,14 @@ def test_all_family_settings_wait_during_installation_but_master_off_works(tmp_p
             result = client.put('/api/live', json={'enabled':False, 'policy_version':POLICY_VERSION},
                 headers={**HEADERS, 'x-pivot-intent':'live-control'})
             assert result.status_code == 200 and result.json()['live_enabled'] is False
+
+
+def test_socrates_card_reports_review_required_for_a_permission_saved_under_an_older_policy(tmp_path):
+    service, _, _ = app_service(tmp_path)
+    assert service.portfolio_snapshot()['socrates']['review_required'] is False
+    service.store.set_control(True, 'nasdaq-qqq-execution-v5-five-leader-majority', 'fake-account-only')
+    snapshot = service.snapshot()
+    assert snapshot['live_enabled'] is False and snapshot['portfolio']['global_live_enabled'] is False
+    assert snapshot['portfolio']['socrates']['review_required'] is True
+    service.set_live({'enabled':True, 'policy_version':POLICY_VERSION})
+    assert service.portfolio_snapshot()['socrates']['review_required'] is False

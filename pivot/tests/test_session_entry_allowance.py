@@ -1,4 +1,4 @@
-"""Shared two-entry restriction, using SQLite and fake brokers only."""
+"""Per-family two-entry restriction, using SQLite and fake brokers only."""
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
 import json
@@ -37,18 +37,47 @@ def crypto_claim(crypto, identity, symbol='BTC/USD', at=NOW):
     return trade
 
 
-def test_shared_cap_survives_finishes_restarts_and_different_symbols(tmp_path):
+def test_per_family_cap_survives_finishes_restarts_and_different_symbols(tmp_path):
     main = Store(tmp_path / 'app.db')
     crypto = CryptoStore(main.path)
     stock_claim(main, 's1')
     crypto_claim(crypto, 'c1')
     restarted = CryptoStore(main.path)
-    third = intent('c2', 'ETH/USD')
+    # A Socrates attempt does not consume the crypto engine's allowance.
+    crypto_claim(restarted, 'c2', 'ETH/USD')
+    third = intent('c3', 'SOL/USD')
     assert restarted.reserve_trade(third)
-    with pytest.raises(PortfolioBlocked, match='two new entry attempts'):
+    with pytest.raises(PortfolioBlocked, match='4H Range Reversal limit of two new entry attempts'):
         restarted.claim_operation(third, 'entry', attempted_at=NOW)
-    assert restarted.get_trade('c2')['ops']['entry']['state'] == 'prepared'
-    assert Store(main.path).session_entry_allowance(NOW)['used'] == 2
+    assert restarted.get_trade('c3')['ops']['entry']['state'] == 'prepared'
+    # The exhausted crypto family leaves the second Socrates attempt available.
+    stock_claim(Store(main.path), 's2')
+    fourth = intent('s3')
+    assert main.reserve_trade(fourth)
+    with pytest.raises(PortfolioBlocked, match='Socrates limit of two new entry attempts'):
+        main.claim_operation('s3', 'entry', attempted_at=NOW)
+    status = Store(main.path).session_entry_allowance(NOW)
+    assert status['limit'] == 2 and status['used'] == 4 and status['remaining'] == 0
+    assert status['families'] == {'socrates': {'used': 2, 'remaining': 0}, 'range_reversal': {'used': 2, 'remaining': 0}}
+
+
+def test_reporting_shows_each_family_separately(tmp_path):
+    main = Store(tmp_path / 'app.db')
+    crypto = CryptoStore(main.path)
+    empty = main.session_entry_allowance(NOW)
+    assert empty['families'] == {'socrates': {'used': 0, 'remaining': 2}, 'range_reversal': {'used': 0, 'remaining': 2}}
+    assert empty['used'] == 0 and empty['remaining'] == 4 and empty['scope'] == 'per_family'
+    stock_claim(main, 's1')
+    crypto_claim(crypto, 'c1')
+    crypto_claim(crypto, 'c2', 'ETH/USD')
+    status = main.session_entry_allowance(NOW)
+    assert status['families'] == {'socrates': {'used': 1, 'remaining': 1}, 'range_reversal': {'used': 2, 'remaining': 0}}
+    assert status['used'] == 3 and status['remaining'] == 1
+    main.assert_session_entry_available(NOW, family='socrates')
+    with pytest.raises(PortfolioBlocked, match='4H Range Reversal limit'):
+        main.assert_session_entry_available(NOW, family='range_reversal')
+    with pytest.raises(PortfolioBlocked, match='unknown strategy family'):
+        main.assert_session_entry_available(NOW, family='other')
 
 
 def test_pending_unknown_rejected_and_aborted_claims_are_never_refunded(tmp_path):
@@ -59,7 +88,7 @@ def test_pending_unknown_rejected_and_aborted_claims_are_never_refunded(tmp_path
     second = stock_claim(main, 'no-network-after-claim')
     second['ops']['entry']['state'] = 'aborted_before_submit'
     main.save_trade(second, finished=True)
-    assert main.session_entry_allowance(NOW)['remaining'] == 0
+    assert main.session_entry_allowance(NOW)['families']['socrates']['remaining'] == 0
     third = intent('third')
     assert main.reserve_trade(third)
     with pytest.raises(PortfolioBlocked):
@@ -99,7 +128,7 @@ def test_backfills_legacy_stock_and_crypto_without_resetting_controls_or_history
     assert main.deployment_permission() == before
 
 
-def test_two_legacy_attempts_already_exhaust_limit(tmp_path):
+def test_two_legacy_attempts_already_exhaust_their_own_family_only(tmp_path):
     main = Store(tmp_path / 'app.db')
     crypto = CryptoStore(main.path)
     for identity, symbol in [('legacy-btc', 'BTC/USD'), ('legacy-eth', 'ETH/USD')]:
@@ -107,11 +136,15 @@ def test_two_legacy_attempts_already_exhaust_limit(tmp_path):
         assert crypto.reserve_trade(trade)
         trade['ops']['entry']['state'] = 'attempted'
         crypto.save_trade(trade, finished=True)
+    blocked = intent('fresh-crypto', 'SOL/USD')
+    assert crypto.reserve_trade(blocked)
+    with pytest.raises(PortfolioBlocked, match='two new entry attempts'):
+        crypto.claim_operation(blocked, 'entry', attempted_at=NOW)
+    assert main.session_entry_allowance(NOW)['families']['range_reversal'] == {'used': 2, 'remaining': 0}
     fresh = intent('fresh')
     assert main.reserve_trade(fresh)
-    with pytest.raises(PortfolioBlocked, match='two new entry attempts'):
-        main.claim_operation('fresh', 'entry', attempted_at=NOW)
-    assert main.session_entry_allowance(NOW)['used'] == 2
+    assert main.claim_operation('fresh', 'entry', attempted_at=NOW)
+    assert main.session_entry_allowance(NOW)['used'] == 3
 
 
 @pytest.mark.parametrize('broken', ['no_time', 'naive_time', 'unknown_state', 'contradictory_prepared', 'prepared_with_fill'])
@@ -209,7 +242,7 @@ def _race_claim(path, identity, family):
         return False
 
 
-def test_separate_processes_compete_for_same_two_durable_slots(tmp_path):
+def test_separate_processes_compete_for_each_family_two_durable_slots(tmp_path):
     main = Store(tmp_path / 'app.db')
     crypto = CryptoStore(main.path)
     assert main.reserve_trade(intent('stock'))
@@ -218,8 +251,10 @@ def test_separate_processes_compete_for_same_two_durable_slots(tmp_path):
     with ProcessPoolExecutor(max_workers=4, mp_context=get_context('fork')) as pool:
         futures = [pool.submit(_race_claim, main.path, identity, family) for identity, family in
                    [('stock', 'socrates')] + [(f'crypto{i}', 'range_reversal') for i in range(3)]]
-        assert sum(f.result(timeout=20) for f in futures) == 2
-    assert Store(main.path).session_entry_allowance(NOW)['used'] == 2
+        assert sum(f.result(timeout=20) for f in futures) == 3
+    status = Store(main.path).session_entry_allowance(NOW)
+    assert status['used'] == 3
+    assert status['families'] == {'socrates': {'used': 1, 'remaining': 1}, 'range_reversal': {'used': 2, 'remaining': 0}}
 
 
 def test_stale_stock_save_cannot_reclaim_old_identity_or_cross_day(tmp_path):
@@ -234,14 +269,29 @@ def test_stale_stock_save_cannot_reclaim_old_identity_or_cross_day(tmp_path):
 
 def test_stock_engine_third_entry_never_reaches_fake_broker(tmp_path):
     main = Store(tmp_path / 'app.db')
-    stock_claim(main, 'earlier-stock')
+    stock_claim(main, 'earlier-stock-one')
+    stock_claim(main, 'earlier-stock-two')
     crypto_claim(CryptoStore(main.path), 'earlier-crypto')
     broker = FakeBroker()
     executor = Executor(broker, main, now=lambda: broker.at)
     enable(executor)
     executor.tick(ready())
     assert not broker.sent
-    assert 'two new entry attempts' in executor.message
+    assert 'Socrates limit of two new entry attempts' in executor.message
+
+
+def test_stock_engine_enters_after_two_crypto_attempts(tmp_path):
+    main = Store(tmp_path / 'app.db')
+    crypto = CryptoStore(main.path)
+    crypto_claim(crypto, 'crypto-one')
+    crypto_claim(crypto, 'crypto-two', 'ETH/USD')
+    broker = FakeBroker()
+    executor = Executor(broker, main, now=lambda: broker.at)
+    enable(executor)
+    executor.tick(ready())
+    assert [o['type'] for o in broker.sent] == ['market', 'stop']
+    status = main.session_entry_allowance(broker.at)
+    assert status['families'] == {'socrates': {'used': 1, 'remaining': 1}, 'range_reversal': {'used': 2, 'remaining': 0}}
 
 
 def test_fake_unknown_post_retains_allowance_and_is_not_retried(tmp_path):

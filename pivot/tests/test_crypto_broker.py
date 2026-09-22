@@ -117,3 +117,14 @@ def test_bad_cancel_identity_cannot_escape_order_path():
     b, session = broker(Response(204))
     with pytest.raises(ValueError): b.cancel('../account')
     assert not session.calls
+
+
+@pytest.mark.parametrize('body,code', [({'code': 40310000, 'message': 'fixture-secret should never leak'}, 40310000),
+                                       ({'code': 'fixture-secret', 'message': 'fixture-secret'}, None),
+                                       (ValueError('fixture-secret'), None)])
+def test_definitive_post_rejection_retains_status_and_numeric_code_only(body, code):
+    b, _ = broker(Response(422, body))
+    with pytest.raises(BrokerRejected) as exc: b.submit(entry())
+    assert exc.value.status == 422 and exc.value.code == code
+    assert exc.value.detail() == 'HTTP 422' + (f', Alpaca error code {code}' if code is not None else '')
+    assert 'fixture-secret' not in str(exc.value) and 'fixture-secret' not in exc.value.detail()

@@ -21,6 +21,9 @@ def main():
     root = Path(__file__).resolve().parent.parent
     # Only explicit provider keys are consumed. Legacy LIVE_* flags cannot enable orders.
     config = {**dotenv_values(root / '.env'), **os.environ}
+    if config.get('PIVOT_ALERT_WEBHOOK_URL'):
+        # Alerts read the environment at call time; the private .env is the owner's configuration surface.
+        os.environ.setdefault('PIVOT_ALERT_WEBHOOK_URL', config['PIVOT_ALERT_WEBHOOK_URL'])
     hosting = Hosting.from_values(config)
     if args.host == '0.0.0.0' and not hosting.public_origin:
         parser.error('--host 0.0.0.0 requires PUBLIC_ORIGIN and an authenticated reverse proxy')

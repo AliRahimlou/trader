@@ -10,6 +10,7 @@ from pivot.broker import AlpacaBroker, BrokerRejected
 from pivot.execution import Executor, CHECKS
 from pivot.feeds import FeedError, ReadOnlyFeeds
 from pivot.policy import POLICY_VERSION
+from pivot.strategy import ANALYSIS_VERSION
 from pivot.service import Service
 from pivot.store import Store
 
@@ -91,7 +92,7 @@ def identify_event(setup):
 def ready(at=NOW, direction='long'):
     snapshot = dict(analysis_at=at.isoformat(), data_valid_until=(at+timedelta(seconds=90)).isoformat(), feeds={'vix': 'current'}, data_errors=[],
         setup=dict(state='SETUP_READY', checks=[dict(name=n, passed=True) for n in CHECKS],
-                   policy_version='nasdaq-video-interpretation-v3', strategy_id='prior_day_sweep',
+                   policy_version=ANALYSIS_VERSION, strategy_id='prior_day_sweep',
                    event_zone={'low': 100.0, 'high': 100.0, 'source': 'previous-day high',
                                'established_at': (at-timedelta(days=1)).isoformat()},
                    event_origin_at=at.isoformat(), event_at=at.isoformat(),

@@ -25,7 +25,7 @@ def test_inconsistent_stock_stop_is_not_accepted_as_protection(engine, change):
     with pytest.raises(Waiting, match='Broker order'):
         executor._order(trade, 'stop')
     assert store.active_trade()['ops']['stop']['last_seen'] == before
-    assert not store.control()['enabled']
+    assert store.control()['enabled'] and not store.strategy_selection()['socrates']  # Socrates paused; global Live kept.
     assert len(broker.sent) == 2 and not broker.canceled
 
 
@@ -45,7 +45,7 @@ def test_notional_entry_accepts_broker_quantity_without_invented_share_target(en
     executor.tick(ready())
     broker.book[broker.sent[0]['client_order_id']]['qty'] = reported_qty
     result = executor._order(store.active_trade(), 'entry')
-    assert result['filled_qty'] == '0.25' and store.control()['enabled']
+    assert result['filled_qty'] == '0.25' and store.strategy_selection()['socrates']
 
 
 def test_valid_broker_evidence_resumes_supervision_without_rearming_or_duplicate_post(engine):
@@ -56,13 +56,13 @@ def test_valid_broker_evidence_resumes_supervision_without_rearming_or_duplicate
     original = deepcopy(broker.book[cid])
     broker.book[cid]['stop_price'] = '1'
     executor.tick({})
-    assert not store.control()['enabled'] and len(broker.sent) == 2
+    assert not store.strategy_selection()['socrates'] and len(broker.sent) == 2
     broker.book[cid] = original
     broker.at += timedelta(seconds=1)
     restarted = Executor(broker, Store(store.path), now=lambda: broker.at)
     restarted.tick({})
     assert store.active_trade()['stage'] == 'open'
-    assert not store.control()['enabled'] and len(broker.sent) == 2
+    assert not store.strategy_selection()['socrates'] and store.control()['enabled'] and len(broker.sent) == 2
     assert store.active_trade()['order_validation']['stop']['resolved_at']
 
 
@@ -78,7 +78,7 @@ def test_buy_stop_allows_documented_conversion_but_retains_stop_and_quantity(eng
     if order_type == 'stop_limit':
         order['limit_price'] = '112.75'  # Alpaca's documented 2.5% collar above $50.
     assert executor._order(store.active_trade(), 'stop')['type'] == order_type
-    assert store.control()['enabled']
+    assert store.strategy_selection()['socrates']
 
 
 def test_buy_stop_rejects_changed_stop_even_when_type_conversion_is_legal(engine):
@@ -114,7 +114,7 @@ def test_entry_response_mismatch_cannot_authorize_a_stop_or_second_entry_post(en
     enable(executor)
     executor.tick(ready())
     assert len(broker.sent) == 1 and store.active_trade()['stage'] == 'entering'
-    assert not store.control()['enabled']
+    assert not store.strategy_selection()['socrates'] and store.control()['enabled']
     executor.tick({})  # Broker lookup now returns the genuine DAY order.
     assert len(broker.sent) == 2 and broker.sent[1]['type'] == 'stop'
     assert store.active_trade()['stage'] == 'open'

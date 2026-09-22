@@ -3,6 +3,11 @@
 This pure analyzer never authorizes orders. The day anchor and first-outside-bar
 stop are declared provisional conventions, not recovered creator formulas.
 Only native five-minute data is admitted; missing prices are never invented.
+Since ``range-reversal-v2`` a missing five-minute slot no longer voids the day:
+the opening range is the high/low of the available opening bars (at least
+OPENING_BARS_MINIMUM of the 48 slots) and a missing later slot has no close, so
+it cannot start, confirm or invalidate an excursion. Gap tolerance is an app
+interpretation; the recording assumes an uninterrupted chart.
 """
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -13,10 +18,12 @@ from .models import Market, timestamp
 
 NY = ZoneInfo('America/New_York')
 UTC = timezone.utc
-RULE_VERSION = 'range-reversal-v1'
+RULE_VERSION = 'range-reversal-v2'
 FAMILY_ID = 'range_reversal'
 SOURCES = {'alpaca_crypto', 'alpaca_crypto_us', 'alpaca_iex', 'alpaca_sip'}
 STEP = timedelta(minutes=5)
+OPENING_SLOTS = 48  # Four elapsed hours of five-minute candles.
+OPENING_BARS_MINIMUM = 44  # At most twenty minutes of the four-hour range may be missing; chosen by the Sep 22, 2026 replay.
 MAX_RECEIPT_SECONDS = 90
 PUBLICATION_GRACE_SECONDS = 90
 INTERPRETATION_WARNINGS = (
@@ -27,6 +34,7 @@ INTERPRETATION_WARNINGS = (
     'Daily or weekly trend preference is optional in the narration and is not an entry filter here.',
     'A close beyond the opposite boundary without a close inside resets the pending excursion; this is an explicit interpretation.',
     'Repeated fresh excursions are separate opportunities. Position ownership and shared buying power are managed separately.',
+    f'Missing five-minute candles are tolerated: the range uses the available opening bars (at least {OPENING_BARS_MINIMUM} of {OPENING_SLOTS} slots) and a missing later slot has no close, so it cannot start or confirm an excursion; a slot missing inside an excursion retires that excursion, because the late candle could have changed it. The latest expected slot must still be present. This is an app interpretation.',
 )
 
 
@@ -59,9 +67,10 @@ def analyze(market: Market | None, now, *, provenance=None):
 
     ``provenance`` must explicitly describe native five-minute bars with source,
     symbol, timeframe_minutes=5 and native=True. Market.bars[5] contains aware,
-    end-stamped bars; extra derived frames are ignored. Complete day-to-current
-    coverage is required, with a 90-second publication allowance for only the
-    newest completed candle. ``now`` must be timezone-aware.
+    end-stamped bars; extra derived frames are ignored. The newest expected
+    candle must be present, with a 90-second publication allowance for only that
+    candle; earlier gaps are reported in ``coverage`` and tolerated as described
+    in the module docstring. ``now`` must be timezone-aware.
     """
     now = timestamp(now).astimezone(UTC)
     result = _base(now)
@@ -135,27 +144,38 @@ def analyze(market: Market | None, now, *, provenance=None):
         if latest != expected and not publication_wait:
             result['detail'] = 'The latest completed five-minute candle is missing or stale.'
             return result
-        if (len(bars) != int((latest - start).total_seconds() // 300)
-                or any(at != start + (index + 1) * STEP for index, (_, at) in enumerate(bars))):
-            result['detail'] = 'Five-minute coverage has a gap. Waiting for complete native candles; no prices are filled in.'
-            return result
+        # Earlier gaps are tolerated (app interpretation): timestamps above are
+        # already strictly increasing and on the five-minute grid, so the
+        # available bars stay in order and a missing slot simply has no close.
         if now < range_end or latest < range_end:
             result.update(state='RANGE_FORMING',
-                          detail='Waiting for all 48 native five-minute candles of the first four-hour range to close.')
+                          detail='Waiting for the first four-hour range (48 native five-minute slots) to close.')
             return result
         opening = [bar for bar, at in bars if at <= range_end]
-        if len(opening) != 48:
-            result['detail'] = 'The first four-hour range requires exactly 48 completed native five-minute candles.'
+        if len(opening) < OPENING_BARS_MINIMUM:
+            result['detail'] = (f'The first four-hour range has only {len(opening)} of {OPENING_SLOTS} native five-minute candles; '
+                                f'at least {OPENING_BARS_MINIMUM} are required.')
             return result
         high, low = max(bar.high for bar in opening), min(bar.low for bar in opening)
         result['range'] = {'high': high, 'low': low, 'start_at': _iso(start), 'end_at': _iso(range_end),
-                           'native_candle_count': 48, 'provisional': True}
+                           'native_candle_count': len(opening), 'expected_candle_count': OPENING_SLOTS,
+                           'minimum_candle_count': OPENING_BARS_MINIMUM, 'provisional': True}
         if high <= low:
             result['detail'] = 'The completed four-hour range has no price width.'
             return result
         result.update(state='WATCHING', detail='Watching for a five-minute close outside the range, then a later close strictly inside.')
         pending = None
-        for bar, at in bars[48:]:
+        previous_at = range_end
+        for bar, at in bars[len(opening):]:
+            if pending and at - previous_at != STEP:
+                # A slot is missing inside the excursion. The candle Alpaca may
+                # still publish for it could have closed back inside or through
+                # the far side, so the excursion cannot be confirmed on partial
+                # evidence. App interpretation: it is retired, never guessed.
+                pending.update(status='INVALIDATED', invalidated_at=_iso(at),
+                               detail='A native five-minute candle is missing inside the excursion; it cannot be confirmed on partial evidence.')
+                pending = None
+            previous_at = at
             side = 'above' if bar.close > high else 'below' if bar.close < low else None
             inside = low < bar.close < high
             if pending and side and side != pending['breakout_side']:

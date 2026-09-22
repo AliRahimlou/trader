@@ -8,13 +8,29 @@ from copy import deepcopy
 from time import monotonic
 from zoneinfo import ZoneInfo
 
+from .alerts import ALERT_KINDS, notify
 from .portfolio import PortfolioBlocked
 
 DEFAULTS = {'sizing_mode': 'target', 'target_dollars': '25.00'}
 DECISION_TRACE_RETENTION = 24000  # Row bound; does not imply a guaranteed number of sessions.
 EXECUTION_CHECK_RETENTION = 24000
-SESSION_ENTRY_LIMIT = 2  # Explicit owner-approved restriction; never a tunable uplift.
+# Explicit owner-approved restriction, never a tunable uplift. App interpretation:
+# the limit applies PER strategy family, so a day of Socrates attempts cannot
+# consume the crypto engine's attempts or the reverse. Legacy attempts already
+# recorded under a family keep counting against that family only.
+SESSION_ENTRY_LIMIT = 2
+SESSION_ENTRY_FAMILIES = ('socrates', 'range_reversal')
+FAMILY_LABELS = {'socrates': 'Socrates', 'range_reversal': '4H Range Reversal'}
 SESSION_TIMEZONE = ZoneInfo('America/New_York')
+
+
+def _family_used(rows, family, day):
+    return sum(row['family'] == family and row['session_day'] == day for row in rows)
+
+
+def _limit_reached(family):
+    return PortfolioBlocked(f'The {FAMILY_LABELS.get(family, family)} limit of two new entry attempts for this '
+                           'New York session is reached; the other strategy and existing positions are unaffected')
 
 
 def _allowance_time(value):
@@ -76,7 +92,13 @@ def _entry_allowance_rows(db):
 
 
 def _reserve_session_entry(db, trade, family, at):
-    """Called inside the same write transaction as prepared -> attempted, before POST."""
+    """Called inside the same write transaction as prepared -> attempted, before POST.
+
+    Only the caller's own family is counted; the schema and the atomic claim are
+    unchanged from the shared-limit version, so existing rows remain valid.
+    """
+    if family not in SESSION_ENTRY_FAMILIES:
+        raise PortfolioBlocked('An unknown strategy family cannot claim a session entry')
     at = _allowance_time(at)
     rows = _entry_allowance_rows(db)
     identity = (family, trade['id'])
@@ -85,8 +107,8 @@ def _reserve_session_entry(db, trade, family, at):
     if any((row['family'], row['trade_id']) == identity for row in rows):
         raise PortfolioBlocked('This entry already consumed its durable submission allowance; reconciliation is required')
     days = _allowance_days(at)
-    if any(sum(row['session_day'] == day for row in rows) >= SESSION_ENTRY_LIMIT for day in days):
-        raise PortfolioBlocked('The shared limit of two new entry attempts for this New York session is reached; existing positions remain managed')
+    if any(_family_used(rows, family, day) >= SESSION_ENTRY_LIMIT for day in days):
+        raise _limit_reached(family)
     # Backfill in place, without changing controls, history, trade state or IDs.
     for row in rows:
         db.execute('INSERT OR IGNORE INTO session_entry_allowances VALUES(?,?,?,?,?)',
@@ -136,28 +158,75 @@ class Store:
         return sqlite3.connect(self.path, timeout=5)
 
     def session_entry_allowance(self, now=None):
-        """Strictly read-only status; retained legacy attempts count before migration."""
+        """Strictly read-only status; retained legacy attempts count before migration.
+
+        'limit' is per family. 'families' carries each family's used/remaining;
+        the top-level 'used'/'remaining' are the totals across families, so an
+        exhausted family shows remaining 0 under its own key only.
+        """
         at = _allowance_time(now or datetime.now(timezone.utc))
         day = at.astimezone(SESSION_TIMEZONE).date().isoformat()
         result = {'session_day': day, 'timezone': str(SESSION_TIMEZONE), 'limit': SESSION_ENTRY_LIMIT,
-                  'accounting': 'Durable new-entry attempts across both strategies, including rejected and unknown outcomes; exits do not count.'}
+                  'scope': 'per_family',
+                  'accounting': 'Durable new-entry attempts, counted separately for each strategy, including rejected and unknown outcomes; exits do not count.'}
         try:
             with self.connect() as db:
                 db.execute('BEGIN')
                 rows = _entry_allowance_rows(db)
-            used = sum(row['session_day'] == day for row in rows)
-            return {**result, 'status': 'available', 'used': used, 'remaining': max(0, SESSION_ENTRY_LIMIT - used)}
+            families = {}
+            for family in SESSION_ENTRY_FAMILIES:
+                used = _family_used(rows, family, day)
+                families[family] = {'used': used, 'remaining': max(0, SESSION_ENTRY_LIMIT - used)}
+            return {**result, 'status': 'available', 'families': families,
+                    'used': sum(f['used'] for f in families.values()),
+                    'remaining': sum(f['remaining'] for f in families.values())}
         except PortfolioBlocked as exc:
-            return {**result, 'status': 'blocked', 'used': None, 'remaining': 0, 'reason': str(exc)}
+            return {**result, 'status': 'blocked', 'used': None, 'remaining': 0, 'families': None, 'reason': str(exc)}
 
-    def assert_session_entry_available(self, now):
-        """Early planning gate; the same check is repeated atomically at POST claim."""
+    def assert_session_entry_available(self, now, family):
+        """Early planning gate; the same check is repeated atomically at POST claim.
+
+        Both engines name their family. The claim inside claim_operation is
+        authoritative for both, whatever this gate said.
+        """
+        if family not in SESSION_ENTRY_FAMILIES:
+            raise PortfolioBlocked('An unknown strategy family cannot plan a session entry')
         with self.connect() as db:
             db.execute('BEGIN')
             rows = _entry_allowance_rows(db)
-        if any(sum(row['session_day'] == day for row in rows) >= SESSION_ENTRY_LIMIT
+        if any(_family_used(rows, family, day) >= SESSION_ENTRY_LIMIT
                for day in _allowance_days(_allowance_time(now))):
-            raise PortfolioBlocked('The shared limit of two new entry attempts for this New York session is reached; existing positions remain managed')
+            raise _limit_reached(family)
+
+    def pause_family(self, family, reason):
+        """Stop one strategy's new entries; the owner's global Live switch is untouched.
+
+        App interpretation: a rejected, replaced or unreconciled QQQ order is a
+        Socrates problem, so only Socrates is deselected. This is the same durable
+        write as the owner's strategy toggle (strategy_selection plus an
+        authorization generation bump, so any prepared plan expires), in one
+        transaction with a 'strategy_paused' journal entry. Crypto keeps trading,
+        and position management never consults the selection. An already paused
+        family is left alone: no repeated events or generation churn. The owner
+        re-enables Socrates from the strategy controls after reviewing Alpaca.
+        """
+        if family != 'socrates':
+            raise ValueError('Only the Socrates family is paused through the main ledger')
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('A pause needs a reason')
+        at = datetime.now(timezone.utc).isoformat()
+        body = {'family': family, 'reason': reason, 'at': at,
+                'note': 'Global Live and the crypto strategy are unchanged; existing positions continue their exits.'}
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            selection = json.loads(db.execute('SELECT body FROM strategy_selection WHERE id=1').fetchone()[0])
+            if selection.get('socrates') is False:
+                return None
+            db.execute('UPDATE strategy_selection SET body=? WHERE id=1', (json.dumps({'socrates': False}),))
+            db.execute('UPDATE authorization_generation SET generation=generation+1 WHERE id=1')
+            db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)', (at, 'strategy_paused', json.dumps(body)))
+        notify('strategy_paused', body)
+        return body
 
     def settings(self):
         with self.connect() as db:
@@ -397,6 +466,8 @@ class Store:
         with self.connect() as db:
             db.execute('INSERT INTO events(at,kind,body) VALUES(?,?,?)',
                        (datetime.now(timezone.utc).isoformat(), kind, json.dumps(body)))
+        if kind in ALERT_KINDS:
+            notify(kind, body)  # After commit; best-effort and never raises.
 
     def events(self):
         with self.connect() as db:

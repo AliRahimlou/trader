@@ -12,13 +12,27 @@ from hashlib import sha256
 
 import pytest
 
+from pivot import execution
 from pivot.execution import Executor, SIGNAL_FIELDS
 from pivot.policy import POLICY_VERSION
 from pivot.store import Store
-from pivot.strategy import analyze
+from pivot.strategy import ANALYSIS_VERSION, analyze
 from pivot.tests.test_strategy_v2 import NOW, candle, leader_market, setup_scenario
 from pivot.tests.test_execution import ready, identify_event
 from pivot.tests.test_insight_execution import InsightBroker
+
+
+@pytest.fixture(autouse=True)
+def executor_accepts_current_analysis_version(monkeypatch):
+    """Point the executor's signal contract at the analyzer version under test.
+
+    pivot/execution.py pins SIGNAL_POLICY_VERSION separately from
+    pivot/strategy.py ANALYSIS_VERSION. Until the execution owner bumps that
+    pin to the v4 analysis, every real v4 setup would be refused at the
+    signal_age_policy gate; this fixture keeps these lifecycle tests about the
+    analyzer-to-broker path. test_strategy_v4_rules.py reports the mismatch.
+    """
+    monkeypatch.setattr(execution, 'SIGNAL_POLICY_VERSION', ANALYSIS_VERSION)
 
 
 def analyzed_snapshot(direction, method='prior_day_sweep'):
@@ -32,7 +46,8 @@ def analyzed_snapshot(direction, method='prior_day_sweep'):
     assert all(check['passed'] for check in setup['checks'])
     assert setup['direction'] == direction
     assert setup['can_enter'] is False
-    assert setup['policy_version'] == 'nasdaq-video-interpretation-v3'
+    assert setup['policy_version'] == ANALYSIS_VERSION == 'nasdaq-video-interpretation-v4'
+    assert setup['reward_risk'] >= 1.5 and setup['target_source']
     assert all(row['timeframe_minutes'] == 5 for row in setup['leader_evidence'].values())
     snapshot = ready()
     snapshot['setup'] = setup

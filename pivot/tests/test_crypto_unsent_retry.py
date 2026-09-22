@@ -27,7 +27,9 @@ def plausible_signal(at):
     """Invented complete bars, never presented as a historically available setup."""
     start = AT.replace(hour=4, minute=0, second=0)
     bars = [Bar(start + timedelta(minutes=5*(i+1)), 5, 87100, 87700, 86500, 87100) for i in range(48)]
-    bars += [Bar(start + timedelta(minutes=245), 5, 86520, 86530, 86300, 86450),
+    # The outside candle low (the stop) sits 1.3% below the confirmation close so the
+    # net-expectancy cost gate admits the plan; narrower stops are skipped by policy.
+    bars += [Bar(start + timedelta(minutes=245), 5, 86520, 86530, 85500, 86450),
              Bar(start + timedelta(minutes=250), 5, 86450, 86660, 86400, 86630)]
     market = Market('BTC/USD', {5: bars}, 'alpaca_crypto_us', True, at)
     return analyze(market, at, provenance={'source': market.source, 'symbol': market.symbol,
@@ -105,7 +107,7 @@ def delay_broker_reads(broker, seconds):
 def test_tiny_ask_move_before_any_post_can_replan_original_still_fresh_signal(tmp_path):
     executor, broker, crypto, main = runtime(tmp_path)
     signal = plausible_signal(broker.at)
-    assert signal['signal_ready'] and signal['current_event']['target'] == 87290
+    assert signal['signal_ready'] and signal['current_event']['target'] == 88890
     executor.tick({'BTC/USD': signal})
     assert not broker.sent
     abandoned = crypto.history()[0]
@@ -253,16 +255,29 @@ def test_store_cannot_rearm_same_id_with_a_later_confirmation(tmp_path):
     assert crypto.history()[0] == old
 
 
-def test_retry_still_obeys_exhausted_shared_two_entry_allowance(tmp_path):
+def test_retry_still_obeys_exhausted_family_two_entry_allowance(tmp_path):
     executor, broker, crypto, main = runtime(tmp_path)
     executor.tick({'BTC/USD': plausible_signal(broker.at)})
     with main.connect() as db:
         for identity in ('already-one', 'already-two'):
             db.execute('INSERT INTO session_entry_allowances VALUES(?,?,?,?,?)',
-                       ('socrates', identity, '2026-09-22', broker.at.isoformat(), 'atomic_entry_claim'))
+                       ('range_reversal', identity, '2026-09-22', broker.at.isoformat(), 'atomic_entry_claim'))
     executor.tick({'BTC/USD': plausible_signal(broker.at)})
-    assert not broker.sent and main.session_entry_allowance(broker.at)['used'] == 2
+    assert not broker.sent and main.session_entry_allowance(broker.at)['families']['range_reversal']['used'] == 2
     assert 'two new entry attempts' in executor.message
+
+
+def test_socrates_attempts_do_not_consume_the_crypto_allowance(tmp_path):
+    executor, broker, crypto, main = runtime(tmp_path)
+    with main.connect() as db:
+        for identity in ('stock-one', 'stock-two'):
+            db.execute('INSERT INTO session_entry_allowances VALUES(?,?,?,?,?)',
+                       ('socrates', identity, '2026-09-22', broker.at.isoformat(), 'atomic_entry_claim'))
+    for _ in range(3):
+        executor.tick({'BTC/USD': plausible_signal(broker.at)})
+    assert broker.sent and broker.sent[0]['side'] == 'buy', executor.message
+    allowance = main.session_entry_allowance(broker.at)
+    assert allowance['families'] == {'socrates': {'used': 2, 'remaining': 0}, 'range_reversal': {'used': 1, 'remaining': 1}}
 
 
 def test_concurrent_replans_reserve_one_version_without_overwriting_each_other(tmp_path):
