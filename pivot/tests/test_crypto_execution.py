@@ -6,7 +6,8 @@ from hashlib import sha256
 import pytest
 
 from pivot.broker import BrokerRejected
-from pivot.crypto_execution import CryptoRangeExecutor, POLICY_VERSION, IOC_SETTLE_GRACE_SECONDS, checked_signal, CryptoWaiting, rounded
+from pivot.crypto_execution import (CryptoRangeExecutor, POLICY_VERSION, IOC_SETTLE_GRACE_SECONDS, EXIT_ALLOWANCE, FEE,
+                                    MIN_NET_REWARD_RISK, checked_signal, CryptoWaiting, minimum_stop_distance, net_expectancy, rounded)
 from pivot.crypto_store import CryptoStore
 from pivot.feeds import FeedError
 from pivot.models import Bar, Market
@@ -296,12 +297,19 @@ def test_short_setup_is_reported_and_never_replaced_with_buy(engine):
     lambda a: a.update(source='yahoo'),
     lambda a: a.update(signal_ready=False),
     lambda a: a.update(rule_version='old'),
+    lambda a: a.update(rule_version='range-reversal-v1'),
+    lambda a: a['current_event'].update(rule_version='range-reversal-v1'),
     lambda a: a['current_event'].update(event_id='forged'),
     lambda a: a['current_event'].update(current=False),
     lambda a: a['current_event'].update(stop_basis='other'),
     lambda a: a['current_event'].update(target=200),
     lambda a: a['current_event'].update(stop=96),
-    lambda a: a['range'].update(native_candle_count=47),
+    lambda a: a['range'].update(native_candle_count=39),
+    lambda a: a['range'].update(native_candle_count=49),
+    lambda a: a['range'].update(native_candle_count='47'),
+    lambda a: a['range'].update(native_candle_count=True),
+    lambda a: a['range'].update(expected_candle_count=47),
+    lambda a: a['range'].pop('expected_candle_count'),
     lambda a: a['range'].update(high=94),
     lambda a: a.update(observed_at=(NOW-timedelta(seconds=91)).isoformat()),
     lambda a: a.update(analyzed_at=(NOW+timedelta(seconds=1)).isoformat()),

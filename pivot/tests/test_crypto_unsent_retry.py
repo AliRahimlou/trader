@@ -27,7 +27,9 @@ def plausible_signal(at):
     """Invented complete bars, never presented as a historically available setup."""
     start = AT.replace(hour=4, minute=0, second=0)
     bars = [Bar(start + timedelta(minutes=5*(i+1)), 5, 87100, 87700, 86500, 87100) for i in range(48)]
-    bars += [Bar(start + timedelta(minutes=245), 5, 86520, 86530, 86300, 86450),
+    # The outside candle low (the stop) sits 1.3% below the confirmation close so the
+    # net-expectancy cost gate admits the plan; narrower stops are skipped by policy.
+    bars += [Bar(start + timedelta(minutes=245), 5, 86520, 86530, 85500, 86450),
              Bar(start + timedelta(minutes=250), 5, 86450, 86660, 86400, 86630)]
     market = Market('BTC/USD', {5: bars}, 'alpaca_crypto_us', True, at)
     return analyze(market, at, provenance={'source': market.source, 'symbol': market.symbol,
@@ -105,7 +107,7 @@ def delay_broker_reads(broker, seconds):
 def test_tiny_ask_move_before_any_post_can_replan_original_still_fresh_signal(tmp_path):
     executor, broker, crypto, main = runtime(tmp_path)
     signal = plausible_signal(broker.at)
-    assert signal['signal_ready'] and signal['current_event']['target'] == 87290
+    assert signal['signal_ready'] and signal['current_event']['target'] == 88890
     executor.tick({'BTC/USD': signal})
     assert not broker.sent
     abandoned = crypto.history()[0]

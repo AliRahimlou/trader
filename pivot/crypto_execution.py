@@ -18,17 +18,19 @@ from .deployment import DeploymentHold
 from .feeds import FeedError
 from .models import timestamp
 from .policy import POLICY_VERSION as MAIN_POLICY_VERSION
-from .range_reversal import RULE_VERSION
+from .range_reversal import OPENING_BARS_MINIMUM, OPENING_SLOTS, RULE_VERSION
 
-POLICY_VERSION = 'range-spot-execution-v1'
+POLICY_VERSION = 'range-spot-execution-v2'
 POLICY = {'version': POLICY_VERSION, 'summary': [
-    'The first range is New York midnight plus four elapsed hours, built from 48 native five-minute candles. This is an explicit app convention.',
+    f'The first range is New York midnight plus four elapsed hours: the high and low of the native five-minute candles available among its {OPENING_SLOTS} slots, at least {OPENING_BARS_MINIMUM} of them. This is an explicit app convention.',
+    'Missing five-minute candles are tolerated. A missing later slot has no close, so it cannot start, confirm or invalidate an excursion; the newest expected candle must still be present (90-second publication allowance) for a signal to be current. Prices are never filled in.',
     'Buy after a completed close below the range followed by a later close strictly inside. Use the first outside candle low as stop and the signal close plus twice that distance as target.',
     'Alpaca spot supports long entries and sells of owned crypto only. Upper-range short setups cannot open positions here.',
     'Bitcoin is demonstrated in the recording. Other selected markets are optional adaptations, not creator-validated results.',
     'A maximum of two crypto positions may be active, with at most one per selected market. This execution capacity bounds broker workload; it is not a signal rule. Each fresh entry targets the saved dollars, never above that amount; partial fills can be smaller.',
+    'Each strategy has its own allowance of two entry attempts per New York session (the shared ledger reserves them; a Socrates attempt no longer consumes a crypto attempt). A submitted or rejected entry consumes one; a plan retired before its broker call does not.',
     'At most one eligible new crypto entry receives broker checks per worker cycle, rotating across selected markets. Existing positions keep their exit checks and signal deadlines are not extended.',
-    'Use immediate limit entries, no more than 0.1% above the confirmation price, current bid/ask, and shared account cash. Fees, spread and execution allowance must leave a positive net target.',
+    'Use immediate limit entries, no more than 0.1% above the confirmation price, current bid/ask, and shared account cash. The net reward after both taker fees (target versus the limit price) must be positive and at least the net risk after both fees and the execution allowance (limit price versus stop); otherwise the rule-valid setup is skipped and the computed percentages and the implied minimum stop distance are recorded.',
     'Published tier-one taker fees are 0.25% per side; buy fees reduce acquired crypto. Exits sell net owned quantity, so dollar proceeds change with price and fees.',
     'A broker stop-limit has a limit 1% below the stop. It may remain unfilled through a gap. The worker checks targets and cancellation-safe market fallback every 10 seconds while connected; neither fill price nor profit is guaranteed.',
     'The range resets each New York day. Existing positions keep their original stop and target across midnight, settings changes and strategy views.',
@@ -39,6 +41,9 @@ WORKING = {'new', 'partially_filled'}
 STATUSES = TERMINAL | WORKING | {'accepted', 'pending_new', 'pending_cancel', 'pending_replace', 'stopped', 'suspended', 'done_for_day', 'calculated'}
 FEE = Decimal('.0025')
 EXIT_ALLOWANCE = Decimal('.001')
+MIN_NET_REWARD_RISK = Decimal('1.0')  # Placeholder net reward-to-risk floor after fees; the integrator may change it.
+ONE = Decimal('1')
+HUNDRED = Decimal('100')
 MAX_ENTRY_DRIFT = Decimal('.001')
 IOC_LIMIT_BUFFER = Decimal('.0003')  # An immediate limit fills at the best ask; this only absorbs one-tick upticks.
 MAX_SPREAD = Decimal('.005')
@@ -87,8 +92,46 @@ def fresh(value, now, seconds):
     return 0 <= (now - at).total_seconds() <= seconds
 
 
+def net_expectancy(limit, stop, target):
+    """Net win and net loss fractions of the limit price after fees.
+
+    App interpretation of the recording's 2R target: buying at ``limit`` costs
+    the taker fee in acquired crypto, and every sale pays it again in proceeds.
+    ``net_win`` is the fraction gained when the target sells; ``net_loss`` is
+    the fraction lost when the stop sells, with EXIT_ALLOWANCE for slippage
+    below the stop. Both are exact Decimal fractions (0.012 = 1.2%).
+    """
+    kept = (ONE - FEE) ** 2
+    net_win = target / limit * kept - ONE
+    net_loss = ONE - stop * (ONE - EXIT_ALLOWANCE) / limit * kept
+    return net_win, net_loss
+
+
+def minimum_stop_distance(entry, limit):
+    """Smallest 2R stop distance below ``entry`` (fraction of entry) that passes the gate.
+
+    Solves net_win >= MIN_NET_REWARD_RISK * net_loss for R with target = entry + 2R
+    and stop = entry - R. Returns None when no finite distance can satisfy the
+    ratio (ratios of about two or more, where 2R geometry cannot outrun fees).
+    """
+    kept, ratio = (ONE - FEE) ** 2, MIN_NET_REWARD_RISK
+    denominator = kept * (2 - ratio * (ONE - EXIT_ALLOWANCE))
+    if denominator <= 0:
+        return None
+    distance = (limit * (ONE + ratio) - entry * kept * (ONE + ratio * (ONE - EXIT_ALLOWANCE))) / denominator
+    return max(ZERO, distance / entry)
+
+
+def percent(fraction):
+    return decimal_text((fraction * HUNDRED).quantize(Decimal('.01')))
+
+
 def checked_signal(analysis, symbol, now):
-    """Revalidate the full native range/event contract independently of UI flags."""
+    """Revalidate the full native range/event contract independently of UI flags.
+
+    The opening range may be built from a subset of its 48 slots since
+    ``range-reversal-v2``; every other field stays strictly revalidated.
+    """
     try:
         a, event = analysis, analysis['current_event']
         if (symbol not in SYMBOLS or a.get('family_id') != 'range_reversal' or a.get('symbol') != symbol
@@ -108,7 +151,9 @@ def checked_signal(analysis, symbol, now):
                 or timestamp(session['range_end_at']) != range_end
                 or session.get('timezone') != str(NY) or session.get('range_duration_minutes') != 240
                 or timestamp(area['start_at']) != start or timestamp(area['end_at']) != range_end
-                or area.get('native_candle_count') != 48):
+                or area.get('expected_candle_count') != OPENING_SLOTS
+                or type(area.get('native_candle_count')) is not int
+                or not OPENING_BARS_MINIMUM <= area['native_candle_count'] <= OPENING_SLOTS):
             raise ValueError
         breakout, confirmation = timestamp(event['breakout_at']), timestamp(event['confirmation_at'])
         if (not range_end < breakout < confirmation <= now < end
@@ -465,8 +510,19 @@ class CryptoRangeExecutor:
         limit = max(limit, rounded(ask, tick, ROUND_UP))
         if not stop < bid <= limit < target or limit > rounded(entry * (1 + MAX_ENTRY_DRIFT), tick, ROUND_UP):
             raise CryptoWaiting('Crypto price moved beyond the confirmed entry or its stop/target')
-        if target * (1 - FEE) * (1 - FEE - EXIT_ALLOWANCE) <= limit:
-            raise CryptoWaiting('The crypto target does not cover two-sided fees and the execution allowance')
+        # Net-expectancy cost gate (app interpretation): a rule-valid 2R setup
+        # is skipped when both taker fees leave no positive net reward, or a net
+        # reward below MIN_NET_REWARD_RISK times the net risk. The reason
+        # carries the numbers so the owner can see why nothing was sent.
+        net_win, net_loss = net_expectancy(limit, stop, target)
+        if net_win <= 0 or net_win < MIN_NET_REWARD_RISK * net_loss:
+            actual = (entry - stop) / entry
+            implied = minimum_stop_distance(entry, limit)
+            raise CryptoWaiting(
+                f'Skipped: net reward after fees {percent(net_win)}% versus net risk {percent(net_loss)}% of the '
+                f'{decimal_text(limit)} limit (need reward ≥ {decimal_text(MIN_NET_REWARD_RISK)} × risk and > 0); '
+                f'the stop is {percent(actual)}% below entry and a 2R setup needs at least '
+                + (f'{percent(implied)}%' if implied is not None else 'an unattainable distance') + ' at this ratio')
         amount = number(control['target_dollars'])
         if number(self.portfolio.available(account['account_ref'], account.get('non_marginable_buying_power'))) < amount:
             raise CryptoWaiting('Waiting for enough unreserved cash for the complete crypto purchase amount')
