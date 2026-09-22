@@ -32,10 +32,10 @@ Each subsection separates the **video rule** (what the recording shows or says) 
 
 **App interpretation.** A location event now lives from its origin bar to the **end of the next regular session** (two session closes at most), instead of 180 minutes within the origin session. A missing hourly bar between origin and retest still kills the event; an entry still respects the reaction-age, latest-observation and freshness deadlines, and the one-entry-per-event rule is unchanged. Two sessions is an app reading of “days after the break” bounded so that a stale level cannot stay armed for a week.
 
-**Consequences of the longer life, unchanged in this release and listed for the owner's review.** Two 4.4 rules that were harmless within one session behave differently once an event can be entered on the following day. They are recorded here rather than changed, because changing either is a new trading rule that needs its own owner decision:
+**Two rules adjusted for the longer life (owner-authorized in review).** Two 4.4 rules that were harmless within one session would have behaved badly once an event can be entered on the following day, so both were changed in this release:
 
-- *Entry away from the level.* After the retest the event stays confirmed until expiry and the plan is rebuilt on every completed hourly candle with the **latest hourly close** as its entry reference; nothing requires price to still be at the area. The 1% price-movement check is measured against that same latest close, so it does not bound the distance from the level. A plan can therefore become ready hours (or a session) after the retest, several percent from the area, with the stop still beyond the area (a wide stop in R terms, the same $15 purchase) and the 1.0 R target minimum re-checked from the new reference. The recording trades the retest itself.
-- *Fewer targets on the next session.* A target must have been established before the origin bar began. For an entry on the session after the break, the previous-day high and low are the break day's, set at its 16:00 close, after the origin, so they are never targets; four-hour areas established after the break are excluded too. Such a setup more often has no level at 1.0 R or more and stays **CONFIRMING** with no plan. This withholds trades; it cannot send a wrong order.
+- *Entry stays at the level.* A confirmed event produces a plan only while the latest completed hourly candle still touches the event area or closes within **0.4%** of it (about one typical hourly range). If price leaves, the 'Nasdaq level event' check reports the distance and the event waits for another return to the level until it expires. The recording trades the retest itself ("we're near a pivotal area"); without this bound a plan could have become ready a session later, several percent from the area. The 0.4% proximity is an app choice.
+- *Targets may be set on the entry day.* A target level must now exist before the **entry** candle began (it was: before the break candle). A retest on the session after the break can therefore target the break day's previous-day high and low and its afternoon four-hour areas, all closed before the entry candle, so no look-ahead is possible; the event's own area is still never the target.
 
 ### Leader areas: interaction zones plus period levels, a 4-of-7 majority and a 60-minute reaction window
 
@@ -84,9 +84,9 @@ The integrated v5 analyzer was replayed on the same sixty days of QQQ IEX candle
 | --- | --- | --- |
 | Four-hour bars per session | 1 (09:30–13:30) | 2 (09:30–13:30 and 13:30–16:00) |
 | QQQ areas in play at a checkpoint | up to dozens of 0.1% bands, no cap | median 14, capped at the 16 nearest (swing-pivot candidates, two nonadjacent interactions) |
-| Distinct confirming events in 39 sessions | 54 (17 four-hour retests, 37 previous-day sweeps) | 76 (40 four-hour retests, 36 previous-day sweeps); 34 of 39 sessions had at least one |
-| Event-direction plans keeping a target | 75 of 108 | 116 of 152 (24 skipped by the 0.1% minimum stop) |
-| Median reward-to-risk of kept plans | 1.56 R | 1.46 R |
+| Distinct confirming events at the level in 39 sessions | 54 (17 four-hour retests, 37 previous-day sweeps) | 65 (38 four-hour retests, 27 previous-day sweeps) with the latest candle at or within 0.4% of the area; 30 of 39 sessions had at least one |
+| Event-direction plans keeping a target | 75 of 108 | 105 of 130 (17 skipped by the 0.1% minimum stop) |
+| Median reward-to-risk of kept plans | 1.56 R | 1.48 R |
 | VIX gate true at random, long / short (495 bars) | 16.6% / 12.3% | 22.2% / 15.6% (consolidation bases added beside swing clusters) |
 
 The four-hour retest count more than doubles because a retest is now the return to the level rather than a directional close, and because afternoon extremes now form areas. The VIX gate loosens by about five points because a base counts as an area; it remains far below the 4.3 coin-flip rate. Leader period levels, the majority quorum and the sixty-minute window could not be replayed offline and will be observed live through the Look-left panel and the decision records.

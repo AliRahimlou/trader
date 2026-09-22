@@ -450,7 +450,7 @@ def test_policy_text_states_the_video_aligned_rules_and_the_other_agents_lines()
                    'previous-session high, low and close', 'session VWAP', 'At least four of seven leaders',
                    'mixed → no trade', 'up to 60 minutes', 'consolidation bases', 'four consecutive 15-minute candles',
                    'look left', 'app choice', 'app interpretation',
-                   'price need not still be at the area', 'established before the event\'s break or sweep candle began',
+                   'closes within 0.4% of it', 'established before the entry candle began',
                    'use their regular-session five-minute candles', 'keeps the last validated ones'):
         assert phrase in text, phrase
     assert '180 minutes' not in text and 'five of seven' not in text

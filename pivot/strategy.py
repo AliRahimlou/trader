@@ -66,10 +66,11 @@ class AnalysisPolicy:
     vix_base_bars: int = 4
     vix_base_range: float = 0.02
     min_stop_fraction: float = 0.001
+    retest_proximity: float = 0.004
 
     def __post_init__(self):
         fractions = (self.zone_tolerance, self.min_reward_risk, self.vix_zone_tolerance, self.vix_base_range,
-                     self.min_stop_fraction)
+                     self.min_stop_fraction, self.retest_proximity)
         counts = (self.level_touches, self.max_areas, self.persistence_bars, self.minimum_leaders,
                   self.maximum_opposition, self.event_sessions, self.vix_persistence_bars, self.vix_base_bars)
         if (any(isinstance(v, bool) or not isinstance(v, (float, int)) or not isfinite(v) for v in fractions)
@@ -81,7 +82,8 @@ class AnalysisPolicy:
                 and 1 <= self.event_sessions <= MAX_EVENT_SESSIONS
                 and 0 < self.min_reward_risk <= 10 and 0 < self.vix_zone_tolerance <= 0.05
                 and 1 <= self.vix_persistence_bars <= 8 and 2 <= self.vix_base_bars <= 16
-                and 0 < self.vix_base_range <= 0.1 and 0 <= self.min_stop_fraction <= 0.05):
+                and 0 < self.vix_base_range <= 0.1 and 0 <= self.min_stop_fraction <= 0.05
+                and 0 < self.retest_proximity <= 0.05):
             raise ValueError('Invalid analysis policy')
 
 
@@ -892,7 +894,21 @@ def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
                   leader_observations_synchronized=observation_at is not None,
                   leader_observation_valid_until=observation_deadline.isoformat() if observation_deadline else None,
                   leader_evidence_valid_until=min(evidence_deadlines).isoformat() if evidence_deadlines else None)
-    if not _checked(result, 'Nasdaq level event', event['state'] == 'CONFIRMING', event['reason']):
+    # Video: "we're near a pivotal area ... trade the retest". App interpretation
+    # (4.5.0): a confirmed event only produces a plan while the latest closed
+    # hourly candle still touches the event area or closes within
+    # policy.retest_proximity of it; after price leaves, the event waits for
+    # another return instead of entering far from the level.
+    latest = bars[-1]
+    distance = max(0.0, zone.low - latest.close, latest.close - zone.high)
+    near = (latest.low <= zone.high and latest.high >= zone.low) or distance <= latest.close * policy.retest_proximity
+    result['distance_from_area'] = round(distance / latest.close, 6) if latest.close else None
+    if event['state'] == 'CONFIRMING' and not near:
+        event_ok, event_detail = False, (f'{event["reason"]}; price is {distance / latest.close * 100:.2f}% from the area, '
+                                         f'more than {policy.retest_proximity * 100:g}%: waiting for a return to the level')
+    else:
+        event_ok, event_detail = event['state'] == 'CONFIRMING', event['reason']
+    if not _checked(result, 'Nasdaq level event', event_ok, event_detail):
         return _finish(result)
     confirmations = {d: _leader_confirmation(rows, d, policy) for d in ('long', 'short')}
     direction = next((d for d, (okay, _) in confirmations.items() if okay), None)
@@ -921,7 +937,7 @@ def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
         detail = (f'Execution interpretation: the {risk:.2f} stop distance is below the minimum '
                   f'{policy.min_stop_fraction * 100:g}% of the entry price ({minimum_risk:.2f}); no plan')
     else:
-        target, target_zone, reward_risk = _target(all_levels, zone, origin, direction, current.close, stop, policy)
+        target, target_zone, reward_risk = _target(all_levels, zone, current, direction, current.close, stop, policy)
         detail = ((f'Execution interpretation: stop beyond event/zone; target {target_zone.source} at {reward_risk:.2f}R, '
                    f'the nearest opposing pre-existing level at least {policy.min_reward_risk:g}R away') if target is not None else
                   (f'Execution interpretation: no opposing pre-existing 4-hour or previous-day level offers at least '
@@ -941,8 +957,11 @@ def _target(levels, event_zone, origin, direction, entry, stop, policy):
     """Nearest opposing premarked level offering the declared minimum reward-to-risk.
 
     Video: take profit at the next pivotal area (qualitative). App
-    interpretation (v4): candidates are 4-hour areas or previous-day levels
-    established before the origin bar began, excluding the event's own area
+    interpretation (v4, widened in 4.5.0): candidates are 4-hour areas or
+    previous-day levels established before the entry candle began (so a
+    next-session retest can target the break day's high/low and afternoon
+    areas; nothing formed during the entry candle counts), excluding the
+    event's own area
     (a swept level cannot be its own target), beyond the entry in the trade
     direction, whose distance is at least ``policy.min_reward_risk`` times
     the stop distance. Nearer levels below the multiple are skipped for the

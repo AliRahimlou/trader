@@ -227,7 +227,8 @@ def multiple_ready_snapshot(kind):
     """Real analyzer output from manufactured simultaneous opportunity fixtures."""
     market, leaders, vix, now = setup_scenario('short', 'four_hour_retest')
     if kind == 'methods':
-        market.bars[1440] = [candle(now - timedelta(days=1), high=109.5, low=90, minutes=1440)]
+        # The swept previous-day high sits inside the latest candle's range, so the sweep is still at the level (4.5.0 proximity).
+        market.bars[1440] = [candle(now - timedelta(days=1), high=110.2, low=90, minutes=1440)]
         market.previous_session = '2026-09-15'
     else:
         market.bars[60] = [candle(now - timedelta(hours=2), 104, 105, 103, 104, 60),

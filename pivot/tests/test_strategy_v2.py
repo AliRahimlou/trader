@@ -240,7 +240,8 @@ def test_previous_day_sweep_holds_its_origin_and_has_explicit_invalidation():
 
 def test_both_methods_are_reported_even_when_four_hour_method_also_passes():
     market, leaders, vix, now = setup_scenario('short', 'four_hour_retest')
-    market.bars[1440] = [candle(now-timedelta(days=1), high=109.5, low=90, minutes=1440)]
+    # The swept previous-day high sits inside the latest candle's range (4.5.0 proximity).
+    market.bars[1440] = [candle(now-timedelta(days=1), high=110.2, low=90, minutes=1440)]
     market.previous_session = '2026-09-15'
     result = analyze(market, leaders, vix, now)
     branches = {row['id']: row for row in result['strategies']}
