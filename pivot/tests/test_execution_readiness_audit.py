@@ -52,7 +52,7 @@ def test_closed_session_precedes_unavailable_vix_without_broker_reads(runtime, m
     None, {}, {'is_open': False}, {'is_open': False, 'timestamp': 'invalid'},
     {'is_open': False, 'timestamp': NOW.replace(tzinfo=None).isoformat()},
     {'is_open': False, 'timestamp': (NOW - timedelta(seconds=16)).isoformat()},
-    {'is_open': False, 'timestamp': (NOW + timedelta(seconds=1)).isoformat()},
+    {'is_open': False, 'timestamp': (NOW + timedelta(seconds=6)).isoformat()},  # Beyond the 5 s skew allowance.
     {'is_open': 0, 'timestamp': NOW.isoformat()},
     {'is_open': 'false', 'timestamp': NOW.isoformat()},
     {'is_open': None, 'timestamp': NOW.isoformat()},

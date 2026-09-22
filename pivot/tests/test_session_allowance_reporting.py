@@ -12,7 +12,9 @@ def test_snapshot_allowance_read_does_not_change_saved_permission(tmp_path):
         result = client.get('/api/snapshot').json()
     assert result['entry_allowance']['limit'] == 2
     assert result['entry_allowance']['used'] == 0
-    assert result['entry_allowance']['remaining'] == 2
+    assert result['entry_allowance']['remaining'] == 4
+    assert result['entry_allowance']['families'] == {'socrates': {'used': 0, 'remaining': 2},
+                                                     'range_reversal': {'used': 0, 'remaining': 2}}
     assert store.deployment_permission() == permission
 
 
@@ -26,5 +28,13 @@ def test_allowance_reporting_failure_does_not_hide_broker_or_management(tmp_path
     result = service.snapshot()
     assert result['entry_allowance']['status'] == 'blocked'
     assert result['entry_allowance']['used'] is None
+    assert result['entry_allowance']['families'] is None
     assert result['positions'] == [{'symbol': 'QQQ', 'qty': '0.01'}]
     assert 'worker_health' in result
+
+
+def test_snapshot_policy_summary_surfaces_per_family_allowance_and_pause(tmp_path):
+    service = Service(None, Store(tmp_path / 'audit.db'))
+    summary = ' '.join(service.snapshot()['execution_policy']['summary'])
+    assert 'its own limit of two new entry attempts' in summary
+    assert 'pauses Socrates only' in summary

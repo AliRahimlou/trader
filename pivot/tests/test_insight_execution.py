@@ -72,7 +72,7 @@ def test_ready_entry_obtains_fresh_actual_vix_before_submitting(engine):
     dict(proof(), value=float('inf')),
     dict(proof(), value=True),
     dict(proof(), updated_at=(NOW - timedelta(seconds=91)).isoformat()),
-    dict(proof(), updated_at=(NOW + timedelta(seconds=1)).isoformat()),
+    dict(proof(), updated_at=(NOW + timedelta(seconds=6)).isoformat()),  # Beyond the 5 s skew allowance.
     dict(proof(), updated_at='malformed'),
     FeedError('Waiting for a current VIX quote'),
 ])

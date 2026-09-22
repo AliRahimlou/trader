@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sqlite3
 from zoneinfo import ZoneInfo
+from .alerts import notify
 from .crypto_markets import SYMBOLS
 from .models import timestamp
 from .store import _create_entry_allowance_schema, _reserve_session_entry
@@ -239,6 +240,8 @@ class CryptoStore:
                        (identity, at, _json(value)))
             if previous is None or previous[0] == 1:
                 self._event(db, 'incident_opened' if previous is None else 'incident_reopened', value)
+        if previous is None:
+            notify('incident_opened', value)  # After commit; best-effort owner alert, never raises.
         return value
 
     def incidents(self):
