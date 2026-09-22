@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pivot.history_health import frame_gaps
+from pivot.history_health import bucket_ends, frame_gaps
 from pivot.models import Bar
 
 ET = ZoneInfo('America/New_York')
@@ -16,19 +16,23 @@ def session(day, close='16:00'):
 
 
 def candles(sessions, minutes):
-    output = []
-    for s in sessions.values():
-        if minutes == 1440:
-            output.append(Bar(s['close'], minutes, 100, 101, 99, 100))
-            continue
-        end = s['open'] + timedelta(minutes=minutes)
-        while end <= s['close']:
-            output.append(Bar(end, minutes, 100, 101, 99, 100))
-            end += timedelta(minutes=minutes)
-    return output
+    return [Bar(end, minutes, 100, 101, 99, 100)
+            for s in sessions.values() for end in bucket_ends(s['open'], s['close'], minutes)]
 
 
-@pytest.mark.parametrize('minutes,expected_count', [(15, 26), (60, 6), (240, 1), (1440, 1)])
+def test_bucket_ends_split_the_four_hour_frame_and_keep_full_buckets_elsewhere():
+    full, early, short = session('2026-09-16'), session('2026-11-27', '13:00'), session('2026-11-27', '13:30')
+    clock = lambda ends: [(e.hour, e.minute) for e in ends]
+    assert clock(bucket_ends(full['open'], full['close'], 240)) == [(13, 30), (16, 0)]
+    assert clock(bucket_ends(early['open'], early['close'], 240)) == [(13, 0)]
+    assert clock(bucket_ends(short['open'], short['close'], 240)) == [(13, 30)]
+    assert clock(bucket_ends(full['open'], full['close'], 60))[-1] == (15, 30)
+    assert clock(bucket_ends(early['open'], early['close'], 60)) == [(10, 30), (11, 30), (12, 30)]
+    assert len(bucket_ends(full['open'], full['close'], 15)) == 26
+    assert bucket_ends(early['open'], early['close'], 1440) == [early['close']]
+
+
+@pytest.mark.parametrize('minutes,expected_count', [(15, 26), (60, 6), (240, 2), (1440, 1)])
 def test_all_provided_sessions_are_required_from_their_first_bucket(minutes, expected_count):
     sessions = {'2026-09-15': session('2026-09-15'), '2026-09-16': session('2026-09-16')}
     bars = candles(sessions, minutes)
@@ -71,8 +75,18 @@ def test_complete_early_close_holiday_and_weekend_do_not_create_false_gaps():
     early = {'2026-11-27': sessions['2026-11-27']}
     assert frame_gaps([], early, 15, now)['missing_count'] == 14
     assert frame_gaps([], early, 60, now)['missing_count'] == 3
-    assert frame_gaps([], early, 240, now)['missing_count'] == 0
+    # The early close still owes its single partial four-hour bucket, ending at the close.
+    assert frame_gaps([], early, 240, now) == {'missing_count': 1, 'first_missing_at': early['2026-11-27']['close'].isoformat(),
+                                               'reason': '1 completed 240-minute candle(s) missing from the exchange calendar history'}
     assert frame_gaps([], early, 1440, now)['first_missing_at'] == early['2026-11-27']['close'].isoformat()
+    full = {'2026-11-25': sessions['2026-11-25']}
+    closing_only = [bar for bar in candles(full, 240) if bar.end.hour == 16]
+    result = frame_gaps(closing_only, full, 240, now)
+    assert result['missing_count'] == 1 and result['first_missing_at'] == full['2026-11-25']['open'].replace(hour=13, minute=30).isoformat()
+    # The closing bucket is only due after the close plus the publication allowance.
+    at_close = full['2026-11-25']['close']
+    assert frame_gaps(candles(full, 240)[:1], full, 240, at_close + timedelta(seconds=89))['missing_count'] == 0
+    assert frame_gaps(candles(full, 240)[:1], full, 240, at_close + timedelta(seconds=90))['missing_count'] == 1
 
 
 def test_missing_prior_daily_session_is_detected_even_with_older_history():

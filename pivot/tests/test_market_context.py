@@ -107,16 +107,63 @@ def test_missing_feed_or_stale_hourly_source_does_not_retain_direction():
     assert all(row['direction'] == 'unknown' for row in result['frames'])
 
 
+# Closing (13:30-16:00) bucket ranges per session since 4.5.0. The 15 high on
+# the 15th is an afternoon extreme that only exists because of that bucket.
+CLOSING = [(103, 95), (103, 95), (108, 95), (107, 94), (112, 105), (115, 101), (105, 97)]
+
+
 def session_history():
-    # One full four-hour bucket per RTH day. The latest day is Friday.
+    # Two four-hour buckets per RTH day, end-stamped 13:30 and 16:00 ET. The latest day is Friday.
     dates = [8, 9, 10, 11, 14, 15, 16]
-    four_hour = [Bar(NOW.replace(day=day, hour=17), 240, (high+low)/2,
-                     high, low, (high+low)/2) for day, (high, low) in zip(dates, RANGES)]
+    four_hour = []
+    for day, (high, low), (closing_high, closing_low) in zip(dates, RANGES, CLOSING):
+        four_hour.append(Bar(NOW.replace(day=day, hour=17), 240, (high+low)/2, high, low, (high+low)/2))
+        four_hour.append(Bar(NOW.replace(day=day, hour=20, minute=0), 240, (closing_high+closing_low)/2,
+                             closing_high, closing_low, (closing_high+closing_low)/2))
     hourly = [Bar(NOW.replace(day=day, hour=hour), 60, 103, 104, 102, 103)
               for day in dates for hour in range(14, 20)]
     now = NOW.replace(day=17, hour=14)
     hourly.append(Bar(now, 60, 103, 104, 102, 103))
     return hourly, four_hour, now
+
+
+def test_afternoon_bucket_extremes_form_confirmed_four_hour_swings():
+    hourly, four_hour, now = session_history()
+    row = frame(market_context(market(hourly, four_hour, now), now), 240)
+    assert row['status'] == 'ready' and row['direction'] == 'up'
+    assert [pivot['price'] for pivot in row['pivots']['highs']] == [110, 115]
+    assert [pivot['price'] for pivot in row['pivots']['lows']] == [94, 96]
+    afternoon_high = row['pivots']['highs'][-1]
+    assert datetime.fromisoformat(afternoon_high['event_at']) == NOW.replace(day=15, hour=20, minute=0)
+    assert datetime.fromisoformat(afternoon_high['confirmed_at']) == NOW.replace(day=16, hour=17)
+    assert [(bar.end.hour, bar.end.minute) for bar in four_hour[:2]] == [(17, 30), (20, 0)]  # 13:30 and 16:00 ET
+
+
+def test_closing_bucket_is_only_due_after_a_later_session_is_observed():
+    hourly, four_hour, now = session_history()
+    # During the afternoon the hourly frame runs ahead of the closing bucket by design.
+    afternoon = NOW.replace(day=16, hour=19)
+    partial = [bar for bar in four_hour if bar.end <= afternoon]
+    result = market_context(market(hourly, partial, afternoon), afternoon)
+    assert result['data_current'] and frame(result, 240)['status'] == 'ready'
+    # Once the next session has hourly candles, the missing closing bucket is a gap.
+    without_closing = [bar for bar in four_hour if not (bar.end.day == 15 and bar.end.hour == 20)]
+    row = frame(market_context(market(hourly, without_closing, now), now), 240)
+    assert row['status'] == 'invalid' and 'closing candle is missing' in row['detail']
+    # A session whose first bucket is not the 13:30 one cannot be followed by a closing bucket.
+    shifted = list(four_hour)
+    shifted[0] = Bar(NOW.replace(day=8, hour=16), 240, 100, 101, 99, 100)  # 12:30 ET
+    row = frame(market_context(market(hourly, shifted, now), now), 240)
+    assert row['status'] == 'invalid' and 'within an observed session' in row['detail']
+    # A closing bucket that ends before the last observed hourly candle of its day is a gap.
+    short_closing = list(four_hour)
+    short_closing[1] = Bar(NOW.replace(day=8, hour=18), 240, 100, 101, 99, 100)  # 14:00 ET
+    row = frame(market_context(market(hourly, short_closing, now), now), 240)
+    assert row['status'] == 'invalid' and 'closing candle is missing' in row['detail']
+    # A new session must begin with its first bucket (13:30 or an earlier early close).
+    late_start = [bar for bar in four_hour if not (bar.end.day == 14 and bar.end.hour == 17)]
+    row = frame(market_context(market(hourly, late_start, now), now), 240)
+    assert row['status'] == 'invalid'
 
 
 def test_older_four_hour_candle_uses_current_hourly_freshness_and_keeps_its_timestamp():
@@ -146,13 +193,16 @@ def test_missing_four_hour_bar_on_an_observed_full_session_is_not_bridged():
 
 def test_four_hour_right_hand_candle_is_not_available_before_its_close():
     hourly, four_hour, _ = session_history()
-    before = four_hour[-1].end-timedelta(seconds=1)
-    source = market(hourly, four_hour[:-1], before)
+    # The 13:30 bucket on the 16th confirms the afternoon swing high of the 15th.
+    confirming = four_hour[-2]
+    assert confirming.end == NOW.replace(day=16, hour=17)
+    before = confirming.end-timedelta(seconds=1)
+    source = market(hourly, four_hour[:-2], before)
     initial = market_context(source, before)
-    source.bars[240].append(four_hour[-1])
+    source.bars[240].append(confirming)
     assert market_context(source, before) == initial
     assert frame(initial, 240)['direction'] == 'unknown'
-    source.observed_at = four_hour[-1].end
+    source.observed_at = confirming.end
     assert frame(market_context(source, source.observed_at), 240)['direction'] == 'up'
 
 

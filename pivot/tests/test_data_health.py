@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 import pytest
-from pivot.models import Bar, Market, MAG7
+from pivot.models import Bar, Market, MAG7, timestamp
 from pivot.data_health import last_expected, stock_health, vix_health
 from pivot.index_data import load_vix
 from pivot.feeds import FeedError
@@ -15,7 +15,43 @@ def test_expected_complete_candles_respect_calendar_early_closes_and_overnight()
     assert last_expected(sessions,15,NOW)==NOW.replace(minute=0)
     assert last_expected(sessions,60,NOW)==NOW.replace(hour=15,minute=30)
     assert last_expected(sessions,1440,NOW)==NOW.replace(day=15,hour=17,minute=0)
-    assert last_expected(sessions,240,NOW) is None # No full 4h bucket in the early-close session.
+    # The early-close session's partial 4h bucket ends at its close; today's first bucket is not due yet.
+    assert last_expected(sessions,240,NOW)==NOW.replace(day=15,hour=17,minute=0)
+    assert last_expected(sessions,240,NOW.replace(hour=17,minute=31,second=30))==NOW.replace(hour=17,minute=30)
+    assert last_expected(sessions,240,NOW.replace(hour=20,minute=1,second=29))==NOW.replace(hour=17,minute=30)
+    assert last_expected(sessions,240,NOW.replace(hour=20,minute=1,second=30))==NOW.replace(hour=20,minute=0)
+
+
+def test_leader_daily_frame_is_reported_but_never_gates_readiness():
+    from pivot.data_health import expire_health
+    markets, sessions, now = current_native_stock_inputs()
+    health = stock_health(markets, sessions, now)
+    assert health['status'] == 'current'
+    frames = {f['minutes']: f for f in next(i for i in health['instruments'] if i['symbol'] == 'NVDA')['frames']}
+    assert frames[1440]['status'] == 'current' and frames[1440]['required'] is False
+    assert frames[5]['required'] is True
+    assert timestamp(frames[1440]['latest_at']).date().isoformat() == '2026-09-15'
+    # Yesterday's daily candle is 'current' until the next close has passed.
+    assert timestamp(frames[1440]['valid_until']) == sessions['2026-09-16']['close'] + timedelta(seconds=90)
+    # Missing, stale or gapped daily context is visible but does not block entries.
+    markets['NVDA'].bars[1440] = markets['NVDA'].bars[1440][:-1]
+    markets['AAPL'].bars.pop(1440)
+    markets['MSFT'].bars[1440] = markets['MSFT'].bars[1440][1:]
+    health = stock_health(markets, sessions, now)
+    assert health['status'] == 'current'
+    by_symbol = {i['symbol']: i for i in health['instruments']}
+    assert all(by_symbol[s]['status'] == 'current' for s in MAG7)
+    assert next(f for f in by_symbol['NVDA']['frames'] if f['minutes'] == 1440)['status'] == 'stale'
+    assert next(f for f in by_symbol['AAPL']['frames'] if f['minutes'] == 1440)['status'] == 'missing'
+    assert next(f for f in by_symbol['MSFT']['frames'] if f['minutes'] == 1440)['status'] == 'incomplete'
+    # An expired daily deadline never flips the instrument either; the instrument deadline ignores it.
+    copied = {'stocks': health, 'vix': {'status': 'current', 'valid_until': (now + timedelta(hours=1)).isoformat()}}
+    expire_health(copied, sessions['2026-09-16']['close'] + timedelta(seconds=89))
+    assert copied['stocks']['status'] == 'needs_attention'  # Intraday frames are due by then; the daily one is not the cause.
+    tesla = next(i for i in copied['stocks']['instruments'] if i['symbol'] == 'TSLA')
+    assert next(f for f in tesla['frames'] if f['minutes'] == 1440)['status'] == 'current'
+    frames = {f['minutes']: f for f in next(i for i in stock_health(markets, sessions, now)['instruments'] if i['symbol'] == 'TSLA')['frames']}
+    assert timestamp(next(i for i in health['instruments'] if i['symbol'] == 'TSLA')['valid_until']) < timestamp(frames[1440]['valid_until'])
 
 
 def test_all_eight_symbols_are_audited_and_missing_one_cannot_look_connected():
@@ -206,7 +242,7 @@ def test_unused_leader_context_cannot_block_complete_native_five_minute_inputs(l
         markets[symbol].bars[legacy_frame] = markets[symbol].bars[5][:1]
     health = stock_health(markets, sessions, now)
     assert health['status'] == 'current'
-    assert all([frame['minutes'] for frame in item['frames']] == [5]
+    assert all([frame['minutes'] for frame in item['frames']] == [5, 1440]
                for item in health['instruments'] if item['symbol'] in MAG7)
 
 

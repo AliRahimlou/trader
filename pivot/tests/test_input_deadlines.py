@@ -75,7 +75,11 @@ def test_publication_deadlines_respect_early_close_daily_and_full_buckets():
                 'next': {'open': tomorrow, 'close': tomorrow.replace(hour=16, minute=0)}}
     assert next_publication_deadline(sessions, 60, opened.replace(hour=11)) == opened.replace(hour=12)+timedelta(seconds=90)
     assert next_publication_deadline(sessions, 60, opened.replace(hour=12, minute=30)) == tomorrow+timedelta(minutes=60, seconds=90)
-    assert next_publication_deadline(sessions, 240, opened-timedelta(days=1)) == tomorrow+timedelta(minutes=240, seconds=90)
+    # The early close owes a partial four-hour bucket at its close; a full day owes 13:30 and then the close.
+    assert next_publication_deadline(sessions, 240, opened-timedelta(days=1)) == closed+timedelta(seconds=90)
+    assert next_publication_deadline(sessions, 240, closed) == tomorrow+timedelta(minutes=240, seconds=90)
+    assert next_publication_deadline(sessions, 240, tomorrow+timedelta(minutes=240)) == tomorrow.replace(hour=16, minute=0)+timedelta(seconds=90)
+    assert next_publication_deadline(sessions, 240, tomorrow.replace(hour=16, minute=0)) is None
     assert next_publication_deadline(sessions, 1440, opened-timedelta(days=1)) == closed+timedelta(seconds=90)
 
 

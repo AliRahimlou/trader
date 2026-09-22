@@ -170,7 +170,8 @@ def test_dst_and_early_close_calendar_preserve_real_session_boundaries():
     assert len(market.bars[15]) == 14
     assert len(market.bars[60]) == 3
     assert market.bars[60][-1].end.hour == 12
-    assert not market.bars[240]
+    # 4.5.0: the early close keeps one partial four-hour bucket ending at the close.
+    assert [(b.end, b.minutes) for b in market.bars[240]] == [(end, 240)]
     assert len(market.bars[1440]) == 1
     assert market.bars[1440][0].end == end
 
@@ -192,7 +193,8 @@ def test_missing_source_bar_prevents_hour_four_hour_and_daily_fabrication():
     market = at_time(sessions, {"QQQ": source}, source, sessions["2026-09-16"]["close"])[0]["QQQ"]
     assert len(market.bars[15]) == 25
     assert all(b.end != NOW for b in market.bars[60])
-    assert not market.bars[240]
+    # The missing 10:15 candle removes only the morning four-hour bucket; the closing bucket stands.
+    assert [b.end.astimezone(ET).hour for b in market.bars[240]] == [16]
     assert not market.bars[1440]
 
 
