@@ -71,11 +71,26 @@ The owner could not compare the app's levels with his lines because the levels w
 - **No weekly or monthly VWAP.** Leader period levels include the session VWAP only; weekly/monthly VWAP and anchored VWAP from his indicator are not computed.
 - Stops, targets, size, the 1.0 R minimum, the 4-of-7 quorum, the 60-minute window, the two-session event life and every tolerance remain app choices with no counterpart in the recording.
 
+## Replay evidence
+
+The integrated v5 analyzer was replayed on the same sixty days of QQQ IEX candles (39 evaluated sessions) and twenty sessions of actual VIX used for 4.4.0, without leader data (no sixty-day five-minute leader history is stored offline). These numbers describe rule frequency and geometry, not performance; no fills are simulated.
+
+| Measure | 4.4.0 rules | 4.5.0 rules |
+| --- | --- | --- |
+| Four-hour bars per session | 1 (09:30–13:30) | 2 (09:30–13:30 and 13:30–16:00) |
+| QQQ areas in play at a checkpoint | up to dozens of 0.1% bands, no cap | median 14, capped at the 16 nearest (swing-pivot candidates, two nonadjacent interactions) |
+| Distinct confirming events in 39 sessions | 54 (17 four-hour retests, 37 previous-day sweeps) | 76 (40 four-hour retests, 36 previous-day sweeps); 34 of 39 sessions had at least one |
+| Event-direction plans keeping a target | 75 of 108 | 116 of 152 (24 skipped by the 0.1% minimum stop) |
+| Median reward-to-risk of kept plans | 1.56 R | 1.46 R |
+| VIX gate true at random, long / short (495 bars) | 16.6% / 12.3% | 22.2% / 15.6% (consolidation bases added beside swing clusters) |
+
+The four-hour retest count more than doubles because a retest is now the return to the level rather than a directional close, and because afternoon extremes now form areas. The VIX gate loosens by about five points because a base counts as an area; it remains far below the 4.3 coin-flip rate. Leader period levels, the majority quorum and the sixty-minute window could not be replayed offline and will be observed live through the Look-left panel and the decision records.
+
 ## Owner action required
 
 1. After the updater installs 4.5.0, the header switch reads **Live money Off** and the status line **Review updated live rules**, although the saved global permission is still On: a saved permission is bound to the policy version it was accepted under, and `nasdaq-qqq-execution-v7-video-aligned` has not been accepted yet. **Both** strategy cards read **Review updated rules**. Neither engine can enter; existing positions and exits are unaffected. This is the expected screen, not a failed rollout or a switch the app turned off.
 2. **Socrates** is accepted through the global Live switch: click **Live money Off**, read the listed Socrates statements (afternoon bucket, swing-based areas, return-to-level retest with leader/VIX direction, two-session event life, period levels and 4-of-7 majority with a 60-minute window, VIX bases, PSQ short proxy), tick the acceptance and confirm. This writes the Socrates permission for the new policy version only.
-3. **4H Range Reversal** is accepted separately on its own card: click **Review updated rules**, read the crypto statements (unchanged: net-expectancy cost gate, gap-tolerant range, `range-reversal-v2`), tick and confirm. The crypto policy did not change; the card requires review because crypto acceptance is bound to the shared master policy version that changed with Socrates. If the card instead reads **Selected · global Live Off** and turns On by itself after step 2, its saved permission was already bound to the current crypto policy and no second click is needed.
+3. **4H Range Reversal** needs no separate click this time: its own policy (`range-spot-execution-v2`) is unchanged, so its card does not show **Review updated rules**; the crypto engine only waits for the master permission, which step 2 restores. After step 2 the card should read as selected with global Live On. If it shows **Review updated rules** anyway, click it, read and confirm as in 4.4.0.
 4. The saved purchase amounts (**$15** Socrates, **$15** Range Reversal) and market selection (**BTC/USD**) are carried forward unchanged; check them on the cards before accepting. The $15 Socrates amount now also sizes PSQ proxy purchases.
 5. Open the **Look left** panel and compare the drawn areas with the lines on your chart before the first session; a level you would not draw is the fastest way to catch a wrong interpretation, and the panel shows the interaction count behind each one.
 

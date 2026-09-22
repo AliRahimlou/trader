@@ -837,7 +837,7 @@ def location_events(bars, levels, method, now, policy=BASELINE_POLICY):
 
 def _zone_dict(zone):
     return {'low': zone.low, 'high': zone.high, 'source': zone.source,
-            'established_at': zone.established_at.isoformat()}
+            'established_at': zone.established_at.isoformat(), 'touches': zone.touches}
 
 
 def _empty_result(method, label):
