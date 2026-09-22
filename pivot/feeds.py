@@ -98,7 +98,7 @@ class ReadOnlyFeeds:
         ongoing day is discarded until the close has passed. Native ``v`` and
         ``vw`` are kept on the Bar so consumers can build session VWAP. A symbol
         with no completed candle fails the read unless ``required`` is False
-        (report-only context), in which case it is simply absent from the result.
+        (the leader daily frame, not a readiness gate), in which case it is simply absent from the result.
         """
         output = defaultdict(list)
         wanted = set(symbols)
@@ -184,11 +184,16 @@ class ReadOnlyFeeds:
         """Validated QQQ context frames plus native leader five-minute and daily candles.
 
         Leader daily candles (frames[1440]; video: the leaders' period-level
-        indicator plots prior day/week/month opens, highs and lows) are
-        report-only context: a failed daily read is recorded in
-        ``stock_leader_daily_error`` and leaves that frame out, never failing
-        the required refresh. App choice: nothing in the videos makes a daily
-        candle an entry input.
+        indicator plots prior day/week/month opens, highs and lows) are an
+        entry input: ``strategy.period_levels`` takes previous-week high/low/mid,
+        Monday levels and week/month opens from them for sessions outside the
+        five-minute window, and those levels feed the leader vote. They are not
+        a readiness gate (app choice): a failed daily read is recorded in
+        ``stock_leader_daily_error`` and never fails the required refresh.
+        Instead the last validated daily candles in the 60-day window are kept,
+        so one failed read cannot change the leader areas between polls. Only
+        when no validated daily candle was ever read for a symbol is the frame
+        absent; the levels that need it are then skipped and reported missing.
         """
         started = monotonic()
         try:
@@ -242,10 +247,21 @@ class ReadOnlyFeeds:
                 (1440, MAG7, daily_fetched, daily_context, 'leader_daily', start, daily_full),
             ):
                 for symbol in names:
-                    retained = [] if refetched else [bar for bar in cache[cache_key].get(symbol, [])
-                                                     if started_at(bar) is not None and earliest <= started_at(bar) < overlap]
+                    if minutes == 1440 and daily_error:
+                        # A failed daily read keeps every validated daily candle
+                        # already cached in the window (corrections of the
+                        # overlap day are simply not applied this poll), rather
+                        # than dropping the frame and silently changing the
+                        # leader period levels until the next successful read.
+                        previous = (cache or {}).get(cache_key, {}) if (
+                            cache and cache.get('schema') == STOCK_CACHE_SCHEMA and cache.get('feed') == self.feed) else {}
+                        retained = [bar for bar in previous.get(symbol, [])
+                                    if started_at(bar) is not None and earliest <= started_at(bar)]
+                    else:
+                        retained = [] if refetched else [bar for bar in cache[cache_key].get(symbol, [])
+                                                         if started_at(bar) is not None and earliest <= started_at(bar) < overlap]
                     # Required frames raised above when a symbol was absent; the
-                    # report-only daily frame may simply lack a symbol.
+                    # non-gating leader daily frame may simply lack a symbol.
                     combined = retained + incoming.get(symbol, [])
                     # Every frame history must validate before any cache is published.
                     if any(a.end >= b.end for a, b in zip(combined, combined[1:])):

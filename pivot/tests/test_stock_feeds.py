@@ -561,7 +561,7 @@ def test_health_reports_native_five_minute_scope_without_false_sixty_day_gaps():
         assert five['history_from'] == datetime(2026, 9, 8, 9, 30, tzinfo=ET).isoformat()
         assert 'native provider' in five['history_scope']
         assert day['status'] == 'current' and day['history_session_count'] == 9
-        assert 'report only' in day['history_scope']
+        assert 'not a readiness gate' in day['history_scope']
         assert timestamp(day['latest_at']) == datetime(2026, 9, 15, 16, 0, tzinfo=ET)
 
 

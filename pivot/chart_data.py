@@ -7,7 +7,8 @@ keeps the same lines on the one-hour chart, trades the retest of a break, and
 is read the same way on fifteen-minute candles. App interpretation: the
 areas drawn here are the app's mechanical repeated-interaction bands with
 their touch counts, its previous-day levels, the hourly events it is
-tracking, and its VIX swing clusters, so the owner can compare them with the
+tracking, and its VIX swing clusters and consolidation bases, so the owner
+can compare them with the
 lines he would draw. Nothing here authorizes or changes an order; it is
 display data only, bounded in size and JSON-safe, and it degrades to empty
 collections whenever an input field is missing.
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from math import isfinite
 
 from .models import MAG7
-from .strategy import BASELINE_POLICY, ET, VIX_MINUTES, leader_diagnostics, zones as swing_zones
+from .strategy import BASELINE_POLICY, ET, VIX_MINUTES, leader_diagnostics, vix_areas
 
 HOURLY_SESSIONS = 5
 FOUR_HOUR_BARS = 30
@@ -141,10 +142,10 @@ def _vix(setup, market):
     if isinstance(zone_rows, (list, tuple)):
         zone_list = _levels(zone_rows)
     elif len(bars) >= 3:
-        # Same construction as the analysis: swing clusters known before the
-        # two latest candles, at the declared VIX tolerance (app interpretation).
-        zone_list = _levels(swing_zones(bars[:-2], bars[-1].end - timedelta(minutes=VIX_MINUTES),
-                                        BASELINE_POLICY.vix_zone_tolerance))
+        # Same construction as the analysis (strategy.vix_diagnostics): swing
+        # clusters and consolidation bases known before the two latest
+        # candles, at the declared VIX tolerance and base rule (app interpretation).
+        zone_list = _levels(vix_areas(bars[:-2], bars[-1].end - timedelta(minutes=VIX_MINUTES), BASELINE_POLICY))
     else:
         zone_list = []
     direction = setup.get('direction')
@@ -206,6 +207,9 @@ def build(inputs, symbol='QQQ'):
             'levels': levels, 'previous_day': _previous_day(levels, market, at),
             'events': _events(setup, levels), 'vix': _vix(setup, inputs.get('vix')),
             'leaders': _leaders(setup, markets, at),
-            'notes': ['Bands are the app\'s 0.1% repeated-interaction areas from completed 4-hour candles with '
-                      'their touch counts; the video draws these lines by hand at repeated swing levels.',
+            'notes': ['QQQ bands are the app\'s \u00b10.1% areas around confirmed 4-hour swing pivots with at least two '
+                      'non-adjacent interactions (count shown); the video draws these lines by hand at repeated swing levels.',
+                      f'VIX areas are 15-minute repeated swing pivots (\u00b1{BASELINE_POLICY.vix_zone_tolerance:.0%}) and '
+                      f'consolidation bases (at least {BASELINE_POLICY.vix_base_bars} candles within '
+                      f'{BASELINE_POLICY.vix_base_range:.0%}), known before the two latest candles.',
                       'Stop and target lines are app execution choices; the recordings show neither.']}

@@ -198,8 +198,12 @@ def proxy_translation(proxy_ask, entry, stop, target):
     nothing about an inverse ETF. PSQ tracks -1x QQQ's daily move, so the same
     fractional distances are mirrored around the current PSQ ask, rounded to
     cents: stop = ask * (1 - (S - E) / E) below it, target = ask * (1 + (E - T) / E)
-    above it. Daily-reset decay and PSQ's own spread are accepted as the cost of
-    executing a setup this cash account could not otherwise take.
+    above it. ``entry`` must be the live QQQ price the entry is admitted at (the
+    QQQ bid a short would sell at), not the plan's hourly-close reference: the
+    PSQ exits then sit as far away as QQQ's structural stop and target levels
+    are from where QQQ trades now. Daily-reset decay and PSQ's own spread are
+    accepted as the cost of executing a setup this cash account could not
+    otherwise take.
     """
     proxy_ask, entry, stop, target = map(decimal, (proxy_ask, entry, stop, target))
     if not 0 < target < entry < stop or proxy_ask <= 0:
@@ -677,12 +681,17 @@ class Executor:
             self._gate('quote_validation')
             proxy_bid, proxy_ask = checked_quote(proxy_quote, self.now(), PROXY_SYMBOL)
             self._gate('price_geometry')
-            price, execution_stop, execution_target = proxy_translation(proxy_ask, reference, stop, target)
+            # Distances are measured from the live QQQ bid admitted above, not the
+            # plan's hourly-close reference, so the PSQ stop and target mirror
+            # where QQQ's structural stop and target levels are from here.
+            price, execution_stop, execution_target = proxy_translation(proxy_ask, bid, stop, target)
             if not 0 < execution_stop < proxy_bid <= proxy_ask < execution_target:
                 raise Waiting(f'{PROXY_SYMBOL} is not between its translated stop and target; skipping this short')
             proxy_geometry = {'symbol': PROXY_SYMBOL, 'kind': PROXY_KIND, 'reference': str(proxy_ask),
                               'bid': str(proxy_bid), 'stop': str(execution_stop), 'target': str(execution_target),
-                              'note': 'QQQ short distances mirrored onto a PSQ purchase; app interpretation, not a video rule'}
+                              'signal_price': str(bid),
+                              'note': ('QQQ short distances from the live QQQ bid to its stop and target, mirrored '
+                                       'onto a PSQ purchase; app interpretation, not a video rule')}
         self._gate('purchase_size')
         amount = authorization['settings']['target_dollars']
         buying_power = (self.portfolio.available(account['account_ref'], account['buying_power'])

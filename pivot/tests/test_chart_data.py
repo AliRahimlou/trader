@@ -110,7 +110,7 @@ def test_levels_events_previous_day_and_vix_reaction_are_translated():
     assert vix['reaction']['zone']['low'] == 18.3 and vix['reaction']['at'].endswith('+00:00')
     assert isinstance(vix['zones'], list)
     for zone in vix['zones']:
-        assert zone['source'] == '4h repeated pivot' and zone['touches'] >= 2
+        assert zone['source'] in ('VIX 15m repeated pivot', 'VIX consolidation base') and zone['touches'] >= 2
 
 
 def test_leaders_keep_the_nearest_zones_only():

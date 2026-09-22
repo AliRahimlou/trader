@@ -114,7 +114,7 @@ def test_vix_reaction_one_candle_back_confirms_a_short_while_price_holds_beyond_
     assert evidence['okay'] and evidence['reason'] == 'expected reaction present'
     assert evidence['reaction_at'] == SESSION + timedelta(hours=2) and evidence['age_minutes'] == 15
     zone = evidence['zone']
-    assert zone.source == '4h repeated pivot' and zone.touches == 2
+    assert zone.source == 'VIX 15m repeated pivot' and zone.touches == 2
     assert zone.low == pytest.approx(14.80 * 0.99) and zone.high == pytest.approx(14.80 * 1.01)
     assert zone.established_at == SESSION + timedelta(minutes=90)
     assert '11:30 ET candle, 15 min before the latest close' in evidence['detail']
@@ -185,7 +185,7 @@ def test_analysis_reports_the_vix_reaction_and_the_trace_stays_consistent():
     result = analyze(market, leaders, vix, now)
     assert result['state'] == 'SETUP_READY' and result['direction'] == 'short'
     assert result['vix_reaction_at'] == (SESSION + timedelta(hours=2)).isoformat()
-    assert result['vix_reaction_age_minutes'] == 15 and result['vix_zone']['source'] == '4h repeated pivot'
+    assert result['vix_reaction_age_minutes'] == 15 and result['vix_zone']['source'] == 'VIX 15m repeated pivot'
     assert result['vix_rule'] == {'zone_tolerance': 0.01, 'persistence_minutes': 30, 'base_bars': 4, 'base_range': 0.02}
     trace = build_decision_trace(result, {**leaders, 'QQQ': market}, vix, now)
     assert trace['vix']['reason'] == 'expected reaction present' and trace['vix']['gate_reached']

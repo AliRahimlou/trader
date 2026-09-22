@@ -4,7 +4,7 @@ Closed-bar geometry is an explicit interpretation; broker admission is checked s
 No score, FVG, first-clip tape/VWAP rule, or ETF volatility fallback is imported.
 """
 from datetime import datetime, time, timedelta, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
 from math import isfinite
@@ -280,11 +280,15 @@ def _session_date(bar):
 def _session_rows(daily, fives, before):
     """One row per observed session: OHLC plus when each figure became known.
 
-    Daily bars (frames[1440], when the feed supplies them) give a session's
-    high/low/close at their end; five-minute history fills any session the
-    daily frame lacks and dates the open at the first candle's close. An
-    open is only trusted when that first candle is the 09:35 ET candle, so a
-    partial five-minute history never invents a session open.
+    A session the five-minute history covers from its 09:35 ET candle takes
+    its open, high, low and close from those regular-session candles, even
+    when a provider daily bar exists: the daily bar may carry prints the
+    regular-session candles do not, and preferring it would make a level
+    depend on whether the daily read succeeded. Daily bars (frames[1440],
+    when the feed supplies them) give the high/low/close of the sessions
+    outside the five-minute window. A five-minute session that does not
+    start at 09:35 supplies no open and only fills a session the daily frame
+    lacks, so a partial five-minute history never invents a session open.
     """
     rows = {}
     for bar in daily:
@@ -301,13 +305,10 @@ def _session_rows(daily, fives, before):
         first, last = group[0], group[-1]
         opened = first.end.astimezone(ET)
         open_known = (opened.hour, opened.minute) == (9, 35)
-        row = rows.get(day)
-        if row is None:
+        if open_known or day not in rows:
             rows[day] = {'date': day, 'open': first.open if open_known else None,
                          'high': max(b.high for b in group), 'low': min(b.low for b in group),
                          'close': last.close, 'open_at': first.end, 'close_at': last.end, 'open_known': open_known}
-        elif open_known:
-            row.update(open=first.open, open_at=first.end)
     return [rows[day] for day in sorted(rows)]
 
 
@@ -589,9 +590,13 @@ def vix_base_zones(bars, before, base_bars=4, base_range=0.02):
     return [Zone(m['low'], m['high'], m['established_at'], 'VIX consolidation base', len(m['bars'])) for m in merged]
 
 
+VIX_PIVOT_SOURCE = 'VIX 15m repeated pivot'
+
+
 def vix_areas(bars, before, policy=BASELINE_POLICY):
     """Repeated swing pivots (1% bands) plus consolidation bases known before ``before``."""
-    return (zones(bars, before, policy.vix_zone_tolerance)
+    # zones() is frozen with its 4h label; the VIX clusters are 15-minute pivots.
+    return ([replace(zone, source=VIX_PIVOT_SOURCE) for zone in zones(bars, before, policy.vix_zone_tolerance)]
             + vix_base_zones(bars, before, policy.vix_base_bars, policy.vix_base_range))
 
 

@@ -439,7 +439,8 @@ def test_policy_text_states_the_video_aligned_rules_and_the_other_agents_lines()
     assert POLICY_VERSION == 'nasdaq-qqq-execution-v7-video-aligned' == POLICY['version']
     text = ' '.join(POLICY['summary'])
     assert ('Short setups are executed by buying PSQ, the ProShares inverse (−1x) Nasdaq-100 ETF, with the stop and '
-            'target translated by the same percentage distances; this is an instrument translation because the account '
+            'target translated by the same percentage distances, measured from the live QQQ bid at entry to the QQQ stop '
+            'and target levels; this is an instrument translation because the account '
             'cannot short. PSQ tracks −1x the DAILY move of the Nasdaq-100 and is held intraday only.') in POLICY['summary']
     assert 'Four-hour areas now include the afternoon (13:30–16:00) bucket.' in text
     for phrase in ('broken through or touched more than once', 'confirmed four-hour swing highs and lows',
@@ -448,7 +449,9 @@ def test_policy_text_states_the_video_aligned_rules_and_the_other_agents_lines()
                    'not the break direction', 'end of the next regular session', 'missing hourly candle inside a session',
                    'previous-session high, low and close', 'session VWAP', 'At least four of seven leaders',
                    'mixed → no trade', 'up to 60 minutes', 'consolidation bases', 'four consecutive 15-minute candles',
-                   'look left', 'app choice', 'app interpretation'):
+                   'look left', 'app choice', 'app interpretation',
+                   'price need not still be at the area', 'established before the event\'s break or sweep candle began',
+                   'use their regular-session five-minute candles', 'keeps the last validated ones'):
         assert phrase in text, phrase
     assert '180 minutes' not in text and 'five of seven' not in text
     book = rulebook()

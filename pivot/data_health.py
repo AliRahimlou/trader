@@ -7,9 +7,11 @@ from .history_health import frame_gaps, bucket_ends
 from .feeds import leader_history_sessions, LEADER_HISTORY_SESSIONS
 
 LABELS = {5: '5-minute', 15: '15-minute', 60: '1-hour', 240: '4-hour', 1440: 'Daily'}
-# Required frames gate readiness. The leader daily frame is period-level chart
-# context (video: the leaders' indicator plots prior day/week/month levels);
-# app choice: it is reported but never blocks an entry.
+# Required frames gate readiness. The leader daily frame feeds the leader
+# period levels (video: the leaders' indicator plots prior day/week/month
+# levels) for sessions outside the five-minute window, so it is an entry
+# input; app choice: it is reported but is not a readiness gate. A failed
+# daily read keeps the last validated daily candles (see feeds.stocks).
 REQUIRED_FRAMES = {'QQQ': (15, 60, 240, 1440), 'leader': (5,)}
 REPORT_ONLY_FRAMES = {'QQQ': (), 'leader': (1440,)}
 # A provider source timestamp this far ahead of the host clock is treated as
@@ -54,8 +56,8 @@ def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refr
         frames = []
         kind = 'QQQ' if symbol == 'QQQ' else 'leader'
         # Nasdaq needs the resampled context used by its location methods.
-        # Leaders use native five-minute areas/reactions; their daily frame is
-        # period-level context that is reported but never vetoes an entry.
+        # Leaders use native five-minute areas/reactions; their daily frame
+        # supplies older period levels and is reported, not a readiness gate.
         for minutes in REQUIRED_FRAMES[kind] + REPORT_ONLY_FRAMES[kind]:
             required = minutes in REQUIRED_FRAMES[kind]
             bars = closed(market, minutes, now) if market else []
@@ -76,10 +78,12 @@ def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refr
                 status, reason = 'incomplete', 'More history is required for level comparisons'
             else:
                 status, reason = 'current', 'Completed candles available'
+            if bars and not required and leader_daily_error:
+                reason += '; the latest daily read failed, so the last validated daily candles are kept: ' + leader_daily_error
             if minutes == 5:
                 scope = f'Last {LEADER_HISTORY_SESSIONS} trading sessions; native provider candles'
             elif not required:
-                scope = '60 calendar days; native provider daily candles (period-level chart context, report only)'
+                scope = '60 calendar days; native provider daily candles (period levels outside the 5-minute window; reported, not a readiness gate)'
             else:
                 scope = '60 calendar days'
             frames.append({'minutes': minutes, 'label': LABELS[minutes], 'status': status, 'required': required,
@@ -108,7 +112,7 @@ def stock_health(markets, sessions, now, *, error=None, fetch_seconds=None, refr
             'source': source, 'instruments': instruments, 'error': error, 'fetch_seconds': fetch_seconds,
             'refresh_mode': refresh_mode, 'last_full_refresh_at': full_at.isoformat() if full_at else None,
             'frame_policy': (f'Leader 5-minute candles are native Alpaca data for the last {LEADER_HISTORY_SESSIONS} trading sessions; '
-                             'leader daily candles are native Alpaca data over 60 calendar days and are period-level context only (reported, never an entry gate); '
+                             'leader daily candles are native Alpaca data over 60 calendar days; they supply the leader period levels for sessions the 5-minute window does not cover (sessions it covers use their regular-session 5-minute candles) and are reported, not a readiness gate; a failed daily read keeps the last validated daily candles; '
                              'QQQ 15-minute and higher context retains 60 calendar days. Full regular-session hourly buckets only; the closing half hour is excluded. '
                              '4-hour buckets are 09:30-13:30 and 13:30-16:00 New York: the closing bucket holds 150 minutes of data (less on an early close, where the buckets that fit are kept and the last ends at the close) but is still tagged 240 minutes. '
                              'Daily candles cover the actual full session, including early closes.')}
@@ -173,7 +177,7 @@ def expire_health(health, now):
             frame_until = frame.get('valid_until')
             if frame.get('status') == 'current' and frame_until and now >= timestamp(frame_until):
                 frame.update(status='stale', reason='A newer completed candle is due; waiting for a fresh update')
-                # Report-only frames (leader daily context) expire visibly but never gate readiness.
+                # Non-gating frames (the leader daily frame) expire visibly but never gate readiness.
                 if frame.get('required', True):
                     instrument['status'] = 'needs_attention'
         if (not at or not 0 <= (now-timestamp(at)).total_seconds() < 90
