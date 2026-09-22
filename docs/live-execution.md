@@ -1,6 +1,6 @@
 # Owner-controlled execution — September 16, 2026
 
-This document records the original execution release. Some details below are historical: the current leader rule is five agreeing with up to one opposing, AllSpark hosts the worker, and VIX has bounded recovery. See the [current method specification](research/current-method-specifications.md), [3.2 monitoring changes](production-v3.2.md), and [3.2.2 recovery audit](production-v3.2.2.md) for the current implementation and validation limits.
+This document records the original execution release. Some details below are historical: the current leader rule is five agreeing with up to one opposing (a conflicting leader is neutral since 4.4.0), AllSpark hosts the worker, VIX has time-based retries within its allowance, the entry cutoff is 30 minutes before the close, and a rejected stock order pauses Socrates only instead of switching global Live off. See the [4.4.0 release note](production-v4.4.0.md) for the current rule interpretations. See the [current method specification](research/current-method-specifications.md), [3.2 monitoring changes](production-v3.2.md), and [3.2.2 recovery audit](production-v3.2.2.md) for the current implementation and validation limits.
 
 ## What changed
 
