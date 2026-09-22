@@ -121,6 +121,10 @@ def test_paused_executor_still_manages_an_existing_trade_to_its_exit(engine, mon
     tick(e)
     assert calls, 'an active crypto trade keeps its reconciliation reads'
     assert len(b.sent) == 2 and crypto.active_trade('BTC/USD')['stage'] == 'open'
+    # The pause note never hides the status of a position that is still being managed.
+    e.message = 'Managing BTC/USD; stop working.'
+    assert e.snapshot()['message'] == ('Crypto is paused: Socrates-only focus. Existing crypto positions, '
+                                       'if any, keep their exits. Managing BTC/USD; stop working.')
     b.bid = b.ask = D('110')
     tick(e)
     assert [o['side'] for o in b.sent] == ['buy', 'sell', 'sell'] and b.sent[-1]['type'] == 'market'
@@ -256,6 +260,18 @@ def test_snapshot_reports_executor_pause_with_a_real_crypto_executor(engine, mon
     result = service.snapshot()
     assert result['crypto_execution']['paused'] is True and result['crypto_execution']['live_enabled'] is False
     assert result['crypto_execution']['message'].startswith('Crypto is paused')
+
+
+def test_snapshot_keeps_a_managed_crypto_position_status_while_paused(tmp_path, monkeypatch):
+    pause(monkeypatch)
+    service, _ = paused_snapshot_service(tmp_path)
+    note = 'Crypto is paused: Socrates-only focus. Existing crypto positions, if any, keep their exits.'
+    managed = {'message': note + ' Managing BTC/USD; stop working.', 'at': None, 'trades': [{'id': 't1'}], 'incidents': []}
+    service.crypto_executor = SimpleNamespace(snapshot=lambda: deepcopy(managed))
+    assert service.snapshot()['crypto_execution']['message'] == managed['message']
+    stale = {'message': 'Fixture ready', 'at': None, 'trades': [], 'incidents': []}
+    service.crypto_executor = SimpleNamespace(snapshot=lambda: deepcopy(stale))
+    assert service.snapshot()['crypto_execution']['message'] == note
 
 
 def test_snapshot_with_override_keeps_the_full_crypto_family(tmp_path, monkeypatch):

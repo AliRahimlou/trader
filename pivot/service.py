@@ -593,7 +593,12 @@ class Service:
             'message':'Crypto broker execution is not configured for this runtime.', 'at':None, 'trades':[], 'incidents':[]}
         result['crypto_execution']['paused'] = crypto_paused
         if crypto_paused:
-            result['crypto_execution']['message'] = feature_flags.CRYPTO_PAUSED_MESSAGE
+            message = result['crypto_execution'].get('message')
+            if not (result['crypto_execution'].get('trades') and isinstance(message, str)
+                    and message.startswith(feature_flags.CRYPTO_PAUSED_MESSAGE)):
+                # With no crypto position the pause note is the whole story; a managed position keeps
+                # the executor's status after the note (the executor already prefixes it).
+                result['crypto_execution']['message'] = feature_flags.CRYPTO_PAUSED_MESSAGE
         result['worker_health'] = self.worker_health()
         result['strategy_families'] = {
             'socrates': {'family_id':'socrates', 'label':'Socrates', 'execution_status':'owner_controlled',
@@ -668,6 +673,7 @@ class Service:
             gate = getattr(self.executor, 'entry_gate', None) if self.executor else None
             with self.lock:
                 assets = deepcopy(self._instrument_assets)
+            setup = result.get('setup')
             return build_socrates_readiness({
                 'execution_available': self.executor is not None, 'control': control,
                 'policy_version': POLICY_VERSION, 'socrates_selected': selected,
@@ -677,13 +683,29 @@ class Service:
                 'available_dollars': available, 'assets': assets, 'clock': result.get('clock'),
                 'data_health': result.get('data_health'), 'entry_allowance': result.get('entry_allowance'),
                 'deployment_gate': gate.status() if gate is not None else None,
-                'exposure': exposure, 'worker_health': result.get('worker_health'), 'setup': result.get('setup'),
+                'exposure': exposure, 'worker_health': result.get('worker_health'), 'setup': setup,
+                'setup_consumed': self._setup_consumed(setup),
             }, now)
         except Exception:
             logger.exception('Socrates readiness checklist could not be built')
             return {'checked_at': now.isoformat(), 'status': 'blocked',
                     'headline': 'Order readiness could not be checked just now; retrying.',
-                    'next_action': None, 'items': []}
+                    'next_action': None, 'action': None, 'items': []}
+
+    def _setup_consumed(self, setup):
+        """True when every ready event in this setup was already used (traded, attempted, rejected or
+        uncertain), which the executor never enters again. Same keys and store lookup as the executor."""
+        from .execution import Executor
+        if not isinstance(setup, dict) or setup.get('state') != 'SETUP_READY':
+            return False
+        candidates = setup.get('entry_candidates', [setup])
+        if not isinstance(candidates, list) or not candidates:
+            return False
+        try:
+            return all(isinstance(candidate, dict) and candidate.get('event_id')
+                       and self.store.entry_consumed(Executor._event_key(candidate)) for candidate in candidates)
+        except Exception:
+            return False
 
     @staticmethod
     def _socrates_pause_reason(events):

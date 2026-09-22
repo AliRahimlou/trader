@@ -58,7 +58,7 @@ test('every light theme token has a dark value in both the system and explicit d
 
 test('crypto sections stay in the page but out of the Socrates view, grayed when paused',()=>{
   assert.match(css,/#strategy-workspace\[data-view="socrates"\]~\.crypto-area\{display:none\}/);
-  assert.match(css,/\.crypto-area\.is-paused \.crypto-section\{opacity:[^;]+;filter:grayscale/);
+  assert.match(css,/\.crypto-area\.is-paused \.crypto-section:not\(\.has-exposure\)\{opacity:[^;]+;filter:grayscale/,'an open crypto position or incident is never grayed out');
   assert.match(css,/\.family-card\.is-paused\{opacity:/);
   for(const id of ['range-family','crypto-watchlist','crypto-review','crypto-management'])
     assert.ok(html.indexOf(`id="${id}"`)>html.indexOf('id="crypto-area"')&&html.indexOf('id="crypto-area"')>html.indexOf('id="strategy-workspace"'),`${id} sits below the Socrates workspace`);

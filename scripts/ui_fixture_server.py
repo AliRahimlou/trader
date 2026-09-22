@@ -358,7 +358,8 @@ class FixtureService(Service):
 
     def _readiness(self, now, review):
         scenario, closed = self.scenario, self.scenario == 'closed'
-        item = lambda id_, label, status, detail: {'id': id_, 'label': label, 'status': status, 'detail': detail}
+        item = lambda id_, label, status, detail: {'id': id_, 'label': label, 'status': status, 'detail': detail,
+                                                   'needs_owner': status == 'fail'}
         live_on = not review
         allowance = self.store.session_entry_allowance()['families']['socrates']
         items = [
@@ -399,7 +400,9 @@ class FixtureService(Service):
                     'Everything is set. Socrates is waiting for a setup.'}[status]
         next_action = ('Accept the updated Socrates rules: click Live money' if review else
                        'Check Alpaca, then turn Socrates back on' if scenario == 'paused' else None)
-        return {'checked_at': iso(now), 'status': status, 'headline': headline, 'next_action': next_action, 'items': items}
+        # An app pause names no control: Alpaca is checked before Socrates is turned back on.
+        return {'checked_at': iso(now), 'status': status, 'headline': headline, 'next_action': next_action,
+                'action': 'live' if review and scenario != 'paused' else None, 'items': items}
 
 
 def build(root, scenario='waiting', contract=True):

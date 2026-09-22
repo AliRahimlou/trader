@@ -1,6 +1,6 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
 import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert, CRYPTO_MARKETS, cryptoWatchMarkup, cryptoReviewMarkup, CRYPTO_PAUSE_TOOLTIP} from './strategy-families.mjs';
-import {readinessView,readinessAction,readinessMarkup,socratesTradeMarkup,SOCRATES_KEY_RULES} from './readiness.mjs';
+import {readinessView,readinessAction,readinessMarkup,readinessKey,readinessTimeText,socratesTradeMarkup,SOCRATES_KEY_RULES} from './readiness.mjs';
 import {dailyReviewView,dailyReviewMarkup,fetchDailyReview,previousReviewDay,reviewDay,validReviewDay} from './daily-review.mjs';
 import {chartWidth,defaultTheme,drawPriceChart,drawVixChart,levelsTableRows,chartStatus} from './chart.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
@@ -13,6 +13,7 @@ let familyConnectionUnavailable=false;
 let strategySaving=false,rangeDirty=false,strategyError='',pendingStrategy=null,strategyReview=null;
 let cryptoRechecking=false,cryptoRecheckMessage='',cryptoRecheckCompleted=false;
 let liveReviewFingerprint=null,strategyReviewFingerprint=null;
+let readinessRendered=null,readinessAnnounced='';
 let dailySelectedDay=null,dailyHistory=null,dailyReviewLoading=false,dailyReviewError='',dailyReviewGeneration=0;
 // Look-left chart: display only. app.js fetches, sizes and hands data to chart.mjs; it never trades.
 let chartData=null,chartTimeframe='60',chartFetching=false,chartFrame=0;
@@ -169,13 +170,19 @@ function renderStrategyControls() {
 // page, grayed, with its controls disabled and explained. Turning crypto Off and incident
 // rechecks stay available so existing positions can always be managed.
 const cryptoControls=()=>['range-toggle','range-review','save-range','run-both','range-amount',...CRYPTO_MARKETS.map(symbol=>'range-'+symbol.split('/')[0].toLowerCase())];
+// Buttons whose disabled state renderStrategyControls sets on every render; the amount and market
+// inputs have no other owner, so the pause must hand them back when it lifts.
+const CRYPTO_RENDERED_BUTTONS=new Set(['range-toggle','range-review','save-range','run-both']);
 function renderCryptoPause(p) {
   const paused=p.families[1].ownerPaused===true;
   for(const id of cryptoControls()){
     const node=$(id);
     if(paused&&!(id==='range-toggle'&&p.families[1].enabled)){node.disabled=true;node.setAttribute?.('aria-disabled','true');node.title=CRYPTO_PAUSE_TOOLTIP;}
-    else{node.removeAttribute?.('aria-disabled');if(node.title===CRYPTO_PAUSE_TOOLTIP)node.title='';}
+    else{if(!CRYPTO_RENDERED_BUTTONS.has(id))node.disabled=strategySaving;node.removeAttribute?.('aria-disabled');if(node.title===CRYPTO_PAUSE_TOOLTIP)node.title='';}
   }
+  // A crypto position or incident that still needs managing is never grayed out with the paused sections.
+  const crypto=snapshot?.crypto_execution;
+  $('crypto-management').classList?.toggle('has-exposure',!!(crypto?.trades?.length||crypto?.incidents?.length));
   $('range-control').classList?.toggle('is-paused',paused);$('range-control').title=paused?CRYPTO_PAUSE_TOOLTIP:'';
   $('crypto-area').classList?.toggle('is-paused',paused);
   $('range-pause-badge').hidden=!paused;$('crypto-area-badge').hidden=!paused;$('crypto-pause-banner').hidden=!paused;$('crypto-paused-note').hidden=!paused;
@@ -183,11 +190,25 @@ function renderCryptoPause(p) {
   const option=$('strategy-view').querySelector?.('option[value="range_reversal"]');
   if(option)option.textContent=paused?'Crypto (paused)':'Crypto';
 }
+// The Live review needs an enabled strategy that can trade: the header switch's own rule.
+const liveReviewable=p=>p.globalOn||p.enabled.some(f=>f.available);
+// Only the headline is announced, and only when it changes; a refresh that changes nothing keeps the
+// card and its button in place (focus and clicks survive) and only updates the check time.
+function announceReadiness(view) {
+  const message=`${view.label}: ${view.headline}`;
+  if(message!==readinessAnnounced){readinessAnnounced=message;$('readiness-announce').textContent=message;}
+}
 function renderReadiness() {
   const now=displayClock.now(),view=readinessView(snapshot,now,portfolioStatus(snapshot,appStatus(snapshot,now)));
-  const open=$('readiness-content').querySelector?.('details[open]');
-  $('readiness-content').innerHTML=readinessMarkup(view,readinessAction(view,snapshot));
-  const details=$('readiness-content').querySelector?.('details');if(open&&details)details.open=true;
+  const action=readinessAction(view,snapshot,{liveReviewable:liveReviewable(portfolioView(snapshot))}),key=readinessKey(view,action);
+  const content=$('readiness-content');
+  if(key!==readinessRendered){
+    const open=content.querySelector?.('details[open]'),focused=document.activeElement?.id==='readiness-action';
+    content.innerHTML=readinessMarkup(view,action);readinessRendered=key;
+    const details=content.querySelector?.('details');if(open&&details)details.open=true;
+    if(focused)$('readiness-action')?.focus?.();
+  }else{const stamp=content.querySelector?.('.readiness-time');if(stamp)stamp.textContent=readinessTimeText(view.checkedAt);}
+  announceReadiness(view);
   $('socrates-readiness').dataset.status=view.status;
   const trade=snapshot.execution?.trade;
   $('socrates-trade').innerHTML=trade?socratesTradeMarkup(trade,snapshot.execution?.message):'';
@@ -195,8 +216,9 @@ function renderReadiness() {
 }
 // A lost connection must never leave an old "Ready" on screen.
 function renderReadinessUnavailable() {
-  $('readiness-content').innerHTML=readinessMarkup(readinessView(null,0,{title:'App connection unavailable',
-    text:'Reconnecting to check whether Socrates can trade. Nothing shown here can authorize an order.'}));
+  const view=readinessView(null,0,{title:'App connection unavailable',
+    text:'Reconnecting to check whether Socrates can trade. Nothing shown here can authorize an order.'});
+  $('readiness-content').innerHTML=readinessMarkup(view);readinessRendered=null;announceReadiness(view);
   $('socrates-readiness').dataset.status='checking';
 }
 async function recheckCryptoIncidents() {
@@ -391,17 +413,21 @@ async function changeLive(enabled) {
 function openLiveReview() {
   if(!snapshot||toggling||strategySaving||saving)return;
   const p=portfolioView(snapshot);
-  if(p.globalOn)return;
+  // Same rule as the header switch: no dialog without an enabled strategy whose rules it can list.
+  if(p.globalOn||!liveReviewable(p))return;
   pendingLive=null;
   liveReviewFingerprint=permissionFingerprint();
   const review=snapshot.review_required===true||snapshot.portfolio?.socrates?.review_required===true;
   const lines=p.enabled.flatMap(f=>f.id==='socrates'?snapshot.execution_policy.summary:f.policy);
   $('live-title').textContent=review?'Accept the updated Socrates rules':'Turn Live money On';
   $('confirm-live').textContent=review?'Accept updated rules':'Turn Live money On';
-  $('live-summary').textContent=`Live money · ${p.scope}. ${p.enabled.map(f=>f.label+': '+money(f.target)+' per purchase').join(' · ')}`;
+  const version=p.enabled.some(f=>f.id==='socrates')&&typeof snapshot.execution_policy?.version==='string'?` Socrates rules version: ${snapshot.execution_policy.version}.`:'';
+  $('live-summary').textContent=`Live money · ${p.scope}. ${p.enabled.map(f=>f.label+': '+money(f.target)+' per purchase').join(' · ')}.${version}`;
   $('live-key-points').innerHTML=p.enabled.some(f=>f.id==='socrates')?SOCRATES_KEY_RULES.map(line=>`<li>${esc(line)}</li>`).join(''):'';
   $('live-rule-count').textContent=`(${lines.length})`;
   $('live-policy').innerHTML=lines.map(line=>`<li>${esc(line)}</li>`).join('');
+  // The box says "I've reviewed these rules", so the full list is shown, not folded away.
+  $('live-rules-details').open=true;
   $('live-data-note').textContent='Live money permits new entries for the strategies above when every check passes. Turning it Off stops all new entries; existing positions continue their exits.';
   $('live-error').textContent='';$('accept-policy').checked=false;$('confirm-live').disabled=true;$('live-dialog').showModal();
 }

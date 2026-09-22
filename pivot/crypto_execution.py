@@ -235,7 +235,9 @@ class CryptoRangeExecutor:
                 'paused': paused,
                 'review_required': control['enabled'] and control.get('policy') != POLICY_VERSION,
                 'control': {k: control[k] for k in ('enabled', 'symbols', 'target_dollars', 'generation')},
-                'message': feature_flags.CRYPTO_PAUSED_MESSAGE if paused else self.message,
+                # A position still being managed keeps its own status after the pause note.
+                'message': ((feature_flags.CRYPTO_PAUSED_MESSAGE + (' ' + self.message if trades and self.message else ''))
+                            if paused else self.message),
                 'at': self.last_at, 'markets': deepcopy(self.market_messages),
                 'trades': [{k: t.get(k) for k in visible if k in t} for t in trades],
                 'history': [{k: t.get(k) for k in (*visible, 'completed_at') if k in t} for t in self.store.history(10)],

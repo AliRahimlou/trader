@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
-import {readinessView,readinessAction,readinessMarkup,readinessItemsMarkup,socratesTradeMarkup,SOCRATES_KEY_RULES,READINESS_ORDER,READINESS_MAX_AGE_MS} from './readiness.mjs';
+import {readinessView,readinessAction,readinessMarkup,readinessItemsMarkup,readinessKey,readinessTimeText,socratesTradeMarkup,SOCRATES_KEY_RULES,READINESS_ORDER,READINESS_MAX_AGE_MS} from './readiness.mjs';
 import * as model from './model.mjs';
 import * as families from './strategy-families.mjs';
 import * as readiness from './readiness.mjs';
@@ -36,7 +36,7 @@ test('a failing or warning item can never be shown as ready',()=>{
 test('next action appears as a prominent callout only when present',()=>{
   const items=allOk();items[0]=item('live_permission','fail','Off.');
   const withAction=readinessView(readiness_('blocked',items,{next_action:'Accept the updated Socrates rules: click Live money'}),now);
-  const snapshot={review_required:true,live_enabled:false,portfolio:{global_live_enabled:false,socrates:{enabled:true,review_required:true}}};
+  const snapshot={review_required:true,live_enabled:false,execution_available:true,portfolio:{global_live_enabled:false,socrates:{enabled:true,review_required:true}}};
   const action=readinessAction(withAction,snapshot);
   assert.deepEqual(action,{kind:'live',label:'Accept updated rules'});
   const html=readinessMarkup(withAction,action);
@@ -51,10 +51,50 @@ test('the action button never offers Live money when it is already On, so it can
   const items=allOk();items[0]=item('live_permission','fail','Accepted under an old policy.');
   const view=readinessView(readiness_('blocked',items),now);
   assert.equal(readinessAction(view,{live_enabled:true,portfolio:{global_live_enabled:true}}),null);
-  assert.deepEqual(readinessAction(view,{live_enabled:false,portfolio:{global_live_enabled:false,socrates:{enabled:true}}}),{kind:'live',label:'Turn Live money On'});
+  assert.deepEqual(readinessAction(view,{live_enabled:false,execution_available:true,portfolio:{global_live_enabled:false,socrates:{enabled:true}}}),{kind:'live',label:'Turn Live money On'});
   const paused=allOk();paused[1]=item('strategy_enabled','fail','Paused by the app.');
   assert.deepEqual(readinessAction(readinessView(readiness_('blocked',paused),now),{portfolio:{global_live_enabled:true,socrates:{enabled:false}}}),{kind:'socrates',label:'Turn Socrates back on'});
   assert.equal(readinessAction(readinessView(readiness_('blocked',paused),now),{portfolio:{global_live_enabled:true,socrates:{enabled:true}}}),null);
+});
+
+test('the Live button needs a strategy the Live review can list, and follows the backend next step',()=>{
+  const items=allOk();items[0]=item('live_permission','fail','Rules need review.');items[1]=item('strategy_enabled','fail','Socrates is turned Off.');
+  const off={review_required:true,live_enabled:false,execution_available:true,portfolio:{global_live_enabled:false,socrates:{enabled:false,review_required:true}}};
+  // Socrates Off: the header switch is disabled, so no Live button; turning Socrates on comes first.
+  assert.deepEqual(readinessAction(readinessView(readiness_('blocked',items,{action:'socrates'}),now),off),{kind:'socrates',label:'Turn Socrates back on'});
+  assert.equal(readinessAction(readinessView(readiness_('blocked',items,{action:'live'}),now),off),null);
+  assert.equal(readinessAction(readinessView(readiness_('blocked',items),now),off,{liveReviewable:false})?.kind,'socrates','an older backend falls through to Socrates');
+  // Order sending not configured: the text asks for configuration and no button contradicts it.
+  const unconfigured=allOk();unconfigured[0]=item('live_permission','fail','Order sending is not configured on this server.');
+  const on={live_enabled:false,execution_available:false,portfolio:{global_live_enabled:false,socrates:{enabled:true}}};
+  assert.equal(readinessAction(readinessView(readiness_('blocked',unconfigured,{action:null,next_action:'Ask for the Alpaca live trading connection to be configured on AllSpark.'}),now),on),null);
+  // An app pause: the backend names no control, so Alpaca is reviewed before any button is offered.
+  const paused=allOk();paused[1]=item('strategy_enabled','fail','Socrates is Off. Pivot paused it: order rejected.');
+  assert.equal(readinessAction(readinessView(readiness_('blocked',paused,{action:null}),now),{portfolio:{global_live_enabled:true,socrates:{enabled:false}}}),null);
+});
+
+test('a failing item that clears by itself reads as Waiting, never as needing the owner or ready',()=>{
+  const items=READINESS_ORDER.map(id=>item(id));items[7]={...item('data_qqq','fail','Waiting for current QQQ 1-hour candles.'),needs_owner:false};
+  const view=readinessView(readiness_('waiting',items),now);
+  assert.equal(view.status,'waiting');assert.equal(view.label,'Waiting');assert.equal(view.counts.owner,0);assert.equal(view.counts.waiting,1);
+  assert.equal(readinessView(readiness_('ready',items),now).status,'waiting');
+  const html=readinessMarkup(view);
+  assert.match(html,/14 of 15 checks OK · 1 blocking until it clears · show all checks/);assert.doesNotMatch(html,/need action|needs action/);
+  assert.match(html,/Blocking until it clears/);
+  // Unknown or missing needs_owner keeps the safe reading.
+  items[3]=item('buying_power','fail','Not enough.');
+  const mixed=readinessView(readiness_('waiting',items),now);
+  assert.equal(mixed.status,'blocked');assert.equal(mixed.label,'Needs your action');
+  assert.match(readinessMarkup(mixed),/1 needs action · 1 blocking until it clears/);
+});
+
+test('the render key ignores the check time, so an unchanged card is not rebuilt',()=>{
+  const first=readinessView(readiness_('waiting'),now),later=readinessView({socrates_readiness:{...readiness_('waiting').socrates_readiness,checked_at:new Date(now-1000).toISOString()}},now);
+  assert.notEqual(first.checkedAt,later.checkedAt);
+  assert.equal(readinessKey(first),readinessKey(later));
+  assert.notEqual(readinessKey(first),readinessKey(readinessView(readiness_('waiting',allOk(),{headline:'Other'}),now)));
+  assert.notEqual(readinessKey(first,{kind:'live',label:'Turn Live money On'}),readinessKey(first));
+  assert.match(readinessTimeText(first.checkedAt),/^Checked \d{1,2}:\d{2}:\d{2} [AP]M ET$/);
 });
 
 test('unknown fields, statuses and order are tolerated without inventing a pass',()=>{
@@ -160,12 +200,37 @@ test('the next-step button opens the Live review dialog without sending a reques
   assert.equal(h.element('confirm-live').disabled,true);assert.equal(h.element('accept-policy').checked,false);
   assert.match(h.element('live-key-points').innerHTML,/4 of the 7/);
   assert.match(h.element('live-policy').innerHTML,/Socrates: rule one/);assert.doesNotMatch(h.element('live-policy').innerHTML,/Crypto rule/);
+  assert.equal(h.element('live-rules-details').open,true,'the full rule list is shown, not folded away');
+  assert.match(h.element('live-summary').textContent,/Socrates rules version: nasdaq-qqq-execution-v7-video-aligned\./);
   assert.equal(h.calls.length,0);
   h.element('accept-policy').checked=true;h.element('live-form').listeners.submit({preventDefault(){}});
   assert.equal(h.calls.length,1);
   assert.equal(h.calls[0].url,'https://example.test/pivot/api/live');assert.equal(h.calls[0].options.method,'PUT');
   assert.equal(h.calls[0].options.headers['X-Pivot-Intent'],'live-control');
   assert.deepEqual(JSON.parse(h.calls[0].options.body),{enabled:true,policy_version:'nasdaq-qqq-execution-v7-video-aligned'});
+});
+
+test('the Live review never opens without an enabled strategy whose rules it can list',()=>{
+  const state=reviewState();state.portfolio.socrates.enabled=false;
+  state.socrates_readiness.items[1]=item('strategy_enabled','fail','Socrates is turned Off.');state.socrates_readiness.action='socrates';
+  const h=harness(state);h.app.renderReadiness();
+  assert.match(h.element('readiness-content').innerHTML,/data-action="socrates">Turn Socrates back on/);
+  h.click('live');
+  assert.equal(h.element('live-dialog').open,false);assert.equal(h.calls.length,0);
+  h.click('socrates');
+  assert.equal(h.element('strategy-dialog').open,true);assert.equal(h.calls.length,0);
+});
+
+test('a refresh that changes nothing keeps the card in place and only updates the time',()=>{
+  const state=reviewState(),h=harness(state);h.app.renderReadiness();
+  const content=h.element('readiness-content'),stamp={textContent:''};
+  assert.match(h.element('readiness-announce').textContent,/^Needs your action: /);
+  content.innerHTML='kept';content.querySelector=selector=>selector==='.readiness-time'?stamp:null;
+  h.app.renderReadiness();
+  assert.equal(content.innerHTML,'kept','an unchanged card is not rebuilt');assert.match(stamp.textContent,/^Checked /);
+  h.app.state().snapshot.socrates_readiness.headline='Something changed.';h.app.renderReadiness();
+  assert.match(content.innerHTML,/Something changed\./);
+  assert.equal(h.element('readiness-announce').textContent,'Needs your action: Something changed.');
 });
 
 test('with Live money On the next-step handler never turns it Off',()=>{
@@ -198,4 +263,12 @@ test('paused crypto controls render grayed, disabled and explained without chang
   const u=harness(active);u.app.renderStrategyControls();
   assert.equal(u.element('range-toggle').disabled,false);assert.equal(u.element('range-toggle').attributes['aria-disabled'],undefined);
   assert.equal(u.element('crypto-pause-banner').hidden,true);assert.equal(u.element('range-control').classList.contains('is-paused'),false);
+  // Lifting the pause in the same page hands the amount and market inputs back.
+  h.app.state().snapshot.strategy_pause={};delete h.app.state().snapshot.portfolio.range_reversal.paused;delete h.app.state().snapshot.crypto_execution.paused;
+  h.app.renderStrategyControls();
+  for(const id of ['range-amount','range-btc','range-eth'])assert.equal(h.element(id).disabled,false,`${id} re-enabled`);
+  assert.equal(h.element('crypto-management').classList.contains('has-exposure'),false);
+  const open=reviewState();open.crypto_execution.trades=[{id:'t1',symbol:'BTC/USD',stage:'protected'}];
+  const o=harness(open);o.app.renderStrategyControls();
+  assert.equal(o.element('crypto-management').classList.contains('has-exposure'),true,'an open crypto position stays in full colour');
 });

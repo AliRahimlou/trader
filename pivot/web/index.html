@@ -15,7 +15,7 @@
   <h2 id="live-title">Turn Live money On</h2>
   <p id="live-summary" class="dialog-summary"></p>
   <ul id="live-key-points" class="key-points"></ul>
-  <details id="live-rules-details" class="rules-details"><summary>Read every rule before accepting <span id="live-rule-count"></span></summary><ul id="live-policy"></ul></details>
+  <details id="live-rules-details" class="rules-details" open><summary>Every rule you are accepting <span id="live-rule-count"></span></summary><ul id="live-policy"></ul></details>
   <p id="live-data-note" class="dialog-note"></p>
   <label class="accept"><input id="accept-policy" type="checkbox" required> I’ve reviewed these rules and want the app to place real orders when every check passes.</label>
   <p id="live-error" class="error" role="status"></p>
@@ -35,7 +35,8 @@
 
 <section id="socrates-readiness" class="card hero" aria-labelledby="readiness-title">
   <div class="hero-title-row"><h1 id="readiness-title">Socrates</h1><span class="hero-sub">Nasdaq levels · QQQ for longs · PSQ for shorts</span></div>
-  <div id="readiness-content" role="status" aria-live="polite"><p class="readiness-headline">Checking whether Socrates can trade…</p></div>
+  <p id="readiness-announce" class="visually-hidden" role="status" aria-live="polite"></p>
+  <div id="readiness-content"><p class="readiness-headline">Checking whether Socrates can trade…</p></div>
 </section>
 
 <section class="balance account-strip" aria-label="Alpaca account">

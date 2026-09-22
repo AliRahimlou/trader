@@ -259,7 +259,7 @@ input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
 .crypto-area{margin:8px 0 16px}
 .crypto-area-head{margin:18px 0 10px}
 #strategy-workspace[data-view="socrates"]~.crypto-area{display:none}
-.crypto-area.is-paused .crypto-section{opacity:.6;filter:grayscale(.9)}
+.crypto-area.is-paused .crypto-section:not(.has-exposure){opacity:.6;filter:grayscale(.9)}
 .paused-banner{background:var(--surface-soft);border-color:var(--border-strong);color:var(--text-2)}
 .range-observer.is-paused .observation{color:var(--muted)}
 .range-stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
