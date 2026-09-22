@@ -1,10 +1,20 @@
 """Bounded crypto admission with fake broker state; exits remain unrestricted."""
 from collections import Counter
 from datetime import timedelta
+import pytest
 
 from test_crypto_execution import engine, signal, tick
 from pivot.crypto_markets import SYMBOLS
 from pivot.crypto_store import CryptoStore
+
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
 
 
 def count_adapter_calls(broker):

@@ -53,14 +53,15 @@ export function operationStatus(snapshot, now=Date.now()) {
   const price=Number(quote?.ask);
   const target=Number(snapshot.settings?.target_dollars);
   const smallTarget=Number.isFinite(price)&&price>0&&Number.isFinite(target)&&target>0&&target<price;
-  const directionNote=smallTarget?`${money(target)} can support fractional QQQ buys. QQQ shorts require whole shares, so this target cannot open a short at the displayed price.`:'QQQ shorts require whole shares and broker approval. Purchase and stop-distance loss are different amounts.';
+  // 4.5: a short setup buys PSQ, the inverse ETF, so no QQQ short (and no whole share) is needed.
+  const directionNote=`Long setups buy QQQ. Short setups buy PSQ, the inverse Nasdaq-100 ETF, and close the same day.${smallTarget?` ${money(target)} buys a fraction of a share of either.`:''} The purchase amount is not the amount at risk; the stop decides the loss.`;
   return {
     workerLabel:!health?'Checking':health.ready?'Running':issues.some(row=>['stalled','stopped','error'].includes(row.status))?'Needs attention':'Starting',
     workerDetail:workers.map(row=>`${row.name}: ${row.status.replaceAll('_',' ')}`).join(' · '),
     incident:activeExit?'Exit needs attention: broker cancellation or the remaining exit is unconfirmed. New entries are paused. Check the QQQ position and orders in Alpaca. The app continues reconciliation without sending a competing order.':activePartial?`Partial entry needs attention: ${partial.filled_qty || 'some'} shares filled while cancellation is unconfirmed. New entries are paused. Check the position and orders in Alpaca.`:'',
     archiveLabel:archiveCurrent?'Recording inputs':archive?.status==='unavailable'?'Needs attention':'Waiting for inputs',
-    directionNote:directionNote+(snapshot.account?.shorting_enabled===false?' Short selling is also disabled on this Alpaca account.':''),
-    timingNote:'Current hourly methods: earliest same-day sweep confirmation 10:30 a.m. ET; break-and-retest 11:30 a.m. ET. These are eligibility times, not scheduled trades.',
+    directionNote:directionNote+(snapshot.account?.shorting_enabled===false?' Short selling is disabled on this Alpaca account, which is why shorts use PSQ.':''),
+    timingNote:'Checks run on completed hourly candles. A break stays valid until the end of the next session, and the entry must be at the level (within 0.4%). No new entries in the last 30 minutes of the session; open positions close 5 minutes before the close.',
   };
 }
 
@@ -75,10 +76,10 @@ export function sessionReview(snapshot) {
 }
 export function appStatus(snapshot, now=Date.now()) {
   const trade=snapshot.execution?.trade;
-  if(trade) return {title:`QQQ · ${trade.stage}`,text:snapshot.execution?.message || 'Managing the open position.'};
+  if(trade) return {title:`${typeof trade.symbol==='string'&&trade.symbol?trade.symbol:'QQQ'} · ${trade.stage}${trade.proxy?' · short via inverse ETF':''}`,text:snapshot.execution?.message || 'Managing the open position.'};
   if(snapshot.review_required || snapshot.execution?.review_required) return {
     title:'Review updated live rules',
-    text:'The execution rules have changed. Use the Live money switch at the top right to review the updated rules before allowing new entries.',
+    text:'The Socrates rules changed in an update. Choose “Accept updated rules” (or the Live money switch) to review them before new entries can resume.',
   };
   const gate=snapshot.deployment_gate;
   if(gate?.configured===true && (gate.locked===true || gate.hold_present===true || gate.error)) return {
@@ -187,7 +188,7 @@ export function leaderOverview(snapshot, now=Date.now()) {
     !synchronized?'Leader candles are still updating to the same observation time.':
     majority?`${majority==='long'?'Upward':'Downward'} majority${dissent.length?`; ${dissent.map(row=>row.symbol).join(', ')} ${dissent.length===1?'opposes':'oppose'}`:''}.`:
     'No majority of qualifying zone reactions.';
-  const window=Number.isFinite(rule?.persistence_minutes)?rule.persistence_minutes:15;
+  const window=Number.isFinite(rule?.persistence_minutes)?rule.persistence_minutes:60;
   return {current:true,rows,detail:`Recent leader reactions · ${up} up / ${down} down.`,ruleText,alignment,
     timing:`Reactions can start on different five-minute candles and remain valid for up to ${window} minutes with continued confirmation.`,
     scope:observational?'Market observations only · waiting for a Nasdaq event.':'Leader confirmation for the leading analysis event.'};

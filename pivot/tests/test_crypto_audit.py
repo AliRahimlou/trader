@@ -12,6 +12,16 @@ from pivot.policy import POLICY_VERSION
 from pivot.portfolio import Portfolio
 from pivot.store import Store
 
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
+
+
 NOW = datetime(2026, 9, 19, 12, 20, 5, tzinfo=timezone.utc)
 
 
@@ -302,6 +312,8 @@ def shared_engines(tmp_path):
     stock=Executor(venue,main,now=lambda:venue.at)
     stock.portfolio=portfolio
     crypto=CryptoRangeExecutor(venue,store,main,portfolio,now=lambda:venue.at)
+    # A plain helper cannot use monkeypatch: run both engines as when crypto is re-enabled.
+    portfolio.crypto_paused=crypto.paused=lambda:False
     return stock,crypto,venue,main,store,portfolio
 
 

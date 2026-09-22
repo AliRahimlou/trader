@@ -1,9 +1,19 @@
 """Durable live-check evidence; no credentials, network or real broker writes."""
 from copy import deepcopy
 from datetime import timedelta
+import pytest
 
 from test_crypto_execution import engine, signal, tick, NOW, CryptoRangeExecutor, D
 from pivot.crypto_store import CryptoStore
+
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
 
 
 def test_unchanged_checks_and_receipt_refreshes_do_not_write_poll_duplicates(engine):

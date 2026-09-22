@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .version import APP_VERSION
 from .deployment import EntryGate, PROTOCOL, SESSION_ENTRY_PROTOCOL, deployment_readiness
+from .feature_flags import CryptoPaused
 
 
 @dataclass(frozen=True)
@@ -316,6 +317,9 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
             # available through /api/live while installation holds this lock.
             with live_enable_guard(deployment_lock, True):
                 return decorate_snapshot(service.save_strategies(payload))
+        except CryptoPaused as exc:
+            # The release pause is a conflict with current state, not an invalid request.
+            raise HTTPException(409, detail=str(exc)) from None
         except (ValueError, TypeError, KeyError, ArithmeticError) as exc:
             raise HTTPException(422, detail=str(exc)) from None
         except FeedError:

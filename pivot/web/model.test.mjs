@@ -46,7 +46,7 @@ test('updated permission review is visible and does not alter the saved state',(
   const before=structuredClone(state);
   const status=appStatus(state,now);
   assert.equal(status.title,'Review updated live rules');
-  assert.match(status.text,/Live money switch at the top right/);
+  assert.match(status.text,/Accept updated rules/);assert.match(status.text,/Live money switch/);
   assert.deepEqual(state,before);
 });
 test('known closed session takes priority over an old waiting for VIX message',()=>{

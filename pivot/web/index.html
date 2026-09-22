@@ -1,43 +1,145 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="#f6f7f3"><title>Pivot · Video strategies</title><link rel="stylesheet" href="./style.css"></head>
-<body><div class="shell"><header><div class="brand-and-strategy"><a class="brand" href="./" aria-label="Pivot home"><span class="brand-icon">↗</span> pivot<span class="edition">VIDEO STRATEGIES</span></a><label class="strategy-select-label" for="strategy-view">Strategy view<select id="strategy-view" aria-describedby="strategy-view-note"><option value="socrates">Socrates</option><option value="range_reversal">4H Range Reversal</option><option value="all">All strategies</option></select></label></div><button id="live-status" class="live" aria-haspopup="dialog" disabled>Live money <strong>Checking…</strong><span class="switch" aria-hidden="true"></span></button></header>
-<dialog id="live-dialog" aria-labelledby="live-title"><form id="live-form"><h2 id="live-title">Turn on live money</h2><p id="live-summary" class="dialog-summary"></p><ul id="live-policy"></ul><p id="live-data-note" class="notice"></p><label class="accept"><input id="accept-policy" type="checkbox" required> I’ve reviewed these execution rules and want the app to place real orders when the checks pass.</label><p id="live-error" class="error" role="status"></p><div class="dialog-actions"><button id="cancel-live" type="button">Cancel</button><button id="confirm-live" class="primary" type="submit" disabled>Turn on live money</button></div></form></dialog>
-<dialog id="strategy-dialog" aria-labelledby="strategy-dialog-title"><form id="strategy-review-form"><h2 id="strategy-dialog-title">Review strategy execution</h2><p id="strategy-dialog-summary" class="dialog-summary"></p><ul id="strategy-dialog-policy"></ul><label class="accept"><input id="accept-strategy-policy" type="checkbox" required> I have reviewed these rules and want to enable the selected strategy settings.</label><p id="strategy-dialog-error" class="error" role="status"></p><div class="dialog-actions"><button id="cancel-strategy" type="button">Cancel</button><button id="confirm-strategy" class="primary" type="submit" disabled>Apply reviewed settings</button></div></form></dialog>
-<main><p id="strategy-view-note" class="strategy-view-note" role="status">Viewing Socrates. Changing the view does not change trading permission.</p><section class="balance"><div class="eyebrow">YOUR ALPACA ACCOUNT <span id="account-mode"></span></div><h1 id="balance">—</h1><p id="day-change" class="muted">Connecting to your account…</p><div class="account-meta"><span id="cash">Cash —</span><span id="buying-power">Buying power —</span><span id="account-updated">Waiting for account</span></div></section>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#f6f7f3" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#111814" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark"><title>Pivot · Socrates</title><link rel="stylesheet" href="./style.css"></head>
+<body><div class="shell">
+<header class="topbar">
+  <div class="brand-and-strategy">
+    <a class="brand" href="./" aria-label="Pivot home"><span class="brand-icon" aria-hidden="true">↗</span> pivot</a>
+    <label class="strategy-select-label" for="strategy-view">View<select id="strategy-view" aria-describedby="strategy-view-note"><option value="socrates">Socrates</option><option value="range_reversal">Crypto (paused)</option><option value="all">Everything</option></select></label>
+  </div>
+  <button id="live-status" class="live" type="button" aria-haspopup="dialog" disabled>Live money <strong>Checking…</strong><span class="switch" aria-hidden="true"></span></button>
+</header>
+
+<dialog id="live-dialog" aria-labelledby="live-title"><form id="live-form">
+  <h2 id="live-title">Turn Live money On</h2>
+  <p id="live-summary" class="dialog-summary"></p>
+  <ul id="live-key-points" class="key-points"></ul>
+  <details id="live-rules-details" class="rules-details" open><summary>Every rule you are accepting <span id="live-rule-count"></span></summary><ul id="live-policy"></ul></details>
+  <p id="live-data-note" class="dialog-note"></p>
+  <label class="accept"><input id="accept-policy" type="checkbox" required> I’ve reviewed these rules and want the app to place real orders when every check passes.</label>
+  <p id="live-error" class="error" role="status"></p>
+  <div class="dialog-actions"><button id="cancel-live" type="button">Cancel</button><button id="confirm-live" class="primary" type="submit" disabled>Turn Live money On</button></div>
+</form></dialog>
+<dialog id="strategy-dialog" aria-labelledby="strategy-dialog-title"><form id="strategy-review-form">
+  <h2 id="strategy-dialog-title">Review strategy settings</h2>
+  <p id="strategy-dialog-summary" class="dialog-summary"></p>
+  <details class="rules-details" open><summary>Rules for this change</summary><ul id="strategy-dialog-policy"></ul></details>
+  <label class="accept"><input id="accept-strategy-policy" type="checkbox" required> I have reviewed these rules and want to apply these strategy settings.</label>
+  <p id="strategy-dialog-error" class="error" role="status"></p>
+  <div class="dialog-actions"><button id="cancel-strategy" type="button">Cancel</button><button id="confirm-strategy" class="primary" type="submit" disabled>Apply reviewed settings</button></div>
+</form></dialog>
+
+<main>
+<p id="strategy-view-note" class="strategy-view-note" role="status">Showing Socrates. Changing this view does not change trading.</p>
+
+<section id="socrates-readiness" class="card hero" aria-labelledby="readiness-title">
+  <div class="hero-title-row"><h1 id="readiness-title">Socrates</h1><span class="hero-sub">Nasdaq levels · QQQ for longs · PSQ for shorts</span></div>
+  <p id="readiness-announce" class="visually-hidden" role="status" aria-live="polite"></p>
+  <div id="readiness-content"><p class="readiness-headline">Checking whether Socrates can trade…</p></div>
+</section>
+
+<section class="balance account-strip" aria-label="Alpaca account">
+  <div class="account-main"><span class="eyebrow">Alpaca account <span id="account-mode"></span></span><strong id="balance">—</strong><span id="day-change" class="muted">Connecting to your account…</span></div>
+  <div class="account-meta"><span id="cash">Cash —</span><span id="buying-power">Buying power —</span><span id="account-updated">Waiting for account</span></div>
+</section>
 <div id="account-warning" class="notice warning" hidden role="status"></div>
-<section class="status-bar"><span class="status-dot"></span><div><span id="execution-scope" class="execution-scope">Global Live · all enabled strategies</span><strong id="status-title">Starting the video rulebook</strong><p id="status-text">Checking saved permission, account and market data.</p></div><span id="analysis-updated" class="muted"></span></section>
+<section class="status-bar" aria-label="Live money status"><span class="status-dot" aria-hidden="true"></span><div><span id="execution-scope" class="execution-scope">Live money · enabled strategies</span><strong id="status-title">Starting</strong><p id="status-text">Checking saved permission, account and market data.</p></div><span id="analysis-updated" class="muted"></span></section>
 <div id="operation-incident" class="notice warning" role="alert" hidden></div>
 <div id="global-crypto-alert" class="notice warning" role="alert" hidden></div>
+
 <section id="strategy-controls" class="card strategy-controls" aria-labelledby="strategy-controls-title">
-<div class="section-heading"><h2 id="strategy-controls-title">Strategies running</h2><button id="run-both" class="secondary" type="button" disabled>Run both strategies</button></div>
-<p id="entry-allowance" class="help" role="status">Checking each strategy’s session entry allowance…</p>
-<p id="strategy-run-summary" class="help">Checking saved strategy selections…</p>
-<div id="family-control-grid" class="family-control-grid"><article id="socrates-control"><div class="section-heading"><h3>Socrates</h3><button id="socrates-toggle" class="secondary" type="button" disabled>Checking…</button></div><strong id="socrates-run-state">Checking status</strong><p id="socrates-run-detail" class="help"></p><p class="help">QQQ · change its purchase amount in the Socrates purchase-size box.</p></article>
-<article id="range-control"><div class="section-heading"><h3>4H Range Reversal</h3><button id="range-toggle" class="secondary" type="button" disabled>Checking…</button></div><strong id="range-run-state">Checking status</strong><button id="range-review" class="secondary" type="button" hidden>Review updated rules</button><p id="range-run-detail" class="help"></p>
-<form id="range-settings-form"><label class="amount-label" for="range-amount">Crypto target per purchase ($)<input id="range-amount" type="number" min="1" max="200000" step="0.01" value="5.00" required></label><label class="symbol-option"><input id="range-btc" type="checkbox" checked> BTC/USD · video market</label><label class="symbol-option"><input id="range-eth" type="checkbox"> ETH/USD · unvalidated adaptation</label><label class="symbol-option"><input id="range-sol" type="checkbox"> SOL/USD · additional market</label><label class="symbol-option"><input id="range-link" type="checkbox"> LINK/USD · additional market</label><label class="symbol-option"><input id="range-xrp" type="checkbox"> XRP/USD · additional market</label><p class="help">Checked markets may trade when saved and Live is On. All five markets are watched for data and setups. Up to two crypto positions can be active at once. New markets use the same rules; the video demonstrates Bitcoin only. Long entries only; this route cannot open shorts.</p><button id="save-range" class="secondary" type="submit" disabled>Save crypto settings</button></form></article></div>
-<p id="strategy-save-message" class="help" role="status">Strategy Off stops its new entries. Existing positions continue their exits.</p>
+  <div class="section-heading"><h2 id="strategy-controls-title">Socrates controls</h2></div>
+  <p id="strategy-run-summary" class="help">Checking saved strategy selections…</p>
+  <p id="entry-allowance" class="help" role="status">Checking today’s entry allowance…</p>
+  <div id="family-control-grid" class="family-control-grid">
+    <article id="socrates-control" class="family-card">
+      <div class="section-heading"><h3>Socrates</h3><button id="socrates-toggle" class="secondary" type="button" disabled>Checking…</button></div>
+      <strong id="socrates-run-state" class="family-state">Checking status</strong>
+      <p id="socrates-run-detail" class="help"></p>
+    </article>
+    <article id="range-control" class="family-card">
+      <div class="section-heading"><h3>4H Range Reversal <span class="muted">crypto</span> <span id="range-pause-badge" class="pill paused" hidden>Paused</span></h3><button id="range-toggle" class="secondary" type="button" disabled>Checking…</button></div>
+      <strong id="range-run-state" class="family-state">Checking status</strong>
+      <button id="range-review" class="secondary" type="button" hidden>Review updated rules</button>
+      <p id="range-run-detail" class="help"></p>
+      <details class="evidence range-settings"><summary>Crypto purchase and markets</summary>
+        <form id="range-settings-form"><label class="amount-label" for="range-amount">Crypto target per purchase ($)<input id="range-amount" type="number" min="1" max="200000" step="0.01" value="5.00" required></label>
+          <label class="symbol-option"><input id="range-btc" type="checkbox" checked> BTC/USD · video market</label><label class="symbol-option"><input id="range-eth" type="checkbox"> ETH/USD · unvalidated adaptation</label><label class="symbol-option"><input id="range-sol" type="checkbox"> SOL/USD · additional market</label><label class="symbol-option"><input id="range-link" type="checkbox"> LINK/USD · additional market</label><label class="symbol-option"><input id="range-xrp" type="checkbox"> XRP/USD · additional market</label>
+          <p class="help">Checked markets may trade when saved and Live money is On. Long entries only; this route cannot open shorts. The video demonstrates Bitcoin only.</p>
+          <button id="save-range" class="secondary" type="submit" disabled>Save crypto settings</button></form>
+      </details>
+      <button id="run-both" class="secondary run-both" type="button" disabled>Run Socrates and crypto together</button>
+    </article>
+  </div>
+  <p id="crypto-paused-note" class="paused-note" hidden>Crypto (4H Range Reversal) is paused: Socrates-only focus. Its settings are kept; choose View → Crypto to see them.</p>
+  <p id="strategy-save-message" class="help" role="status">Turning a strategy Off stops its new entries. Existing positions continue their exits.</p>
 </section>
+
+<div id="strategy-workspace" class="grid">
+  <div class="workspace-main">
+    <section id="socrates-family" aria-labelledby="watch-title">
+      <div class="section-heading"><h2 id="watch-title">What Socrates is watching</h2><span>QQQ · two entry methods</span></div>
+      <p id="method-timing" class="help"></p>
+      <div id="socrates-trade" hidden></div>
+      <div id="strategy-cards"></div>
+      <section id="look-left" class="card look-left" aria-labelledby="look-left-title">
+        <div class="section-heading"><h3 id="look-left-title">Look left · QQQ levels</h3><div class="timeframe-toggle" role="group" aria-label="QQQ chart timeframe"><button id="chart-1h" class="secondary" type="button" data-timeframe="60" aria-pressed="true">1 hour</button><button id="chart-4h" class="secondary" type="button" data-timeframe="240" aria-pressed="false">4 hour</button></div></div>
+        <p id="chart-status" class="help wait" role="status">Waiting for chart data…</p>
+        <p class="help chart-legend"><span><i class="swatch band"></i>Level the app watches (touches)</span><span><i class="swatch event"></i>Current event level</span><span><i class="swatch prev"></i>Previous-day high / low</span><span><i class="swatch stop"></i>Stop</span><span><i class="swatch target"></i>Target</span></p>
+        <div class="chart-scroll" tabindex="0" aria-label="QQQ chart, scroll sideways on small screens"><canvas id="qqq-chart" width="560" height="300" role="img" aria-label="QQQ candlesticks with the app's watched levels, previous-day lines and the current event"></canvas></div>
+        <h4 class="chart-subtitle">Actual VIX · 15-minute candles</h4>
+        <p class="help chart-legend"><span><i class="swatch vix"></i>VIX swing level or consolidation base</span><span><i class="swatch reaction"></i>Level of the current VIX reaction</span></p>
+        <div class="chart-scroll" tabindex="0" aria-label="VIX chart, scroll sideways on small screens"><canvas id="vix-chart" width="560" height="180" role="img" aria-label="Actual VIX fifteen-minute candles with the app's swing levels and consolidation bases"></canvas></div>
+        <details class="evidence"><summary>Every watched level, nearest first</summary>
+          <div class="chart-scroll"><table id="levels-table" class="levels-table"><caption class="help">Established levels, nearest to the latest hourly close first</caption><thead><tr><th scope="col">Price band</th><th scope="col">Source</th><th scope="col">Established</th><th scope="col">Touches</th><th scope="col">From close</th></tr></thead><tbody><tr><td colspan="5" class="muted">Waiting for established levels.</td></tr></tbody></table></div>
+        </details>
+        <details class="evidence"><summary>How these charts relate to the video</summary>
+          <p>Video: Socrates draws a handful of lines by hand at four-hour swing points that price broke or touched more than once, keeps them on the one-hour chart, and trades the retest. The app’s version: ±0.1% bands around four-hour swing highs and lows touched at least twice (the 16 nearest are watched). Stop and target lines are the app’s choices; the video never shows them. Nothing on these charts places an order.</p>
+          <p>Video: “look left” two to three days on the VIX for where it last turned or based. The app’s version: repeated 15-minute swing levels (±1%) and consolidation bases (four or more candles within 2%); the highlighted band is where the current VIX reaction happened.</p>
+        </details>
+      </section>
+      <div id="market-overview"></div>
+    </section>
+    <section id="session-review" class="card"><h2>Socrates · why no trade today?</h2><p class="help">Loading session history…</p></section>
+  </div>
+  <aside id="socrates-sidebar">
+    <section id="socrates-purchase" class="card purchase"><div class="section-heading"><h2>Purchase size</h2><span>Socrates</span></div><p id="current-size" class="muted">Loading saved settings…</p>
+      <form id="settings-form"><label id="amount-field" class="amount-label">Target per purchase<div class="amount-input"><span>$</span><input id="amount" name="amount" type="number" inputmode="decimal" min="1" max="1000000000000" step="0.01" value="25" required aria-label="Target purchase amount in dollars"></div></label><p id="size-explanation" class="help"></p><p id="direction-capability" class="help"></p><button class="primary" id="save-size" type="submit" disabled>Save purchase size</button><p id="save-message" role="status" class="help">Saving a size does not turn on live trading.</p></form></section>
+    <section id="socrates-data" class="card"><div class="section-heading"><h2>Data connections</h2><span>Socrates</span></div><div id="data-connections" class="connections"></div><p class="help">Missing data keeps Socrates waiting. No substitute signals are used.</p></section>
+  </aside>
+</div>
+
+<section class="card holdings"><div class="section-heading"><h2>Alpaca positions & orders</h2><span id="holding-count"></span></div><div id="holdings"><p class="muted">Waiting for the broker snapshot…</p></div></section>
+
 <section id="daily-review" class="card daily-review"><details id="daily-review-details"><summary><strong id="daily-review-title">Today’s trading review</strong><span id="daily-review-summary">Waiting for saved records</span></summary><div class="daily-review-body"><nav class="daily-review-nav" aria-label="Trading review date"><button id="daily-review-today" class="secondary" type="button">Today</button><button id="daily-review-previous" class="secondary" type="button">Previous day</button><form id="daily-review-date-form"><label for="daily-review-day">Review date <input id="daily-review-day" type="date" required></label><button id="daily-review-show" class="secondary" type="submit">Show review</button></form></nav><p id="daily-review-message" class="help" role="status" aria-live="polite" hidden></p><div id="daily-review-content"><p class="help">Waiting for the saved daily review.</p></div></div></details></section>
-<section id="crypto-watchlist" class="card"><div class="section-heading"><h2>Crypto watchlist</h2><span>Five markets · 24/7</span></div><p class="help">Watching a market does not select it for trading. Chart setup counts are reconstructed from today’s available candles; shorts cannot be traded on this Alpaca route.</p><div id="crypto-watch-content"></div></section>
-<section id="crypto-review" class="card"><h2>Crypto · why no trade today?</h2><div id="crypto-review-content"></div></section>
-<section id="crypto-management" class="card" aria-labelledby="crypto-management-title"><div class="section-heading"><h2 id="crypto-management-title">Crypto positions & execution</h2><span>4H Range Reversal</span></div><p id="crypto-execution-status" class="help">Waiting for execution status…</p><div id="crypto-incidents" role="alert"></div><button id="crypto-recheck" class="secondary" type="button" hidden>Recheck crypto incidents</button><p id="crypto-recheck-message" class="help" role="status" aria-live="polite" hidden></p><div id="crypto-trades"></div><details class="evidence"><summary>Recent crypto outcomes</summary><div id="crypto-history"><p>No completed crypto outcomes recorded.</p></div></details></section>
-<div id="strategy-workspace" class="grid"><div><section id="socrates-family" aria-labelledby="watch-title"><div class="section-heading"><h2 id="watch-title">Socrates · what we’re watching</h2><span>Nasdaq · two entry methods</span></div><p id="method-timing" class="help"></p><div id="market-overview"></div>
-<section id="look-left" class="card look-left" aria-labelledby="look-left-title"><div class="section-heading"><h3 id="look-left-title">Look left · QQQ levels</h3><div class="timeframe-toggle" role="group" aria-label="QQQ chart timeframe"><button id="chart-1h" class="secondary" type="button" data-timeframe="60" aria-pressed="true">1h</button><button id="chart-4h" class="secondary" type="button" data-timeframe="240" aria-pressed="false">4h</button></div></div>
-<p id="chart-status" class="help wait" role="status">Waiting for chart data…</p>
-<div class="chart-scroll"><canvas id="qqq-chart" width="560" height="300" role="img" aria-label="QQQ candlesticks with the app's established areas, previous-day lines and the current event"></canvas></div>
-<p class="help chart-legend"><span><i class="swatch band"></i>Established area · source and touch count</span><span><i class="swatch event"></i>Current event area</span><span><i class="swatch prev"></i>Previous-day high / low</span><span><i class="swatch stop"></i>Stop</span><span><i class="swatch target"></i>Target</span></p>
-<p class="help">Video rule: levels are drawn by hand at four-hour swing points that were broken or touched repeatedly, kept on the one-hour chart, and the retest of a break is traded. App interpretation: the bands are the app's 0.1% repeated-interaction areas from completed four-hour candles; stop and target lines are app execution choices the recordings never show. Nothing on this chart places an order.</p>
-<h4 class="chart-subtitle">Actual VIX · 15 minutes</h4>
-<div class="chart-scroll"><canvas id="vix-chart" width="560" height="180" role="img" aria-label="Actual VIX fifteen-minute candles with the app's swing areas"></canvas></div>
-<p class="help">Video rule: look two to three days left on the VIX for the last place it pivoted. App interpretation: repeated swing extremes from completed fifteen-minute actual-index candles at a 1% tolerance; the highlighted band is the area of the current reaction.</p>
-<div class="chart-scroll"><table id="levels-table" class="levels-table"><caption class="help">Established areas, nearest to the latest hourly close first</caption><thead><tr><th scope="col">Price band</th><th scope="col">Source</th><th scope="col">Established</th><th scope="col">Touches</th><th scope="col">From close</th></tr></thead><tbody><tr><td colspan="5" class="muted">Waiting for established areas.</td></tr></tbody></table></div>
-</section><div id="strategy-cards"></div></section>
-<section id="range-family" aria-labelledby="range-title" hidden><div class="section-heading"><h2 id="range-title">4H Range Reversal</h2><span>Alpaca crypto spot · long entries</span></div><div id="range-content"><p class="muted">Waiting for native five-minute observations…</p></div></section>
-<section id="session-review" class="card"><h2>Socrates · why no trade today?</h2><p class="help">Loading session history…</p></section>
-<section class="card holdings"><div class="section-heading"><h2>Alpaca positions & orders</h2><span id="holding-count"></span></div><div id="holdings"><p class="muted">Waiting for the broker snapshot…</p></div></section></div>
-<aside id="socrates-sidebar"><section id="socrates-purchase" class="card purchase"><div class="section-heading"><h2>Purchase size</h2><span>Socrates execution</span></div><p id="current-size" class="muted">Loading saved settings…</p><form id="settings-form"><label id="amount-field" class="amount-label">Target per purchase<div class="amount-input"><span>$</span><input id="amount" name="amount" type="number" inputmode="decimal" min="1" max="1000000000000" step="0.01" value="25" required aria-label="Target purchase amount in dollars"></div></label><p id="size-explanation" class="help"></p><p id="direction-capability" class="help"></p><button class="primary" id="save-size" type="submit" disabled>Save settings</button><p id="save-message" role="status" class="help">These settings do not turn on live trading.</p></form></section>
-<section id="socrates-data" class="card"><div class="section-heading"><h2>Socrates data connections</h2></div><div id="data-connections" class="connections"></div><p class="help">Missing confirmations keep a strategy waiting. No substitute signals are used.</p></section></aside></div>
-<section id="socrates-rules" class="card review"><details id="audit"><summary><span><span class="eyebrow">VIDEO ALIGNMENT</span><strong>Socrates · video rules & execution choices</strong></span><span class="pill">Owner controlled</span></summary><div class="review-content"><p>This runtime evaluates the two Nasdaq entry methods from your primary recordings independently. The first recording is supplementary and adds no entry requirements. Candle-based interpretations use completed bars and pre-existing levels.</p><div class="review-grid"><article><h3>17:25 recording · Nasdaq confirmation</h3><p>Mark the previous-day high and low → wait for a break or sweep → check the technology leaders → confirm the VIX reacting from its own zone.</p><small>00:01–01:36</small></article><article><h3>18:11 recording · Level preparation</h3><p>Premark repeated 4-hour levels → move to 1 hour → wait for break/retest → confirm technology-stock zone reactions and the VIX.</p><small>00:18–02:27</small></article></div><h3>How execution works</h3><p>QQQ is the chosen Alpaca instrument. Mechanical choices fill in details absent from the clips: fixed areas confirmed by repeated touches or crossings, a 0.1% band around confirmed four-hour swing points touched more than once, five-minute leader reactions at repeated-interaction bands and period levels, at least four of seven leaders agreeing with at most one opposing (video: majority), reactions valid for up to 60 minutes, a stop beyond the event/zone and a target at the next opposing level. The videos do not specify the colored-area formula; this app uses a documented approximation. Reactions may begin on different five-minute candles and last at most 15 minutes with continued confirmation. Current leader observations are checked at the same completed-candle time. The hourly and four-hour structure overview is descriptive context, not an extra entry rule. Opportunities expire 180 minutes after the original event or at session change. Review the full rules when turning on live money.</p><p>The saved dollar amount is the purchase target. Exits close the shares held, so proceeds vary with price. Only one position is managed at a time. New entries stop 30 minutes before market close; the app starts closing positions five minutes before close.</p><h3>Current limits</h3><p>Actual VIX data is required for every entry. A missing or delayed feed keeps the app waiting even when Live money is on. Stocks currently use the labeled provider feed. Offline broker simulations cover order handling; paper-account and live fills have not been verified. Historical testing has not established profitability.</p><p>Broker stops are submitted after fills. Fractional DAY stops expire at the session’s end. The host machine must remain running and connected for entry management, target exits and end-of-day exits. Buy stops for short positions may be converted to stop-limit orders by Alpaca.</p></div></details></section>
+
+<section id="crypto-area" class="crypto-area" aria-labelledby="crypto-area-title">
+  <div class="section-heading crypto-area-head"><h2 id="crypto-area-title">Crypto · 4H Range Reversal</h2><span id="crypto-area-badge" class="pill paused" hidden>Paused</span></div>
+  <p id="crypto-pause-banner" class="notice paused-banner" hidden>Crypto is paused: Socrates-only focus. Existing crypto positions, if any, keep their exits.</p>
+  <section id="range-family" class="crypto-section" aria-labelledby="range-title" hidden><div class="section-heading"><h3 id="range-title">Signals</h3><span>Alpaca crypto spot · long entries</span></div><div id="range-content"><p class="muted">Waiting for native five-minute observations…</p></div></section>
+  <section id="crypto-watchlist" class="card crypto-section"><div class="section-heading"><h3>Crypto watchlist</h3><span>Five markets · 24/7</span></div><p class="help">Watching a market does not select it for trading. Shorts cannot be traded on this Alpaca route.</p><div id="crypto-watch-content"></div></section>
+  <section id="crypto-review" class="card crypto-section"><h3>Crypto · why no trade today?</h3><div id="crypto-review-content"></div></section>
+  <section id="crypto-management" class="card crypto-section" aria-labelledby="crypto-management-title"><div class="section-heading"><h3 id="crypto-management-title">Crypto positions & execution</h3><span>4H Range Reversal</span></div><p id="crypto-execution-status" class="help">Waiting for execution status…</p><div id="crypto-incidents" role="alert"></div><button id="crypto-recheck" class="secondary" type="button" hidden>Recheck crypto incidents</button><p id="crypto-recheck-message" class="help" role="status" aria-live="polite" hidden></p><div id="crypto-trades"></div><details class="evidence"><summary>Recent crypto outcomes</summary><div id="crypto-history"><p>No completed crypto outcomes recorded.</p></div></details></section>
+</section>
+
+<section id="socrates-rules" class="card review"><details id="audit"><summary><span><span class="eyebrow">Video alignment · version 4.5</span><strong>Socrates rules in plain words</strong></span><span class="pill">Owner controlled</span></summary><div class="review-content">
+  <ol class="rule-steps">
+    <li><b>Mark the levels.</b> Four-hour swing highs and lows that price touched at least twice in the last five to six weeks, including the afternoon four-hour candle, plus the previous day’s high and low. The 16 nearest are watched.</li>
+    <li><b>Wait for a break and a return.</b> An hourly candle closes through a level, then price comes back to it. The break stays valid until the end of the next session. The entry must be at the level (within 0.4%).</li>
+    <li><b>Ask the leaders.</b> At least 4 of the 7 tech leaders react at their own levels in the same direction, at most 1 against, within 60 minutes. Mixed means no trade.</li>
+    <li><b>Confirm with the VIX.</b> The actual VIX turns the opposite way at one of its own levels or consolidation bases.</li>
+    <li><b>Plan the trade.</b> Stop beyond the level; target at the next level that is at least as far away as the stop (1R minimum). No qualifying target means no trade.</li>
+    <li><b>Place it.</b> Longs buy QQQ. Shorts buy PSQ, the inverse Nasdaq-100 ETF, with the stop and target translated by percentage, and close the same day.</li>
+  </ol>
+  <h3>Limits that always apply</h3>
+  <p>One Socrates position at a time. At most two entry attempts per New York session (rejected or uncertain orders count). No new entries in the last 30 minutes; open positions close 5 minutes before the close. A rejected order pauses Socrates only.</p>
+  <h3>What the app cannot copy from the video</h3>
+  <p>Alpaca has no Nasdaq futures, so the app uses QQQ during regular hours only. Leader supply/demand boxes, the 5-minute VIX and weekly/monthly VWAP are not reproduced. Stops, targets, the 4-of-7 count, the 60-minute window and every tolerance are the app’s choices; the videos state none of them. Live fills and profitability have not been established.</p>
+  <div class="review-grid"><article><h3>17:25 recording · Nasdaq confirmation</h3><p>Mark the previous-day high and low → wait for a break or sweep → check the tech leaders → confirm the VIX reacting from its own level.</p><small>00:01–01:36</small></article><article><h3>18:11 recording · Level preparation</h3><p>Premark repeated four-hour levels → move to one hour → wait for the break and retest → confirm the leaders and the VIX.</p><small>00:18–02:27</small></article></div>
+</div></details></section>
 <section class="card journal"><details><summary><strong>Recent app activity</strong><span class="muted">Saved changes</span></summary><div id="journal" class="review-content"></div></details></section>
 <section id="socrates-results" class="card journal"><details><summary><strong>Socrates trade results</strong><span class="muted">Confirmed fills</span></summary><div id="trade-results" class="review-content"><p class="muted">Waiting for trade records…</p></div></details></section>
-<footer><span id="runtime-status">Checking where the app is running…</span><span>Global Live controls new entries for enabled strategies. Existing positions remain managed.</span></footer><aside class="release-badge" aria-label="Installed app version"><strong id="installed-version">Checking installed version…</strong><span id="deployment-status">Connecting to AllSpark…</span></aside></main></div><script type="module" src="./app.js"></script></body></html>
+<footer><span id="runtime-status">Checking where the app is running…</span><span>Live money controls new entries. Existing positions are always managed.</span></footer>
+<aside class="release-badge" aria-label="Installed app version"><strong id="installed-version">Checking installed version…</strong><span id="deployment-status">Connecting to AllSpark…</span></aside>
+</main></div><script type="module" src="./app.js"></script></body></html>

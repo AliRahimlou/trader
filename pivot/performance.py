@@ -74,6 +74,34 @@ def _fill(op, symbol, side, client_ids, broker_ids):
     return quantity, quantity * price
 
 
+PROXY_LABEL = 'Socrates short via PSQ (inverse QQQ)'
+
+
+def socrates_labels(trade):
+    """How a Socrates trade reads to the owner: the QQQ signal and the traded instrument.
+
+    Since 4.5.0 a QQQ short setup is executed by buying PSQ, the -1x inverse
+    ETF. Such a record is a PSQ purchase ('symbol' PSQ, 'direction' long) of a
+    QQQ short signal; it must never read as a plain 'PSQ long'. Only known
+    values pass through; anything else is None.
+    """
+    trade = trade if isinstance(trade, dict) else {}
+    symbol = trade.get('symbol') if trade.get('symbol') in ('QQQ', 'PSQ') else None
+    signal_symbol = 'QQQ' if trade.get('signal_symbol') == 'QQQ' or symbol == 'QQQ' else None
+    signal_direction = trade.get('signal_direction') if trade.get('signal_direction') in ('long', 'short') else None
+    proxy = trade.get('proxy') == 'inverse_etf' and symbol == 'PSQ' and signal_direction == 'short'
+    if signal_direction is None and symbol == 'QQQ' and trade.get('direction') in ('long', 'short'):
+        signal_direction = trade['direction']  # Records before 4.5.0 traded QQQ in the signal's direction.
+    if proxy:
+        label = PROXY_LABEL
+    elif symbol == 'QQQ' and signal_direction:
+        label = f'Socrates {signal_direction} QQQ'
+    else:
+        label = None
+    return {'label': label, 'signal_symbol': signal_symbol, 'signal_direction': signal_direction,
+            'proxy': 'inverse_etf' if proxy else None}
+
+
 def trade_result(trade):
     """Return a small display-safe result, with no P&L for uncertain outcomes.
 
@@ -93,7 +121,7 @@ def trade_result(trade):
         completed_at = None
     result = {'symbol': symbol, 'direction': direction, 'completed_at': completed_at,
               'quantity': None, 'gross_pnl': None, 'status': 'unverified',
-              'fees_status': 'not_reported'}
+              'fees_status': 'not_reported', **socrates_labels(trade)}
     if trade.get('stage') != 'finished' or trade.get('manual_reconciliation') or not symbol or not direction or not completed_at:
         return result
     try:

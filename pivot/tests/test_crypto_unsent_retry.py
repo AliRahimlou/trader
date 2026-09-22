@@ -15,6 +15,16 @@ from pivot.range_reversal import analyze
 from pivot.store import Store
 from pivot.tests.test_crypto_execution import FakeBroker
 
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
+
+
 D = Decimal
 AT = datetime(2026, 9, 22, 8, 10, 10, tzinfo=timezone.utc)
 BTC_ASSET = {'symbol': 'BTC/USD', 'class': 'crypto', 'status': 'active', 'tradable': True,

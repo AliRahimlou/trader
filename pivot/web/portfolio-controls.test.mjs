@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {money,escape as esc,appStatus,createDisplayClock} from './model.mjs';
-import {bindStrategyView,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,CRYPTO_MARKETS} from './strategy-families.mjs';
+import {bindStrategyView,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,CRYPTO_MARKETS,CRYPTO_PAUSE_TOOLTIP} from './strategy-families.mjs';
+import * as readiness from './readiness.mjs';
 
 const source=(await readFile(new URL('./app.js',import.meta.url),'utf8')).replace(/^import .*?;\n/gm,'');
 const initial=()=>({live_enabled:true,execution_available:true,execution_policy:{version:'socrates-v1',summary:['Socrates rules']},
@@ -19,7 +20,7 @@ function harness({state=initial(),startup=false,clock=createDisplayClock}={}) {
       addEventListener(type,handler){this.listeners[type]=handler;},showModal(){this.open=true;},close(){this.open=false;},querySelectorAll(){return [];}});
     return nodes.get(id);
   };
-  const context=vm.createContext({URL,Date,money,esc,appStatus,createDisplayClock:clock,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,CRYPTO_MARKETS,
+  const context=vm.createContext({URL,Date,money,esc,appStatus,createDisplayClock:clock,portfolioView,portfolioStatus,strategySettingsMatch,rangeFamilyView,rangeFamilyMarkup,cryptoQuantityLabel,cryptoHistoryMarkup,positionUnit,CRYPTO_MARKETS,CRYPTO_PAUSE_TOOLTIP,...readiness,
     bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),
     location:{hostname:'example.test',port:''},AbortSignal:{timeout:()=>({})},setInterval(){},
     document:{baseURI:'https://example.test/pivot/',getElementById:element,querySelector:()=>({dataset:{}})},

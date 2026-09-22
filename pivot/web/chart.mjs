@@ -9,7 +9,7 @@ export const NY='America/New_York';
 const PAD={left:8,right:62,top:12,bottom:22};
 const finite=n=>typeof n==='number'&&Number.isFinite(n);
 export function chartWidth(containerWidth,minimum=MIN_CHART_WIDTH){const width=Math.floor(Number(containerWidth));return Math.max(Number.isFinite(width)?width:0,minimum);}
-export function defaultTheme(){return {bg:'#ffffff',grid:'#edf0e8',text:'#7a8478',up:'#517b46',down:'#b0563f',band:'#dbe4d466',bandEdge:'#a7bc9f',event:'#f0d98a55',eventEdge:'#b8952f',stop:'#b0563f',target:'#3f7a5a',prev:'#7c8779',vixZone:'#c9d4e666',vixEdge:'#5b6e8c',reaction:'#e0b84e88',font:'10px Inter, -apple-system, sans-serif'};}
+export function defaultTheme(){return {bg:'#ffffff',grid:'#edf0e8',text:'#7a8478',up:'#517b46',down:'#b0563f',band:'#dbe4d466',bandEdge:'#a7bc9f',event:'#f0d98a55',eventEdge:'#b8952f',stop:'#b0563f',target:'#3f7a5a',prev:'#7c8779',vixZone:'#c9d4e666',vixEdge:'#5b6e8c',reaction:'#e0b84e88',labelBg:'#ffffffd9',font:'10px Inter, -apple-system, sans-serif'};}
 export function validBars(rows){
   return Array.isArray(rows)?rows.filter(b=>b&&['o','h','l','c'].every(k=>finite(b[k])&&b[k]>0)&&b.l<=Math.min(b.o,b.c)&&Math.max(b.o,b.c)<=b.h&&Number.isFinite(Date.parse(b.t))):[];
 }
@@ -75,6 +75,25 @@ export function chartModel({bars,levels=[],lines=[],event=null,width,height,time
     event:eventModel,marks,ticks:ticks(scale.min,scale.max),left,right,top,bottom,width,height,message:''};
 }
 function line(ctx,x1,y1,x2,y2){ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();}
+// A label that would sit on another moves one line below (then above) its line; if both
+// are taken it is skipped (the levels table lists every area). Kept labels get a soft
+// backing so candles and grid lines do not cross the text. Returns a y or false per label.
+export const LABEL_GAP=13;
+export function labelSlots(positions,gap=LABEL_GAP){
+  const kept=[];
+  return positions.map(y=>{
+    if(!Number.isFinite(y))return false;
+    const slot=[y,y+gap,y-gap].find(candidate=>kept.every(k=>Math.abs(k-candidate)>=gap));
+    if(slot===undefined)return false;kept.push(slot);return slot;
+  });
+}
+// Labels are drawn after the candles with a halo in the chart background colour, so a
+// candle never covers the words and the words stay readable over bands and wicks.
+function label(ctx,theme,text,x,y,align,color){
+  ctx.textAlign=align;ctx.textBaseline='bottom';ctx.setLineDash([]);
+  ctx.strokeStyle=theme.labelBg;ctx.lineWidth=3;ctx.lineJoin='round';ctx.strokeText(text,x,y-1);ctx.lineWidth=1;
+  ctx.fillStyle=color;ctx.fillText(text,x,y-1);ctx.textBaseline='middle';
+}
 export function drawModel(ctx,model,theme=defaultTheme()){
   const {width,height,left,right,top,bottom}=model;
   ctx.save();ctx.font=theme.font;ctx.fillStyle=theme.bg;ctx.clearRect(0,0,width,height);ctx.fillRect(0,0,width,height);
@@ -86,20 +105,21 @@ export function drawModel(ctx,model,theme=defaultTheme()){
     const yTop=scale.y(band.high),yBottom=scale.y(band.low),h=Math.max(2,yBottom-yTop);
     ctx.fillStyle=band.fill||theme.band;ctx.fillRect(left,yTop,right-left,h);
     ctx.strokeStyle=band.edge||theme.bandEdge;ctx.setLineDash([]);line(ctx,left,Math.round(yTop)+0.5,right,Math.round(yTop)+0.5);line(ctx,left,Math.round(yBottom)+0.5,right,Math.round(yBottom)+0.5);
-    ctx.fillStyle=theme.text;ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillText(levelLabel(band),left+4,yTop-1);ctx.textBaseline='middle';
   }
-  for(const row of model.lines){const y=Math.round(scale.y(row.price))+0.5;ctx.strokeStyle=row.color||theme.prev;ctx.setLineDash(row.dash||[5,4]);line(ctx,left,y,right,y);ctx.setLineDash([]);ctx.fillStyle=row.color||theme.prev;ctx.textAlign='right';ctx.textBaseline='bottom';ctx.fillText(`${row.label} ${fmt(row.price)}`,right-4,y-1);ctx.textBaseline='middle';}
+  // Every label sits at the right, next to the price axis (the part a phone shows first); stop and target, then lines, then bands claim space in that order.
+  const rightLabels=[];
+  for(const row of model.lines){const y=Math.round(scale.y(row.price))+0.5;ctx.strokeStyle=row.color||theme.prev;ctx.setLineDash(row.dash||[5,4]);line(ctx,left,y,right,y);ctx.setLineDash([]);rightLabels.push({y,text:`${row.label} ${fmt(row.price)}`,color:row.color||theme.prev});}
   const event=model.event;
   if(event){
     const yTop=scale.y(event.zone.high),yBottom=scale.y(event.zone.low),h=Math.max(3,yBottom-yTop);
     ctx.fillStyle=theme.event;ctx.fillRect(left,yTop,right-left,h);
     ctx.strokeStyle=theme.eventEdge;ctx.setLineDash([]);ctx.lineWidth=1.5;ctx.strokeRect(left+0.5,yTop+0.5,right-left-1,h-1);ctx.lineWidth=1;
-    ctx.fillStyle=theme.eventEdge;ctx.textAlign='left';ctx.textBaseline='top';
-    ctx.fillText(`${event.label||'event'} · ${String(event.state||'').replaceAll('_',' ').toLowerCase()}${event.direction?` · ${event.direction}`:''}`,left+4,yBottom+2);ctx.textBaseline='middle';
-    for(const [key,label,color] of [['stop','Stop',theme.stop],['target','Target',theme.target]]){
+    rightLabels.push({y:yBottom+13,text:`${event.label||'event'} · ${String(event.state||'').replaceAll('_',' ').toLowerCase()}${event.direction?` · ${event.direction}`:''}`,color:theme.eventEdge});
+    for(const [key,name,color] of [['stop','Stop',theme.stop],['target','Target',theme.target]]){
       const price=event[key];if(!finite(price)||price<scale.min||price>scale.max)continue;
       const y=Math.round(scale.y(price))+0.5;ctx.strokeStyle=color;ctx.setLineDash([2,3]);line(ctx,left,y,right,y);ctx.setLineDash([]);
-      ctx.fillStyle=color;ctx.textAlign='right';ctx.textBaseline='bottom';ctx.fillText(`${label} ${fmt(price)} · app choice`,right-4,y-1);ctx.textBaseline='middle';
+      // Stop and target come first so a nearby previous-day label yields to them.
+      rightLabels.unshift({y,text:`${name} ${fmt(price)} · app choice`,color});
     }
   }
   for(const mark of model.marks){const x=Math.round(layout.x(mark.index)-layout.slot/2)+0.5;ctx.strokeStyle=theme.grid;ctx.setLineDash([2,4]);line(ctx,x,top,x,bottom);ctx.setLineDash([]);ctx.fillStyle=theme.text;ctx.textAlign='left';ctx.fillText(mark.label,x+3,bottom+10);}
@@ -109,6 +129,11 @@ export function drawModel(ctx,model,theme=defaultTheme()){
     const bodyTop=scale.y(Math.max(bar.o,bar.c)),bodyHeight=Math.max(1,scale.y(Math.min(bar.o,bar.c))-bodyTop);
     ctx.fillRect(x-layout.width/2,bodyTop,layout.width,bodyHeight);
   });
+  // A label never starts above the plot: the first text line sits inside the top edge.
+  const inside=y=>Math.max(top+11,Math.min(bottom,y));
+  for(const band of model.bands)rightLabels.push({y:scale.y(band.high),text:levelLabel(band),color:theme.text});
+  const rightKeep=labelSlots(rightLabels.map(row=>inside(row.y)));
+  rightLabels.forEach((row,index)=>{if(rightKeep[index]!==false)label(ctx,theme,row.text,right-4,rightKeep[index],'right',row.color);});
   if(event){
     for(const [index,label] of [[event.originIndex,'break'],[event.retestIndex,'retest']]){
       if(!(index>=0))continue;const bar=model.bars[index];ctx.fillStyle=theme.eventEdge;ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(label,layout.x(index),scale.y(bar.h)-3);ctx.textBaseline='middle';

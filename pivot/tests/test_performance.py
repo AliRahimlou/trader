@@ -32,7 +32,8 @@ def test_confirmed_long_and_short_use_opposite_cash_flow():
     long = trade_result(finished())
     short = trade_result(finished('short'))
     assert long == {'symbol': 'QQQ', 'direction': 'long', 'completed_at': DONE,
-                    'quantity': '0.25', 'gross_pnl': '1.00', 'status': 'verified_gross', 'fees_status': 'not_reported'}
+                    'quantity': '0.25', 'gross_pnl': '1.00', 'status': 'verified_gross', 'fees_status': 'not_reported',
+                    'label': 'Socrates long QQQ', 'signal_symbol': 'QQQ', 'signal_direction': 'long', 'proxy': None}
     assert Decimal(short['gross_pnl']) == Decimal('-1')
     assert short['status'] == 'verified_gross'
     assert 'net_pnl' not in long
@@ -137,8 +138,10 @@ def test_unfilled_entry_does_not_invent_break_even_profit():
                                {'symbol': {'private': 'value'}, 'completed_at': 'bad'}])
 def test_sanitized_summary_never_exposes_arbitrary_fields(raw):
     result = trade_result(raw)
-    assert set(result) == {'symbol', 'direction', 'completed_at', 'quantity', 'gross_pnl', 'status', 'fees_status'}
+    assert set(result) == {'symbol', 'direction', 'completed_at', 'quantity', 'gross_pnl', 'status', 'fees_status',
+                           'label', 'signal_symbol', 'signal_direction', 'proxy'}
     assert result['symbol'] is None and result['gross_pnl'] is None
+    assert result['label'] is result['signal_symbol'] is result['signal_direction'] is result['proxy'] is None
 
 
 def test_result_computation_does_not_modify_the_trade():
@@ -146,3 +149,27 @@ def test_result_computation_does_not_modify_the_trade():
     before = deepcopy(t)
     trade_result(t)
     assert t == before
+
+
+def proxy_trade():
+    """A 4.5.0 QQQ short executed by buying PSQ: the record is a PSQ purchase."""
+    t = finished()
+    t.update(symbol='PSQ', signal_symbol='QQQ', signal_direction='short', proxy='inverse_etf')
+    for op in t['ops'].values():
+        op['payload']['symbol'] = op['last_seen']['symbol'] = 'PSQ'
+    return t
+
+
+def test_psq_proxy_result_reads_as_socrates_short_not_psq_long():
+    result = trade_result(proxy_trade())
+    assert result['label'] == 'Socrates short via PSQ (inverse QQQ)'
+    assert (result['symbol'], result['direction']) == ('PSQ', 'long')  # The executed purchase stays visible.
+    assert (result['signal_symbol'], result['signal_direction'], result['proxy']) == ('QQQ', 'short', 'inverse_etf')
+    assert result['status'] == 'verified_gross' and Decimal(result['gross_pnl']) == Decimal('1')
+
+
+@pytest.mark.parametrize('change', [{'proxy': None}, {'signal_direction': 'long'}, {'symbol': 'QQQ'}, {'proxy': 'leveraged'}])
+def test_proxy_label_requires_consistent_proxy_evidence(change):
+    t = proxy_trade()
+    t.update(change)
+    assert trade_result(t)['label'] != 'Socrates short via PSQ (inverse QQQ)'

@@ -214,6 +214,94 @@ def proxy_translation(proxy_ask, entry, stop, target):
     return proxy_ask, proxy_stop, proxy_target
 
 
+# Alpaca Trading API v2 order rules the Socrates payloads must satisfy (4.5.1 audit,
+# docs/order-path-audit-4.5.1.md). Sources, read 2026-09-22:
+#   https://docs.alpaca.markets/reference/postorder  (client_order_id <= 128
+#     characters; notional only on market orders, DAY; qty/notional up to 9 decimals;
+#     extended_hours only with limit orders)
+#   https://docs.alpaca.markets/docs/fractional-trading  (fractional orders: market,
+#     limit, stop and stop_limit with time_in_force=day; qty or notional, not both)
+#   https://docs.alpaca.markets/docs/orders-at-alpaca  (stop/limit prices >= $1 at most
+#     2 decimals, below $1 at most 4; error 42210000 otherwise; a stop elects a market order)
+#   https://forum.alpaca.markets/t/apierror-potential-wash-trade-detected-use-complex-orders/13441
+#     (an order is rejected while an opposite-side market/stop order is open in the symbol)
+CLIENT_ORDER_ID_MAX = 128
+QUANTITY_PLACES = 9
+MINIMUM_NOTIONAL = decimal('1')
+ORDER_KEYS = {'symbol', 'side', 'type', 'time_in_force', 'extended_hours', 'qty', 'notional',
+              'stop_price', 'client_order_id'}
+
+
+def valid_price_increment(price):
+    """Alpaca price increments: whole cents at or above $1, four decimals below it."""
+    try:
+        price = decimal(price)
+    except ValueError:
+        return False
+    return price > 0 and price == price.quantize(decimal('.01') if price >= 1 else decimal('.0001'))
+
+
+def quantity_text(value):
+    """Plain decimal share text for an order; str(Decimal) would print 1E-7 for a tiny remnant."""
+    return format(abs(decimal(value)), 'f')
+
+
+def order_payload_violations(payload):
+    """Every Alpaca v2 rule a Socrates order payload breaks; an empty list conforms.
+
+    Covers the payloads this executor can POST: entry market buys by notional
+    (fractionable) or whole-share qty, DAY sell stops with a fractional qty, and
+    DAY market sells. Cancellation is a DELETE by order id and has no payload.
+    """
+    problems = []
+    if not isinstance(payload, dict):
+        return ['payload is not an object']
+    if set(payload) - ORDER_KEYS:
+        problems.append('unexpected fields: ' + ', '.join(sorted(set(payload) - ORDER_KEYS)))
+    if payload.get('symbol') not in PROXY_SYMBOLS:
+        problems.append('symbol is not QQQ or PSQ')
+    if payload.get('side') not in ('buy', 'sell'):
+        problems.append('side must be buy or sell')
+    kind = payload.get('type')
+    if kind not in ('market', 'stop'):
+        problems.append('type must be market or stop')
+    if payload.get('time_in_force') != 'day':
+        problems.append('time_in_force must be day (required for fractional orders)')
+    if payload.get('extended_hours') is not False:
+        problems.append('extended_hours must be false (only limit orders may trade extended hours)')
+    identifier = payload.get('client_order_id')
+    if not isinstance(identifier, str) or not 0 < len(identifier) <= CLIENT_ORDER_ID_MAX:
+        problems.append(f'client_order_id must be 1-{CLIENT_ORDER_ID_MAX} characters')
+    if ('qty' in payload) == ('notional' in payload):
+        problems.append('exactly one of qty or notional is required')
+    if 'notional' in payload:
+        try:
+            notional = decimal(payload['notional'])
+            if kind != 'market' or payload.get('side') != 'buy':
+                problems.append('notional is only used on market buys')
+            if notional < MINIMUM_NOTIONAL or notional != notional.quantize(decimal('.01')):
+                problems.append('notional must be at least $1 in whole cents')
+        except ValueError:
+            problems.append('notional is not a number')
+    if 'qty' in payload:
+        text = payload['qty']
+        try:
+            qty = decimal(text)
+            if (not isinstance(text, str) or 'e' in text.lower() or qty <= 0
+                    or qty != qty.quantize(decimal(1).scaleb(-QUANTITY_PLACES))):
+                problems.append(f'qty must be positive plain decimal text with at most {QUANTITY_PLACES} decimals')
+        except ValueError:
+            problems.append('qty is not a number')
+    if kind == 'stop':
+        if not valid_price_increment(payload.get('stop_price')):
+            problems.append('stop_price must be whole cents at or above $1 (four decimals below $1)')
+        if payload.get('side') != 'sell':
+            problems.append('Socrates stops only protect long positions')
+    elif 'stop_price' in payload:
+        problems.append('stop_price is only sent on stop orders')
+    return problems
+
+
 class Executor:
     def __init__(self, broker, store, now=None, *, revision=None, expected_account_mode='live'):
         if expected_account_mode not in ('live', 'paper'):
@@ -692,6 +780,11 @@ class Executor:
                               'signal_price': str(bid),
                               'note': ('QQQ short distances from the live QQQ bid to its stop and target, mirrored '
                                        'onto a PSQ purchase; app interpretation, not a video rule')}
+        # The protective stop is placed from this price after the fill. A price
+        # Alpaca would reject (sub-penny) would leave filled shares unprotected,
+        # so such an entry is skipped before any order is sent.
+        if not valid_price_increment(execution_stop):
+            raise Waiting(f'The {traded} stop price {execution_stop} is not in whole cents, which Alpaca rejects; skipping this entry')
         self._gate('purchase_size')
         amount = authorization['settings']['target_dollars']
         buying_power = (self.portfolio.available(account['account_ref'], account['buying_power'])
@@ -731,6 +824,9 @@ class Executor:
             payload['notional'] = plan['target_dollars']
         else:
             payload['qty'] = plan['quantity']
+        self._gate('order_prepare')
+        if order_payload_violations({**payload, 'client_order_id': f'pvt-{key}-entry'}):
+            raise Waiting('The entry order would not meet Alpaca order rules; skipping this entry')
         fields = SIGNAL_FIELDS + (('commissioning_purpose',) if self.expected_account_mode == 'paper' else ())
         # 'direction' is the executed side in 'symbol' (always a purchase here);
         # 'signal_direction' keeps the QQQ setup's side for the journal and UI.
@@ -1363,7 +1459,7 @@ class Executor:
 
     def _protect(self, trade, position):
         payload = {'symbol': trade['symbol'], 'side': 'sell' if trade['direction'] == 'long' else 'buy',
-                   'qty': str(abs(decimal(position['qty']))), 'type': 'stop',
+                   'qty': quantity_text(position['qty']), 'type': 'stop',
                    'stop_price': trade['stop'], 'time_in_force': 'day', 'extended_hours': False}
         self._prepare(trade, 'stop', payload)
         order = self._order(trade, 'stop')
@@ -1451,7 +1547,7 @@ class Executor:
             trade['exit_number'] += 1
             name = f'exit{trade["exit_number"]}'
         payload = {'symbol': trade['symbol'], 'side': 'sell' if trade['direction'] == 'long' else 'buy',
-                   'qty': str(abs(decimal(position['qty']))), 'type': 'market', 'time_in_force': 'day', 'extended_hours': False}
+                   'qty': quantity_text(position['qty']), 'type': 'market', 'time_in_force': 'day', 'extended_hours': False}
         self._prepare(trade, name, payload)
         self._order(trade, name)
         self.message = 'Exit submitted for the remaining held shares'

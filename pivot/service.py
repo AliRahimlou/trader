@@ -14,7 +14,10 @@ from .data_health import stock_health, vix_health, quote_health, expire_health
 from .diagnostics import build_decision_trace
 from .observations import ObservationArchive
 from .worker_health import WorkerHealth, next_tick
+from . import feature_flags
 logger = logging.getLogger('pivot.service')
+# App choice: how often the readiness checklist re-reads QQQ/PSQ asset facts.
+ASSET_REFRESH_SECONDS = 600
 
 
 def publication_catchup_bucket(markets, sessions, now):
@@ -84,6 +87,9 @@ class Service:
             from .crypto_broker import CryptoBroker
             from .crypto_execution import CryptoRangeExecutor
             self.crypto_executor = CryptoRangeExecutor(CryptoBroker(feeds), self.crypto_store, store, self.portfolio)
+        # Read-only asset facts for the Socrates readiness checklist (QQQ, PSQ);
+        # refreshed by the account worker at most every ASSET_REFRESH_SECONDS.
+        self._instrument_assets = {}
         self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else [])
                                     + (['crypto_execution'] if self.crypto_executor else []))
         self.archive = None
@@ -92,6 +98,10 @@ class Service:
         self.range_watch_error = None
         self.extra_range_watches = {}
         self.extra_range_errors = {}
+        # Decided once at start: a paused release never builds or starts the
+        # crypto observers, so no crypto market data is polled. The crypto
+        # execution worker still runs to manage any stranded position.
+        self.crypto_observers_paused = feature_flags.crypto_paused()
         self.activity_ledger = None
         self.daily_reviews = None
         self.review_collection = {'status': 'starting', 'last_attempt_at': None,
@@ -108,7 +118,7 @@ class Service:
         except Exception:
             pass  # Observation failure is visible below, independent of trading permission.
         from .feeds import ReadOnlyFeeds
-        if isinstance(feeds, ReadOnlyFeeds):
+        if isinstance(feeds, ReadOnlyFeeds) and not self.crypto_observers_paused:
             from .range_watch import BitcoinBars, RangeWatch
             from .crypto_markets import SYMBOLS
             try:
@@ -247,6 +257,36 @@ class Service:
         except Exception:
             with self.lock:
                 self.state['account_error']='Account update unavailable; showing the last confirmed snapshot'
+        self.refresh_instruments()
+
+    def refresh_instruments(self, now=None):
+        """Cached read-only asset lookups for the readiness checklist; never an order call.
+
+        One GET per Socrates instrument (QQQ, and the PSQ short proxy) at most
+        every ASSET_REFRESH_SECONDS, success or failure, through the executor's
+        broker. A failure is shown as a warning; the executor still reads the
+        asset afresh before every entry, so this cache never authorizes one.
+        """
+        from .broker import PROXY_SYMBOL, SIGNAL_SYMBOL
+        if self.executor is None:
+            return
+        now = now or datetime.now(timezone.utc)
+        for symbol in (SIGNAL_SYMBOL, PROXY_SYMBOL):
+            with self.lock:
+                cached = self._instrument_assets.get(symbol)
+            if cached and 0 <= (now - cached['attempted_at']).total_seconds() < ASSET_REFRESH_SECONDS:
+                continue
+            row = {'attempted_at': now, 'checked_at': None, 'asset': None, 'error': None}
+            try:
+                asset = self.executor.broker.asset(symbol)
+                if not isinstance(asset, dict) or asset.get('symbol') != symbol:
+                    raise ValueError('Unexpected asset response')
+                row.update(checked_at=now.isoformat(), asset={key: asset.get(key) for key in (
+                    'symbol', 'status', 'tradable', 'fractionable')})
+            except Exception:
+                row['error'] = f'{symbol} could not be confirmed with Alpaca'
+            with self.lock:
+                self._instrument_assets[symbol] = row
 
     def _review_loop(self):
         while not self.stop_event.is_set():
@@ -545,13 +585,27 @@ class Service:
             result['entry_allowance'] = {'status': 'blocked', 'limit': 2, 'used': None,
                 'remaining': 0, 'families': None, 'scope': 'per_family', 'timezone': 'America/New_York',
                 'reason': 'Session entry allowance could not be verified.'}
+        pause = feature_flags.strategy_pause()
+        crypto_paused = pause['range_reversal']['paused']
+        result['strategy_pause'] = pause
+        result['portfolio']['range_reversal']['paused'] = crypto_paused
         result['crypto_execution'] = self.crypto_executor.snapshot() if self.crypto_executor else {
             'message':'Crypto broker execution is not configured for this runtime.', 'at':None, 'trades':[], 'incidents':[]}
+        result['crypto_execution']['paused'] = crypto_paused
+        if crypto_paused:
+            message = result['crypto_execution'].get('message')
+            if not (result['crypto_execution'].get('trades') and isinstance(message, str)
+                    and message.startswith(feature_flags.CRYPTO_PAUSED_MESSAGE)):
+                # With no crypto position the pause note is the whole story; a managed position keeps
+                # the executor's status after the note (the executor already prefixes it).
+                result['crypto_execution']['message'] = feature_flags.CRYPTO_PAUSED_MESSAGE
         result['worker_health'] = self.worker_health()
         result['strategy_families'] = {
             'socrates': {'family_id':'socrates', 'label':'Socrates', 'execution_status':'owner_controlled',
                          'analysis':deepcopy(result.get('setup'))},
-            'range_reversal': {**self.range_snapshot(), 'analyses':self.range_analyses()}}
+            'range_reversal': ({'family_id':'range_reversal', 'label':'4H Range Reversal', 'state':'PAUSED',
+                                'detail':'Paused: Socrates-only focus.'} if crypto_paused
+                               else {**self.range_snapshot(), 'analyses':self.range_analyses()})}
         result['native_history'] = self.native_capture.status() if self.native_capture else {
             'status':'unavailable', 'research_only':True, 'live_entry_ready':False,
             'detail':'Separate native validation history is not configured.'}
@@ -568,7 +622,101 @@ class Service:
                           'Each strategy has its own limit of two new entry attempts per New York session; rejected and uncertain submissions count, exits do not.',
                           'A rejected, replaced or unreconciled QQQ order pauses Socrates only (the same durable change as turning it off). Global Live and the crypto strategy are unchanged; enable Socrates again after reviewing Alpaca.',
                           *['Socrates: ' + line for line in POLICY['summary']]]}, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
+        result['socrates_readiness'] = self.socrates_readiness(result)
         return result
+
+    def socrates_readiness(self, result, now=None):
+        """Owner checklist for Socrates orders, built from this snapshot; read-only.
+
+        It performs no broker call (asset facts come from the account worker's
+        cache) and never changes a permission or an order. The executor repeats
+        its own checks against fresh broker reads before any submission.
+        """
+        from .broker import PROXY_SYMBOLS
+        from .policy import POLICY_VERSION
+        from .readiness import build_socrates_readiness
+        now = now or datetime.now(timezone.utc)
+        try:
+            control = self.store.control()
+            try:
+                selected = self.store.strategy_selection()['socrates'] is True
+            except Exception:
+                selected = None
+            account = result.get('account') if isinstance(result.get('account'), dict) else None
+            account_ref = (account or {}).get('account_ref')
+            fresh = bool(account and not result.get('account_error') and result.get('account_at')
+                         and 0 <= (now - datetime.fromisoformat(result['account_at'])).total_seconds() <= 60)
+            available = None
+            if fresh:
+                try:
+                    reserved = sum((decimal(row['amount']) for row in self.portfolio.reservations(account_ref)), decimal('0'))
+                    available = str(max(decimal('0'), decimal(account['buying_power']) - reserved))
+                except Exception:
+                    available = None
+            trade = self.store.active_trade()
+            positions, orders = result.get('positions') or [], result.get('orders') or []
+            if trade:
+                exposure = {'active_trade': {'symbol': trade.get('symbol'), 'proxy': trade.get('proxy')}}
+            elif not fresh:
+                exposure = {'state': 'unknown'}
+            else:
+                try:
+                    if positions or orders:
+                        for symbol in sorted(PROXY_SYMBOLS):
+                            self.portfolio.assert_exposure(account_ref, positions, orders,
+                                                           requesting_family='socrates', symbol=symbol)
+                    exposure = {'state': 'clear'}
+                except Exception:
+                    symbols = sorted({row.get('symbol') for row in positions + orders
+                                      if isinstance(row, dict) and isinstance(row.get('symbol'), str)})
+                    exposure = {'state': 'blocked', 'symbols': symbols[:6]}
+            gate = getattr(self.executor, 'entry_gate', None) if self.executor else None
+            with self.lock:
+                assets = deepcopy(self._instrument_assets)
+            setup = result.get('setup')
+            return build_socrates_readiness({
+                'execution_available': self.executor is not None, 'control': control,
+                'policy_version': POLICY_VERSION, 'socrates_selected': selected,
+                'pause_reason': self._socrates_pause_reason(result.get('events')) if selected is False else None,
+                'account': account, 'account_at': result.get('account_at'), 'account_error': result.get('account_error'),
+                'target_dollars': (result.get('settings') or {}).get('target_dollars'),
+                'available_dollars': available, 'assets': assets, 'clock': result.get('clock'),
+                'data_health': result.get('data_health'), 'entry_allowance': result.get('entry_allowance'),
+                'deployment_gate': gate.status() if gate is not None else None,
+                'exposure': exposure, 'worker_health': result.get('worker_health'), 'setup': setup,
+                'setup_consumed': self._setup_consumed(setup),
+            }, now)
+        except Exception:
+            logger.exception('Socrates readiness checklist could not be built')
+            return {'checked_at': now.isoformat(), 'status': 'blocked',
+                    'headline': 'Order readiness could not be checked just now; retrying.',
+                    'next_action': None, 'action': None, 'items': []}
+
+    def _setup_consumed(self, setup):
+        """True when every ready event in this setup was already used (traded, attempted, rejected or
+        uncertain), which the executor never enters again. Same keys and store lookup as the executor."""
+        from .execution import Executor
+        if not isinstance(setup, dict) or setup.get('state') != 'SETUP_READY':
+            return False
+        candidates = setup.get('entry_candidates', [setup])
+        if not isinstance(candidates, list) or not candidates:
+            return False
+        try:
+            return all(isinstance(candidate, dict) and candidate.get('event_id')
+                       and self.store.entry_consumed(Executor._event_key(candidate)) for candidate in candidates)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _socrates_pause_reason(events):
+        """The app's own pause reason, if the latest Socrates setting change was that pause."""
+        for event in events or []:
+            detail = event.get('detail') if isinstance(event, dict) and isinstance(event.get('detail'), dict) else {}
+            if event.get('kind') == 'strategy_paused' and detail.get('family') == 'socrates':
+                return detail.get('reason') if isinstance(detail.get('reason'), str) else None
+            if event.get('kind') == 'strategy_settings' and 'socrates' in detail:
+                return None
+        return None
 
     def range_snapshot(self):
         """Optional observations cannot fail the live account/strategy response."""
@@ -639,6 +787,11 @@ class Service:
         from .execution import Executor
         if not isinstance(payload, dict) or not payload or set(payload) - {'socrates','range_reversal'}:
             raise ValueError('Choose a valid strategy setting')
+        if ('range_reversal' in payload and feature_flags.crypto_paused()
+                and payload['range_reversal'] != {'enabled': False}):
+            # Refused before any read or write: saved crypto rows stay exactly as they are.
+            # Turning crypto Off is the one change allowed while paused; it only removes risk.
+            raise feature_flags.CryptoPaused()
         stock = payload.get('socrates')
         if stock is not None and (not isinstance(stock, dict) or set(stock) != {'enabled'} or type(stock['enabled']) is not bool):
             raise ValueError('Socrates permission must be on or off')

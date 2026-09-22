@@ -5,7 +5,7 @@ const VIEWS=new Set(['socrates','range_reversal','all']);
 export const CRYPTO_MARKETS=['BTC/USD','ETH/USD','SOL/USD','LINK/USD','XRP/USD'];
 export const normalizeStrategyView=value=>VIEWS.has(value)?value:'socrates';
 export const STRATEGY_VIEW_SECTIONS={
-  socrates:['socrates-control','socrates-family','session-review','socrates-sidebar','socrates-purchase','socrates-data','socrates-rules','socrates-results'],
+  socrates:['socrates-readiness','socrates-control','socrates-family','session-review','socrates-sidebar','socrates-purchase','socrates-data','socrates-rules','socrates-results'],
   range_reversal:['range-control','range-family','crypto-management','crypto-watchlist','crypto-review'],
 };
 
@@ -22,12 +22,12 @@ export function bindStrategyView(document,{storage=()=>globalThis.localStorage,o
     }
     document.getElementById('strategy-workspace').dataset.view=selected;
     document.getElementById('family-control-grid').dataset.view=selected;
-    document.getElementById('strategy-controls-title').textContent=selected==='all'?'All strategy controls':selected==='socrates'?'Socrates controls':'4H Range Reversal controls';
+    document.getElementById('strategy-controls-title').textContent=selected==='all'?'All strategy controls':selected==='socrates'?'Socrates controls':'Crypto controls · 4H Range Reversal';
     document.getElementById('strategy-view-note').textContent=selected==='all'
-      ? 'Showing all strategies. The controls below show which are enabled. Changing this view does not change trading.'
+      ? 'Showing Socrates and crypto. Changing this view does not change trading.'
       : selected==='range_reversal'
-      ? 'Viewing 4H Range Reversal. Socrates keeps its saved setting. Changing this view does not change trading.'
-      : 'Viewing Socrates. 4H Range Reversal keeps its saved setting. Changing this view does not change trading.';
+      ? 'Showing crypto (4H Range Reversal). Changing this view does not change trading.'
+      : 'Showing Socrates. Changing this view does not change trading.';
   }
   selector.addEventListener('change',()=>{
     selected=normalizeStrategyView(selector.value);
@@ -46,28 +46,45 @@ export function globalCryptoAlert(snapshot) {
 }
 
 const FAMILY_LABELS={socrates:'Socrates',range_reversal:'4H Range Reversal'};
+export const CRYPTO_PAUSE_TOOLTIP='Crypto is paused: Socrates-only focus';
+
+// The owner paused crypto (4.5.1). Any one of the backend's pause flags counts, so a
+// partially updated snapshot can never make crypto look active. Display only: the
+// backend enforces the pause; this never changes a saved selection.
+export function cryptoPause(snapshot) {
+  const row=snapshot?.strategy_pause?.range_reversal;
+  const paused=row?.paused===true||snapshot?.portfolio?.range_reversal?.paused===true||snapshot?.crypto_execution?.paused===true
+    ||snapshot?.strategy_families?.range_reversal?.state==='PAUSED';
+  const reason=typeof row?.reason==='string'&&row.reason.trim()?row.reason.trim():'Socrates-only focus.';
+  return {paused,reason,message:paused?(typeof snapshot?.crypto_execution?.message==='string'&&snapshot.crypto_execution.message
+    ?snapshot.crypto_execution.message:`Crypto is paused: ${reason}`):''};
+}
 
 export function portfolioView(snapshot) {
   const p=snapshot?.portfolio;
   const globalOn=typeof p?.global_live_enabled==='boolean'?p.global_live_enabled:snapshot?.live_enabled===true;
   const entryAllowance=sessionEntryStatus(snapshot?.entry_allowance);
   const pause=pauseNotice(snapshot);
+  const crypto=cryptoPause(snapshot);
   const families=[['socrates','Socrates'],['range_reversal','4H Range Reversal']].map(([id,label])=>{
     const raw=p?.[id] || {};
     const enabled=p?raw.enabled===true:id==='socrates';
     const available=id==='socrates'?snapshot?.execution_available===true:raw.execution_available===true;
-    const paused=id==='socrates' && !enabled && !!pause;
+    const cryptoPaused=id==='range_reversal' && crypto.paused;
+    const paused=cryptoPaused || (id==='socrates' && !enabled && !!pause);
     const familyAllowance=entryAllowance.families?.[id];
     const allowanceBlocked=entryAllowance.blocked || !familyAllowance || familyAllowance.blocked;
-    return {id,label,enabled,available,paused,pauseReason:paused?pause.reason:'',target:raw.target_dollars || (id==='socrates'?snapshot?.settings?.target_dollars:'5.00'),
+    return {id,label,enabled,available:available&&!cryptoPaused,paused,ownerPaused:cryptoPaused,pauseReason:cryptoPaused?crypto.reason:paused?pause.reason:'',target:raw.target_dollars || (id==='socrates'?snapshot?.settings?.target_dollars:'5.00'),
       symbols:id==='socrates'?['QQQ']:(Array.isArray(raw.symbols)?raw.symbols.filter(s=>CRYPTO_MARKETS.includes(s)):['BTC/USD']),
-      status:paused?'Paused by the app · no new entries':!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':allowanceBlocked?'On · new entries paused':'On · entries enabled',
+      status:cryptoPaused?'Paused · Socrates-only focus':paused?'Paused by the app · no new entries':!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':allowanceBlocked?'On · new entries paused':'On · entries enabled',
       reviewRequired:raw.review_required===true,
       policyVersion:raw.policy_version,policy:Array.isArray(raw.policy_summary)?raw.policy_summary:[],
       shortSupported:raw.capabilities?.short===true};
   });
-  return {configured:!!p,globalOn,families,enabled:families.filter(f=>f.enabled),entryAllowance,pause,
-    scope:families.filter(f=>f.enabled).map(f=>f.label).join(' + ') || 'No strategies enabled'};
+  // A paused family cannot enter, so it is not listed as running under global Live.
+  const running=families.filter(f=>f.enabled&&!f.ownerPaused);
+  return {configured:!!p,globalOn,families,enabled:running,entryAllowance,pause,cryptoPause:crypto,
+    scope:running.map(f=>f.label).join(' + ') || 'No strategies enabled'};
 }
 
 // The limit is per strategy. The top-level used/remaining are totals; each
@@ -90,7 +107,10 @@ export function sessionEntryStatus(value) {
   if(value.used!==totals.used || value.remaining!==totals.remaining)return unverified;
   const blocked=Object.values(families).every(row=>row.blocked);
   const exhausted=Object.keys(families).filter(id=>families[id].blocked).map(id=>FAMILY_LABELS[id]);
-  return {blocked,families,text:`${value.session_day} · New York session: `+
+  const socrates=families.socrates;
+  return {blocked,families,
+    socratesText:`Socrates entries today: ${socrates.used} of 2 attempts used${socrates.blocked?' · limit reached, no more new entries this session':''}. Rejected or uncertain orders count; exits do not.`,
+    text:`${value.session_day} · New York session: `+
     Object.keys(families).map(id=>`${FAMILY_LABELS[id]} ${families[id].used} of 2 entry attempts used`).join(' · ')+'. '+
     (exhausted.length?`Session limit reached for ${exhausted.join(' and ')}. `:'')+
     'Each strategy has its own limit. Rejected or uncertain submissions count; exits do not. Existing positions remain managed.'};
@@ -120,7 +140,7 @@ export function portfolioStatus(snapshot,fallback) {
   const trades=Array.isArray(snapshot.crypto_execution?.trades)?snapshot.crypto_execution.trades:[];
   const cryptoWorker=(snapshot.worker_health?.workers || []).find(row=>row.name==='crypto_execution');
   if(snapshot.crypto_worker_error || (cryptoWorker && ['stalled','stopped','error'].includes(cryptoWorker.status)
-      && (p.families[1].enabled || trades.length)))return {title:'Crypto execution needs attention',
+      && ((p.families[1].enabled && !p.families[1].ownerPaused) || trades.length)))return {title:'Crypto execution needs attention',
     text:snapshot.crypto_worker_error || 'The crypto worker is not progressing. Check its positions and broker orders; the app cannot confirm that exits are being managed.'};
   const gate=snapshot.deployment_gate;
   if(snapshot.review_required || snapshot.execution?.review_required || (gate?.configured===true &&
@@ -192,6 +212,10 @@ export function rangeFamilyView(snapshot,now=Date.now(),symbol='BTC/USD') {
   const sourceVerified=['alpaca_crypto_us','alpaca_crypto'].includes(family?.source);
   const current=analysisFresh && fresh(family.observed_at,now) && sourceVerified;
   const waitingNow=analysisFresh && family.state==='DATA_WAITING';
+  if(route.ownerPaused&&(!family||family.state==='PAUSED'))
+    return {state:'Paused',detail:typeof root?.detail==='string'&&root.detail?root.detail:'Paused: Socrates-only focus.',current:false,range:null,currentSignal:null,
+      history:[],symbol,source:'Paused',warnings:[],watchingOnly:false,paused:true,routeStatus:route.status,enabled:false,signalReady:false,
+      executionMessage:snapshot?.crypto_execution?.message||null,shortUnsupported:false};
   const labels={DATA_WAITING:'Waiting for data',RANGE_FORMING:'First range forming',WATCHING:'Waiting for an outside close',
     OUTSIDE_RANGE:'Waiting for a return inside',SETUP_OBSERVED:'Reversal observed'};
   let state=!family?'Waiting for analysis':waitingNow?'Waiting for data':!current?'Analysis out of date':labels[family.state] || 'Waiting for validated analysis';
@@ -229,6 +253,8 @@ export function rangeFamilyView(snapshot,now=Date.now(),symbol='BTC/USD') {
 }
 
 export function rangeFamilyMarkup(view) {
+  if(view.paused)return `<article class="card range-observer is-paused"><div class="section-heading"><h3>${esc(view.symbol)} · Paused</h3><span class="pill paused">Paused</span></div>
+    <p class="observation">${esc(view.detail)}</p>${view.executionMessage?`<p class="help">${esc(view.executionMessage)}</p>`:''}</article>`;
   const signal=view.currentSignal;
   const archive=typeof view.archive==='string'?view.archive:typeof view.archive?.status==='string'?view.archive.status:null;
   return `<article class="card range-observer"><div class="section-heading"><h3>${esc(view.symbol)} · ${esc(view.state)}</h3><span class="pill">${esc(view.watchingOnly?'Execution unavailable':view.routeStatus)}</span></div>
@@ -261,6 +287,7 @@ export function cryptoWatchMarkup(snapshot,now=Date.now()) {
     const complete=view.current&&analysis?.state!=='DATA_WAITING'&&coverage?.missing_count===0;
     const count=direction=>new Set((analysis?.candidates || []).filter(row=>row?.status==='CONFIRMED'&&row.direction===direction).map(row=>row.event_id||row.confirmation_at)).size;
     const data=coverage?`${coverage.received_completed_bars}/${coverage.expected_completed_bars} completed candles · ${coverage.missing_count} missing${coverage.publication_wait?' · latest candle within publication allowance':''}`:view.state;
+    if(view.paused)return `<article class="crypto-watch-row is-paused"><div><strong>${esc(symbol)}</strong><span class="pill paused">Paused</span></div><div><b>No crypto entries while paused.</b><p>${esc(view.detail)}</p></div></article>`;
     const chart=complete?`Today’s chart: ${count('long')} buy setups · ${count('short')} short setups`:'Setup totals unavailable until data is complete.';
     const gap=coverage?.opening_range_missing_count?`${coverage.opening_range_missing_count} missing in the opening four-hour range.`:coverage?.missing_count?'Later candle gaps are skipped; a gap inside an excursion retires it.':'';
     return `<article class="crypto-watch-row"><div><strong>${esc(symbol)}</strong><span class="pill">${esc(selected.includes(symbol)?view.routeStatus:'Not selected for trading')}</span></div><div><b>${esc(data)}</b><p>${esc(chart)}</p><small>${esc(gap || view.state)}</small></div></article>`;
