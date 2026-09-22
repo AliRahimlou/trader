@@ -45,15 +45,16 @@ def bitcoin_snapshot(now):
     bars = [Bar(start + timedelta(minutes=5 * (index + 1)), 5,
                 100000, 101000, 99500, 100000) for index in range(count - 2)]
     bars.extend([
-        Bar(now - timedelta(minutes=5), 5, 99450, 99475, 99300, 99400),
+        # Stop 1.3% below the confirmation close: wide enough for the crypto net-expectancy cost gate.
+        Bar(now - timedelta(minutes=5), 5, 99450, 99475, 98700, 99400),
         Bar(now, 5, 99750, 100025, 99700, 100000),
     ])
     market = Market('BTC/USD', {5: bars}, 'alpaca_crypto_us', True, now)
     analysis = analyze_crypto(market, now, provenance={
         'source': market.source, 'symbol': market.symbol, 'native': True, 'timeframe_minutes': 5})
     assert analysis['signal_ready'] is True
-    assert analysis['current_event']['stop'] == 99300
-    assert analysis['current_event']['target'] == 101400
+    assert analysis['current_event']['stop'] == 98700
+    assert analysis['current_event']['target'] == 102600
     return analysis
 
 
@@ -108,7 +109,7 @@ def test_both_analyzers_complete_five_dollar_shared_account_lifecycles(tmp_path,
     assert main.active_trade() is None
     assert venue.holdings['BTC/USD'] == owned['BTC/USD']
     assert crypto_store.active_trade('BTC/USD')['stage'] == 'open'
-    venue.prices['BTC/USD'] = (Decimal('101400'),) * 2
+    venue.prices['BTC/USD'] = (Decimal('102600'),) * 2
     actions['crypto']()
     assert not crypto_store.active_trades()
     assert all(qty == 0 for qty in venue.holdings.values())

@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from pivot.models import Bar, Market
-from pivot.range_reversal import analyze, RULE_VERSION
+from pivot.range_reversal import analyze, OPENING_BARS_MINIMUM, OPENING_SLOTS, RULE_VERSION
 
 UTC = timezone.utc
 NY = ZoneInfo('America/New_York')
@@ -51,9 +51,10 @@ def test_outside_then_inside_records_exact_first_candle_stop_and_two_r(closes, d
     assert event['signal_ready'] is True
     assert event['entry_valid_until'] == result['signal_valid_until']
     assert result['candidates'] == [event]
-    assert result['range']['native_candle_count'] == 48
-    assert result['rule_version'] == RULE_VERSION
-    assert len(result['interpretation_warnings']) >= 6
+    assert result['range']['native_candle_count'] == result['range']['expected_candle_count'] == 48
+    assert result['range']['minimum_candle_count'] == OPENING_BARS_MINIMUM == 40
+    assert result['rule_version'] == event['rule_version'] == RULE_VERSION == 'range-reversal-v2'
+    assert len(result['interpretation_warnings']) >= 7
 
 
 def test_wick_outside_without_close_does_not_start_event():
@@ -151,18 +152,87 @@ def test_new_midnight_resets_previous_pending_event_and_requires_new_range():
     assert result['range'] is None and not result['observations']
 
 
-@pytest.mark.parametrize('index', [0, 20, 47, 48])
-def test_missing_range_or_excursion_candle_blocks_all_current_evidence(index):
+@pytest.mark.parametrize('index', [0, 20, 47])
+def test_missing_opening_candle_no_longer_voids_the_day(index):
     market, now, provenance = sample([111, 105, 100])
     del market.bars[5][index]
     result = analyze(market, now, provenance=provenance)
-    assert result['state'] == 'DATA_WAITING'
-    assert not result['candidates']
-    assert 'gap' in result['detail']
+    assert result['state'] == 'WATCHING'
+    assert result['range']['native_candle_count'] == 47
+    assert result['range']['expected_candle_count'] == OPENING_SLOTS == 48
+    assert (result['range']['high'], result['range']['low']) == (110, 90)
+    assert [event['status'] for event in result['candidates']] == ['CONFIRMED']
+    assert result['coverage']['missing_count'] == result['coverage']['opening_range_missing_count'] == 1
+
+
+def test_missing_opening_candle_extreme_is_never_invented():
+    market, now, provenance = sample([111, 105, 100])
+    market.bars[5][10] = candle(market.bars[5][10].end, 100, 130, 70)
+    with_extreme = analyze(market, now, provenance=provenance)
+    assert (with_extreme['range']['high'], with_extreme['range']['low']) == (130, 70)
+    del market.bars[5][10]
+    without = analyze(market, now, provenance=provenance)
+    assert (without['range']['high'], without['range']['low']) == (110, 90)
+    assert without['range']['native_candle_count'] == 47
+
+
+def test_missing_post_range_candle_has_no_close_and_cannot_change_state():
+    # Closes 111 (outside), <missing>, 95 (inside): the missing slot neither
+    # confirms nor invalidates; the later inside close confirms the reversal.
+    market, now, provenance = sample([111, 105, 95])
+    del market.bars[5][49]
+    result = analyze(market, now, provenance=provenance)
+    assert result['state'] == 'SETUP_OBSERVED' and result['signal_ready'] is True
+    event = result['current_event']
+    assert (event['direction'], event['stop'], event['entry'], event['target']) == ('short', 112, 95, 61)
+    assert event['confirmation_at'] == market.bars[5][-1].end.isoformat()
+    assert result['coverage'] == {
+        'expected_completed_bars': 51, 'received_completed_bars': 50,
+        'missing_count': 1, 'missing_at': [(market.bars[5][48].end + timedelta(minutes=5)).isoformat()],
+        'missing_timestamps_truncated': False, 'opening_range_missing_count': 0, 'publication_wait': False,
+    }
+
+
+def test_missing_post_range_candle_between_two_outside_closes_keeps_the_first_stop():
+    market, now, provenance = sample([111, 130, 120, 105])
+    del market.bars[5][49]  # The 130 close is missing; its high can never move the stop.
+    result = analyze(market, now, provenance=provenance)
+    assert result['state'] == 'SETUP_OBSERVED'
+    assert result['current_event']['stop'] == 112 and len(result['observations']) == 1
+
+
+def test_missing_latest_candle_is_not_current_and_cannot_ready_a_signal():
+    market, now, provenance = sample([111, 105])
+    del market.bars[5][-1]  # The confirmation slot has not been published.
+    within = analyze(market, now, provenance=provenance)
+    assert within['state'] == 'OUTSIDE_RANGE' and within['signal_ready'] is False
+    assert within['coverage']['publication_wait'] is True and within['candidates'] == []
+    late = now + timedelta(seconds=91)
+    market.observed_at = late
+    beyond = analyze(market, late, provenance=provenance)
+    assert beyond['state'] == 'DATA_WAITING' and beyond['signal_ready'] is False
+    assert 'missing or stale' in beyond['detail'] and beyond['coverage']['publication_wait'] is False
+
+
+@pytest.mark.parametrize('available,expects_range', [(39, False), (40, True)])
+def test_opening_range_requires_the_minimum_available_bars(available, expects_range):
+    market, now, provenance = sample([89, 95])
+    opening = market.bars[5][:48]
+    removed = 48 - available
+    market.bars[5] = opening[:20] + opening[20 + removed:] + market.bars[5][48:]
+    result = analyze(market, now, provenance=provenance)
+    assert result['coverage']['opening_range_missing_count'] == removed
+    if expects_range:
+        assert result['state'] == 'SETUP_OBSERVED' and result['signal_ready'] is True
+        assert result['range']['native_candle_count'] == 40
+    else:
+        assert result['state'] == 'DATA_WAITING' and result['range'] is None
+        assert result['signal_ready'] is False and not result['candidates']
+        assert '39 of 48' in result['detail'] and 'at least 40' in result['detail']
 
 
 @pytest.mark.parametrize('index,in_opening_range', [(0, True), (47, True), (48, False)])
-def test_gap_diagnostics_identify_the_missing_completed_slot_without_authorizing_a_signal(index, in_opening_range):
+def test_gap_diagnostics_identify_the_missing_completed_slot(index, in_opening_range):
     market, now, provenance = sample([111, 105, 100])
     missing = market.bars[5].pop(index).end
     result = analyze(market, now, provenance=provenance)
@@ -172,7 +242,7 @@ def test_gap_diagnostics_identify_the_missing_completed_slot_without_authorizing
         'missing_timestamps_truncated': False,
         'opening_range_missing_count': int(in_opening_range), 'publication_wait': False,
     }
-    assert result['state'] == 'DATA_WAITING'
+    assert result['state'] == 'WATCHING'
     assert result['signal_ready'] is False and result['current_event'] is None
 
 
