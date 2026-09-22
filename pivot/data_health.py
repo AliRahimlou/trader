@@ -7,6 +7,11 @@ from .history_health import frame_gaps
 from .feeds import leader_history_sessions, LEADER_HISTORY_SESSIONS
 
 LABELS = {5: '5-minute', 15: '15-minute', 60: '1-hour', 240: '4-hour', 1440: 'Daily'}
+# A provider source timestamp this far ahead of the host clock is treated as
+# clock skew rather than a future value (app choice; the videos say nothing
+# about clocks). Shared by the VIX collectors; kept here because the frozen
+# research engine bundles this module without the provider adapters.
+SOURCE_CLOCK_SKEW_SECONDS = 5
 
 
 def last_expected(sessions, minutes, now):
@@ -129,7 +134,8 @@ def vix_health(market, now, error=None, details=None):
         value_at = timestamp((details or {})['latest_value_at'])
         valid_until = min(market.observed_at + timedelta(seconds=90),
                           value_at + timedelta(seconds=90), latest + timedelta(seconds=990))
-        verified = (details or {}).get('timeframe') == 'REAL-TIME' and 0 <= (now-value_at).total_seconds() <= 90
+        # The source stamp may sit within CLOCK_SKEW ahead of the host clock.
+        verified = (details or {}).get('timeframe') == 'REAL-TIME' and -SOURCE_CLOCK_SKEW_SECONDS <= (now-value_at).total_seconds() <= 90
     except (KeyError, TypeError, ValueError, AttributeError):
         valid_until, verified = None, False
     current = bool(not error and market and market.symbol == 'I:VIX' and market.source == 'massive_indices' and market.realtime and latest and

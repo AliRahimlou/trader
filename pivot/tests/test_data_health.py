@@ -56,7 +56,7 @@ def test_vix_requires_explicit_realtime_entitlement_and_discards_partial_bar():
     assert feed.vix_diagnostics['timeframe']=='REAL-TIME'
 
 
-@pytest.mark.parametrize('field,value', [('timeframe','DELAYED'),('timeframe',None),('ticker','I:NDX'),('type','stocks'),('error','NOT_ENTITLED'),('value',float('nan')),('last_updated',int((NOW-timedelta(minutes=15)).timestamp()*1e9)),('last_updated',int((NOW+timedelta(seconds=1)).timestamp()*1e9))])
+@pytest.mark.parametrize('field,value', [('timeframe','DELAYED'),('timeframe',None),('ticker','I:NDX'),('type','stocks'),('error','NOT_ENTITLED'),('value',float('nan')),('last_updated',int((NOW-timedelta(minutes=15)).timestamp()*1e9)),('last_updated',int((NOW+timedelta(seconds=6)).timestamp()*1e9))])
 def test_vix_snapshot_http_success_is_not_enough(field,value):
     feed=IndexFeed();feed.point[field]=value
     with pytest.raises(FeedError):load_vix(feed,NOW,received_at=NOW)
@@ -148,6 +148,15 @@ def test_quote_adapter_rejects_malformed_values_before_snapshot_storage(change):
     quote={'t':NOW.isoformat(),'bp':100,'ap':101,'bs':1,'as':1,**change}
     feeds.get=lambda *args:{'symbol':'QQQ','quote':quote}
     with pytest.raises(FeedError):feeds.quote()
+
+
+def test_vix_snapshot_within_clock_skew_is_accepted_and_health_stays_current():
+    feed=IndexFeed()
+    feed.point['last_updated']=int((NOW+timedelta(seconds=5)).timestamp()*1e9)
+    market=load_vix(feed,NOW,received_at=NOW)
+    assert feed.vix_diagnostics['latest_value_at']==(NOW+timedelta(seconds=5)).isoformat()
+    assert vix_health(market,NOW,details=feed.vix_diagnostics)['status']=='current'
+    assert len(feed.calls)==2
 
 
 def test_vix_freshness_uses_provider_timestamp_not_just_download_time():

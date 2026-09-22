@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from .feeds import FeedError, ET
 from .history_health import frame_gaps
-from .insight_cache import _validate
+from .insight_cache import CLOCK_SKEW, _validate
 from .insight_validation import _aware, _calendar
 from .models import Bar, Market
 
@@ -15,6 +15,7 @@ def _payload(envelope):
                   'in_flight': 'A VIX refresh is already running',
                   'retry_wait': 'Waiting for the bounded VIX recovery time',
                   'recovery_budget_exhausted': 'The VIX recovery allowance is exhausted for this period',
+                  'headroom_reserved': 'The remaining VIX request allowance is reserved for scheduled collection',
                   'stale': 'The saved VIX quote is no longer current'}.get(
                       envelope.get('status'), 'Current InsightSentry VIX data is unavailable')
         raise FeedError(reason + '; new entries must wait')
@@ -31,7 +32,8 @@ def diagnostics(cache, now, history=None):
                           'reserved': state['reserved_requests'],
                           'actual_requests': state['requests_recorded'],
                           **{key: state[key] for key in ('recovery_month_used', 'recovery_month_limit',
-                             'recovery_day_used', 'recovery_day_limit') if key in state}}}
+                             'recovery_day_used', 'recovery_day_limit', 'projected_month_need',
+                             'retry_headroom', 'slot_attempt_limit', 'quote_refresh_limit') if key in state}}}
     if history:
         details.update(history_status=history['status'], history_received_at=history.get('received_at'),
                        source_updated_at=history.get('source_updated_at'),
@@ -108,6 +110,13 @@ def load_history(cache, now, sessions, *, clock=None, report=None):
 
 
 def confirm_quote(cache, now, *, clock=None):
+    """Fresh actual-index quote for entry admission.
+
+    A source stamp up to ``CLOCK_SKEW`` ahead of the host clock is accepted
+    (app choice: a host clock a few seconds behind the provider is skew, not a
+    bad quote). ``updated_at`` is then bounded by host time so downstream age
+    checks stay monotonic; ``source_updated_at`` keeps the provider's stamp.
+    """
     clock = clock or (lambda: datetime.now(timezone.utc))
     try:
         envelope = cache.quote(_aware(now))
@@ -116,7 +125,10 @@ def confirm_quote(cache, now, *, clock=None):
         if received > checked_at:
             raise ValueError('Future receipt')
         updated = _aware(_validate('quote', raw, checked_at))
-        return {'source': 'insightsentry', 'symbol': 'I:VIX', 'updated_at': updated.isoformat(),
+        if updated > checked_at + CLOCK_SKEW:
+            raise ValueError('Future source')
+        return {'source': 'insightsentry', 'symbol': 'I:VIX', 'updated_at': min(updated, checked_at).isoformat(),
+                'source_updated_at': updated.isoformat(),
                 'value': raw['data'][0]['last_price'], 'delay_seconds': 0}
     except (ValueError, KeyError, TypeError, AttributeError, OverflowError, OSError):
         raise FeedError('Waiting for a fresh actual VIX quote within the free data allowance') from None
