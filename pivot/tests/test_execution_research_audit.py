@@ -57,7 +57,7 @@ def test_25_dollar_target_does_not_admit_unavailable_fractional_short(audit_engi
     snapshot['setup'].update(entry=675, stop=690, target=660)
     executor.tick(snapshot)
     assert not broker.sent and store.active_trade() is None
-    assert 'quantity' in executor.message
+    assert 'whole QQQ shares' in executor.message  # Skipped short, reported as a wait.
 
 
 @pytest.mark.parametrize('purpose', ['entry', 'stop', 'exit0'])

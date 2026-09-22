@@ -192,16 +192,23 @@ def test_temporary_missing_position_recovers_with_protection_without_manual_reso
     assert len(broker.sent) == 2 and broker.sent[1]['type'] == 'stop'
 
 
-def test_unknown_entry_remains_uncertain_even_after_long_flatness(runtime):
+def test_unknown_entry_stays_uncertain_then_resolves_as_never_delivered(runtime):
     executor, broker, store = runtime
     broker.entry_mode = 'lost_unseen'
     executor.tick(ready())
-    for _ in range(4):
-        broker.at += timedelta(minutes=1)
-        executor.tick({})
+    broker.at += timedelta(minutes=1)
+    executor.tick({})
+    # The first minute of 404 lookups only starts the bounded confirmation window.
     assert store.active_trade()['stage'] == 'entering' and len(broker.sent) == 1
     assert 'flat_reconciliation_started_at' not in store.active_trade()
-    assert not any(event['kind'] == 'manual_resolution_confirmed' for event in store.events())
+    for _ in range(3):
+        broker.at += timedelta(minutes=1)
+        executor.tick({})
+    # A flat account with no unknown QQQ order after the window proves the POST never arrived.
+    assert store.active_trade() is None and len(broker.sent) == 1
+    kinds = [event['kind'] for event in store.events()]
+    assert 'order_not_found' in kinds and 'manual_resolution_confirmed' not in kinds
+    assert store.session_entry_allowance(broker.at)['used'] == 1
 
 
 def test_partial_fill_incident_survives_restart_and_manages_final_fill_safely(runtime):

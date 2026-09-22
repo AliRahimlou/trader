@@ -174,18 +174,28 @@ def test_prepared_entry_cannot_outlive_its_data_verification(engine):
     assert s.active_trade() is None and not b.sent
 
 
-def test_prepared_entry_cannot_outlive_its_quote(engine):
+def test_prepared_entry_budget_starts_at_quote_receipt_not_exchange_timestamp(engine):
     e,b,s=engine;enable(e)
     good=b.quote
     def old_quote(symbol):
         quote=good(symbol)
-        quote['t']=(NOW-timedelta(seconds=14)).isoformat()
+        quote['t']=(NOW-timedelta(seconds=14)).isoformat()  # Fresh enough to read; nearly spent by exchange time.
         return quote
     b.quote=old_quote
     original=e._manage;e._manage=lambda trade:None
     e.tick(ready());e._manage=original
     assert s.active_trade() and not b.sent
     b.at+=timedelta(seconds=2)
+    e.tick(ready())
+    assert [p['type'] for p in b.sent]==['market','stop'] and s.active_trade()['stage']=='open'
+
+
+def test_prepared_entry_never_outlives_its_ten_second_intent_window(engine):
+    e,b,s=engine;enable(e)
+    original=e._manage;e._manage=lambda trade:None
+    e.tick(ready());e._manage=original
+    assert s.active_trade() and not b.sent
+    b.at+=timedelta(seconds=11)
     e.tick(ready())
     assert not b.sent and s.active_trade() is None
 

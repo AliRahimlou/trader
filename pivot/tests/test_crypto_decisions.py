@@ -109,7 +109,7 @@ def test_pre_submit_price_change_retains_no_order_reason_without_counting_attemp
     original, calls = b.quote, []
     def moving(symbol):
         calls.append(symbol)
-        if len(calls) == 2: b.ask += D('.01')
+        if len(calls) == 2: b.ask += D('.05')  # Beyond the immediate-limit buffer.
         return original(symbol)
     b.quote = moving;tick(e)
     review = store.decision_review(b.at)

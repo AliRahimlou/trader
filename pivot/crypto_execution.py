@@ -40,8 +40,11 @@ STATUSES = TERMINAL | WORKING | {'accepted', 'pending_new', 'pending_cancel', 'p
 FEE = Decimal('.0025')
 EXIT_ALLOWANCE = Decimal('.001')
 MAX_ENTRY_DRIFT = Decimal('.001')
+IOC_LIMIT_BUFFER = Decimal('.0003')  # An immediate limit fills at the best ask; this only absorbs one-tick upticks.
 MAX_SPREAD = Decimal('.005')
 MAX_ACTIVE_CRYPTO_TRADES = 2
+ORDER_NOT_FOUND_CONFIRM_SECONDS = 60
+IOC_SETTLE_GRACE_SECONDS = 5  # An immediate-or-cancel order can still report pending_new/accepted in the POST response.
 MAX_EXIT_CHILD_NOTIONAL = Decimal('190000')  # Buffer below Alpaca's published $200k per-order cap.
 ZERO = Decimal('0')
 NY = ZoneInfo('America/New_York')
@@ -452,8 +455,15 @@ class CryptoRangeExecutor:
         entry, stop, target = [number(event[k]) for k in ('entry', 'stop', 'target')]
         if (ask - bid) / ask > MAX_SPREAD:
             raise CryptoWaiting('Crypto spread is too wide for the current entry')
-        limit = rounded(ask, tick, ROUND_UP)
-        if not stop < bid <= limit < target or limit > entry * (1 + MAX_ENTRY_DRIFT):
+        if ask > entry * (1 + MAX_ENTRY_DRIFT):
+            raise CryptoWaiting('Crypto price moved beyond the confirmed entry or its stop/target')
+        # Price the immediate limit slightly above the observed ask, capped at
+        # the confirmed entry drift. It still fills at the best available ask,
+        # but a one-tick uptick between preflight and submission no longer
+        # retires the plan or expires the order with zero fill.
+        limit = rounded(min(ask * (1 + IOC_LIMIT_BUFFER), entry * (1 + MAX_ENTRY_DRIFT)), tick, ROUND_UP)
+        limit = max(limit, rounded(ask, tick, ROUND_UP))
+        if not stop < bid <= limit < target or limit > rounded(entry * (1 + MAX_ENTRY_DRIFT), tick, ROUND_UP):
             raise CryptoWaiting('Crypto price moved beyond the confirmed entry or its stop/target')
         if target * (1 - FEE) * (1 - FEE - EXIT_ALLOWANCE) <= limit:
             raise CryptoWaiting('The crypto target does not cover two-sided fees and the execution allowance')
@@ -577,8 +587,16 @@ class CryptoRangeExecutor:
     def _accept_order(self, trade, name, result):
         op = trade['ops'][name]
         if result is None:
-            self._uncertain(trade, name)
-            raise CryptoWaiting('Crypto order outcome is unknown. Reconciling its saved identifier without resubmitting.')
+            resolved = self._resolve_never_reached_broker(trade, name)
+            if resolved is None:
+                self._uncertain(trade, name)
+                raise CryptoWaiting('Crypto order outcome is unknown. Reconciling its saved identifier without resubmitting.')
+            return resolved
+        if (op.get('last_seen') or {}).get('evidence') == 'not_found_at_broker':
+            # The broker now reports an order this app had concluded never
+            # arrived. Adopt the actual evidence; the synthetic record cannot win.
+            op['last_seen'] = {}
+            self.main_store.event('crypto_order_late_arrival', {'trade_id': trade['id'], 'operation': name, 'symbol': trade['symbol']})
         try:
             payload = op['payload']
             if (not isinstance(result, dict) or result.get('client_order_id') != payload['client_order_id']
@@ -625,6 +643,60 @@ class CryptoRangeExecutor:
         if result['status'] == 'rejected':
             self._incident(trade, name + '_rejected', 'A crypto order was rejected. New entries are paused; position recovery continues.')
         return result
+
+    def _resolve_never_reached_broker(self, trade, name):
+        """Bounded terminal resolution for a POST that never created a broker order.
+
+        Alpaca indexes client_order_id on acceptance. A lookup that still returns
+        404 after the confirmation window, with no matching or unknown order for
+        the market and no coins reserved by an invisible sell, shows the request
+        never arrived. Terminal evidence lets management continue: an entry ends
+        without a fill, a missing stop closes verified exposure, and a missing
+        exit is followed by the next exit child. A later order with the same
+        identifier is adopted, never duplicated.
+        """
+        op = trade['ops'][name]
+        seen = op.get('last_seen') or {}
+        if seen.get('evidence') == 'not_found_at_broker':
+            return deepcopy(seen)
+        if op.get('state') != 'attempted' or seen:
+            return None
+        now = self.now()
+        if not op.get('not_found_since'):
+            op['not_found_since'] = iso(now)
+            self.store.save_trade(trade)
+            return None
+        if (now - timestamp(op['not_found_since'])).total_seconds() < ORDER_NOT_FOUND_CONFIRM_SECONDS:
+            return None
+        payload = op['payload']
+        ours = {o['payload']['client_order_id'] for o in trade['ops'].values()}
+        try:
+            open_orders = self.broker.orders()
+            positions = self.broker.positions()
+        except FeedError:
+            return None
+        for order in open_orders:
+            if canonical_symbol(order.get('symbol')) == trade['symbol'] and (
+                    order.get('client_order_id') == payload['client_order_id'] or order.get('client_order_id') not in ours):
+                return None  # The order, or an unexplained order, exists; keep reconciling.
+        held = next((p for p in positions if canonical_symbol(p.get('symbol')) == trade['symbol']), None)
+        if name == 'entry':
+            if held is not None:
+                return None  # Exposure without a known fill cannot prove the entry never arrived.
+        elif held is not None and abs(number(held.get('qty', '0')) - number(held.get('qty_available', '0'))) > number(trade['qty_step']):
+            return None  # Coins are still reserved; an invisible sell may exist.
+        op['last_seen'] = {'id': None, 'client_order_id': payload['client_order_id'], 'symbol': trade['symbol'],
+                           'side': payload['side'], 'type': payload['type'], 'time_in_force': payload['time_in_force'],
+                           'status': 'expired', 'qty': payload['qty'], 'filled_qty': '0', 'filled_avg_price': None,
+                           'limit_price': payload.get('limit_price'), 'stop_price': payload.get('stop_price'),
+                           'updated_at': None, 'filled_at': None, 'evidence': 'not_found_at_broker', 'confirmed_at': iso(now)}
+        op.pop('uncertain_since', None)
+        self.store.save_trade(trade)
+        self.store.resolve_incident(trade['id'] + ':' + name + '_unknown',
+                                    proof='No broker order existed after the confirmation window; no exposure or reservation was observed')
+        self.main_store.event('crypto_order_not_found', {'trade_id': trade['id'], 'operation': name, 'symbol': trade['symbol'],
+                                                         'not_found_since': op['not_found_since']})
+        return deepcopy(op['last_seen'])
 
     def _uncertain(self, trade, name):
         op = trade['ops'][name]
@@ -749,8 +821,16 @@ class CryptoRangeExecutor:
         if entry is None or trade['stage'] == 'finished':
             return
         if entry['status'] not in TERMINAL:
-            # IOC should settle immediately. Explicitly cancel any remainder,
-            # including live-off, before protecting only the definitive fill.
+            # IOC settles at the venue within moments, but the POST response and
+            # the first lookup can still say pending_new/accepted. Give the venue a
+            # short grace before cancelling, so a cancel does not beat the match
+            # and turn a valid entry into a no-fill that consumes the event and
+            # a session attempt. Live-off cancels immediately as before.
+            attempted = trade['ops']['entry'].get('attempted_at')
+            if (self.enabled() and attempted
+                    and 0 <= (self.now() - timestamp(attempted)).total_seconds() < IOC_SETTLE_GRACE_SECONDS):
+                raise CryptoWaiting('Immediate crypto entry is settling at the venue; confirming before any cancellation')
+            # Explicitly cancel any remainder before protecting only the definitive fill.
             entry = self._cancel(trade, 'entry', entry)
         filled = number(entry.get('filled_qty', '0'))
         if filled == 0:
