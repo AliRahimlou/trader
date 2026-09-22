@@ -2,11 +2,11 @@
 
 Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 recording supplementary. A separate **4H Range Reversal** live-capable Alpaca crypto engine follows the September 19 recording. The view menu changes display only; persistent strategy controls select which engines may trade under the global Live switch.
 
-**Current state: the app connects to Alpaca and InsightSentry Free actual VIX, with protected AllSpark hosting and remote GitHub updates.** The VIX integration keeps completed candles in a durable cache and checks a fresh actual-index quote before an otherwise valid entry. Its free allowance is guarded across restarts. Live execution requires owner review through the top-right Live money switch. Order handling has passed offline simulated-broker tests; paper-account/live fills and profitability have not been established.
+**Current state (version 4.4.0): the app connects to Alpaca and InsightSentry Free actual VIX, with protected AllSpark hosting and remote GitHub updates, and has never sent an order.** The September 21 audit found that the 4.3 numerical interpretations (a nearest-micro-level target with a median 0.52 R, a 1.5-tick VIX zone with no persistence, a single conflicting leader vetoing all seven, one session allowance shared by both engines) made a qualifying entry nearly impossible. Version 4.4.0 changes those interpretations behind new policy versions: a minimum reward-to-risk with the event level excluded from targets, a VIX-scaled swing tolerance with persistence and invalidation, neutral instead of veto for a conflicting leader, two entry attempts per strategy per session, a strategy-scoped pause instead of global Live-off on a stock rejection (with an optional `PIVOT_ALERT_WEBHOOK_URL` alert), a 30-minute entry cutoff, a 5-second clock-skew tolerance, a crypto net-expectancy cost gate after fees, a gap-tolerant opening range and time-based VIX retries. **After rollout both strategies show “review required”; the owner must accept the new policies in the app before new entries resume.** Purchase amounts and markets are unchanged. The VIX integration keeps completed candles in a durable cache and checks a fresh actual-index quote before an otherwise valid entry; its free allowance is guarded across restarts. Order handling has passed offline simulated-broker tests and 60-day replays; paper-account/live fills and profitability have not been established.
 
-See [execution behavior and remaining limits](docs/live-execution.md).
+See the [4.4.0 release note](docs/production-v4.4.0.md) and [execution behavior and remaining limits](docs/live-execution.md).
 
-Both engines share a durable maximum of **two new entry attempts per New York calendar session**. Rejected, uncertain and already-claimed attempts consume the allowance; completing a trade or restarting does not refund it. Protection and exits remain available after the allowance is exhausted. The dashboard reports the shared allowance separately from fills. See [version 4.3.0 repair notes](docs/production-v4.3.0.md) and the [4.3.2 execution-safety fixes](docs/production-v4.3.2.md) (lost broker requests resolve after 60 seconds instead of stranding a position; skipped shorts, submission budget, immediate-limit buffer and container logs).
+Each engine has its own durable maximum of **two new entry attempts per New York calendar session** (shared across both engines before 4.4.0). Rejected, uncertain and already-claimed attempts consume the allowance; completing a trade or restarting does not refund it. Protection and exits remain available after the allowance is exhausted. The dashboard reports each engine's allowance separately from fills. See [version 4.3.0 repair notes](docs/production-v4.3.0.md) and the [4.3.2 execution-safety fixes](docs/production-v4.3.2.md) (lost broker requests resolve after 60 seconds instead of stranding a position; skipped shorts, submission budget, immediate-limit buffer and container logs).
 
 ## Hosted app
 
@@ -16,13 +16,13 @@ See the [deployment verification](docs/allspark-deployment-audit.md) for the ins
 
 ## Socrates flow
 
-Premark Nasdaq areas (previous-day extremes and repeated four-hour levels) → observe a break/retest or sweep → confirm the technology leaders at supply/demand → confirm the actual VIX at its own area → evaluate the documented trade plan and current broker checks.
+Premark Nasdaq areas (previous-day extremes and repeated four-hour levels) → observe a break/retest or sweep → confirm the technology leaders at supply/demand (five of seven agree, at most one opposing; a conflicting leader is neutral) → confirm the actual VIX reacting the opposite way at a VIX-scaled swing area, with persistence → evaluate the documented trade plan (target excludes the event's own level and must meet the minimum reward-to-risk) and current broker checks. No new entries in the final 30 minutes; positions close five minutes before the close.
 
 These are related source variants in one workflow. The app does not add opening-range/FVG, ranking scores, daily-bias heuristics, volatility ETF proxies, 5-minute tape conditions, or VWAP requirements.
 
 ## 4H Range Reversal flow
 
-Build the completed first four-hour crypto range → observe a five-minute close outside → wait for a later close back inside → validate the signal, current bid/ask, shared cash and trading costs → execute an Alpaca spot long with its own stop and target. Bitcoin is the default; Ethereum is optional. Upper-range short setups cannot execute on this spot account. The global Live switch and each strategy's saved permission control entries; switching the view never changes either permission.
+Build the completed first four-hour crypto range (gap-tolerant since 4.4.0, with a minimum bar count) → observe a five-minute close outside → wait for a later close back inside → validate the signal, current bid/ask, shared cash and the net expectancy after 0.25%-per-side fees (the skip reason shows the numbers) → execute an Alpaca spot long with its own stop and target. Bitcoin is the default; Ethereum is optional. Upper-range short setups cannot execute on this spot account. The global Live switch and each strategy's saved permission control entries; switching the view never changes either permission.
 
 ## References
 
@@ -39,6 +39,9 @@ Build the completed first four-hour crypto range → observe a five-minute close
 - [Version 3.2.2 live execution audit and recovery fixes](docs/production-v3.2.2.md)
 - [Version 3.3.0 strategy views and Bitcoin observations](docs/production-v3.3.0.md)
 - [Version 4.0.0 live strategy controls, shared capital and crypto execution](docs/production-v4.0.0.md)
+- [Version 4.3.0 shared entry allowance and execution verification](docs/production-v4.3.0.md)
+- [Version 4.3.2 lost broker requests, skipped shorts and submission budget](docs/production-v4.3.2.md)
+- [Version 4.4.0 minimum reward-to-risk, VIX-scaled gate, neutral leaders, per-engine allowances](docs/production-v4.4.0.md)
 - [Detailed 4H Range Reversal source review and precise observation rules](docs/research/range-reversal-video-20260919.md)
 - [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
 - [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
