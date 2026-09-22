@@ -1,5 +1,6 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
-import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert, CRYPTO_MARKETS, cryptoWatchMarkup, cryptoReviewMarkup} from './strategy-families.mjs';
+import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert, CRYPTO_MARKETS, cryptoWatchMarkup, cryptoReviewMarkup, CRYPTO_PAUSE_TOOLTIP} from './strategy-families.mjs';
+import {readinessView,readinessAction,readinessMarkup,socratesTradeMarkup,SOCRATES_KEY_RULES} from './readiness.mjs';
 import {dailyReviewView,dailyReviewMarkup,fetchDailyReview,previousReviewDay,reviewDay,validReviewDay} from './daily-review.mjs';
 import {chartWidth,defaultTheme,drawPriceChart,drawVixChart,levelsTableRows,chartStatus} from './chart.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
@@ -15,7 +16,7 @@ let liveReviewFingerprint=null,strategyReviewFingerprint=null;
 let dailySelectedDay=null,dailyHistory=null,dailyReviewLoading=false,dailyReviewError='',dailyReviewGeneration=0;
 // Look-left chart: display only. app.js fetches, sizes and hands data to chart.mjs; it never trades.
 let chartData=null,chartTimeframe='60',chartFetching=false,chartFrame=0;
-const CHART_TOKENS={bg:'--chart-bg',grid:'--chart-grid',text:'--chart-text',up:'--chart-up',down:'--chart-down',band:'--chart-band',bandEdge:'--chart-band-edge',event:'--chart-event',eventEdge:'--chart-event-edge',stop:'--chart-stop',target:'--chart-target',prev:'--chart-prev',vixZone:'--chart-vix-zone',vixEdge:'--chart-vix-edge',reaction:'--chart-reaction'};
+const CHART_TOKENS={bg:'--chart-bg',grid:'--chart-grid',text:'--chart-text',up:'--chart-up',down:'--chart-down',band:'--chart-band',bandEdge:'--chart-band-edge',event:'--chart-event',eventEdge:'--chart-event-edge',stop:'--chart-stop',target:'--chart-target',prev:'--chart-prev',vixZone:'--chart-vix-zone',vixEdge:'--chart-vix-edge',reaction:'--chart-reaction',labelBg:'--chart-label-bg'};
 function chartTheme() {
   const theme=defaultTheme(),styles=getComputedStyle(document.documentElement);
   for(const [key,token] of Object.entries(CHART_TOKENS)){const value=styles.getPropertyValue(token).trim();if(value)theme[key]=value;}
@@ -41,6 +42,12 @@ function renderChart() {
   drawPriceChart(price.ctx,chartData,{timeframe:chartTimeframe,width:price.width,height:price.height,theme});
   const vix=sizeCanvas($('vix-chart'),180);
   drawVixChart(vix.ctx,chartData,{width:vix.width,height:vix.height,theme});
+  // On a narrow screen the chart scrolls inside its own box; start at the latest candles
+  // and the price axis once, then leave the owner's scroll position alone.
+  for(const id of ['qqq-chart','vix-chart']){
+    const box=$(id).parentElement;
+    if(box?.dataset&&!box.dataset.positioned&&box.scrollWidth>box.clientWidth){box.scrollLeft=box.scrollWidth;box.dataset.positioned='true';}
+  }
   const rows=levelsTableRows(chartData?.levels,chartData?.reference);
   $('levels-table').querySelector('tbody').innerHTML=rows.length?rows.map(row=>`<tr><td class="number">${esc(row.band)}</td><td>${esc(row.source)}</td><td>${esc(row.established)}</td><td class="number">${esc(row.touches)}</td><td class="number">${esc(row.distance)}</td></tr>`).join(''):
     `<tr><td colspan="5" class="muted">${chartData?.available?'No established areas in the current analysis.':'Waiting for established areas.'}</td></tr>`;
@@ -122,16 +129,19 @@ function reconcileLive(next) {
 }
 function renderStrategyControls() {
   const p=portfolioView(snapshot),busy=strategySaving||saving||toggling||familyConnectionUnavailable;
-  $('strategy-run-summary').textContent=`Global Live ${p.globalOn?'On':'Off'} · ${p.families.map(f=>`${f.label} ${f.enabled?'On':'Off'} (${money(f.target)} per purchase)`).join(' · ')}. Changing views does not change trading.`;
+  const cryptoPaused=p.families[1].ownerPaused===true;
+  $('strategy-run-summary').textContent=`Live money ${p.globalOn?'On':'Off'} · Socrates ${p.families[0].enabled?'On':'Off'} (${money(p.families[0].target)} per purchase)`+
+    (cryptoPaused?' · Crypto paused.':` · 4H Range Reversal ${p.families[1].enabled?'On':'Off'} (${money(p.families[1].target)} per purchase).`);
+  // While crypto is paused its allowance is noise on the Socrates screen.
   $('entry-allowance').textContent=familyConnectionUnavailable
-    ? 'Session entry allowance unverified while the app reconnects.' : p.entryAllowance.text+(p.pause?' '+p.pause.text:'');
-  $('execution-scope').textContent=`Global Live · ${p.scope}`;
+    ? 'Session entry allowance unverified while the app reconnects.' : (cryptoPaused&&p.entryAllowance.socratesText?p.entryAllowance.socratesText:p.entryAllowance.text)+(p.pause?' '+p.pause.text:'');
+  $('execution-scope').textContent=`Live money · ${p.scope}`;
   for(const f of p.families){
-    const prefix=f.id==='socrates'?'socrates':'range';
+    const prefix=f.id==='socrates'?'socrates':'range',name=f.id==='socrates'?'Socrates':'crypto';
     $(prefix+'-run-state').textContent=f.status;
-    $(prefix+'-toggle').textContent=f.enabled?'Turn strategy Off':'Enable strategy';
+    $(prefix+'-toggle').textContent=f.enabled?`Turn ${name} Off`:`Turn ${name} On`;
     $(prefix+'-toggle').disabled=busy||!p.configured||(!f.enabled&&!f.available);
-    $(prefix+'-run-detail').textContent=`${money(f.target)} per purchase · ${f.symbols.join(', ')}. `+
+    $(prefix+'-run-detail').textContent=f.ownerPaused?(snapshot.crypto_execution?.message||`Crypto is paused: ${f.pauseReason}`):`${money(f.target)} per purchase · ${f.id==='socrates'?'QQQ for longs, PSQ for shorts':f.symbols.join(', ')}. `+
       (f.paused?`Paused by the app: ${f.pauseReason} `:'')+
       (f.id==='socrates'?appStatus(snapshot,displayClock.now()).text:(snapshot.crypto_execution?.message || 'Waiting for execution checks.'));
   }
@@ -140,6 +150,7 @@ function renderStrategyControls() {
   $('range-review').disabled=busy||!p.families[1].available;
   if(!rangeDirty&&!strategySaving){const f=p.families[1];$('range-amount').value=f.target;for(const symbol of CRYPTO_MARKETS)$('range-'+symbol.split('/')[0].toLowerCase()).checked=f.symbols.includes(symbol);}
   $('save-range').disabled=busy||!p.configured||!rangeDirty;
+  renderCryptoPause(p);
   $('strategy-save-message').textContent=strategyError || (strategySaving?'Saving strategy settings…':rangeDirty?'Unsaved crypto settings. Saving does not change global Live.':'Strategy Off stops its new entries. Existing positions continue their exits.');
   const execution=snapshot.crypto_execution || {},trades=Array.isArray(execution.trades)?execution.trades:[];
   const incidents=Array.isArray(execution.incidents)?execution.incidents:[];
@@ -153,6 +164,40 @@ function renderStrategyControls() {
   $('crypto-recheck-message').textContent=cryptoRechecking?'Checking saved incidents against broker records. No orders or trading settings are changed.':recheckResult || 'Checks broker evidence only. An incident clears only when its safe resolution is verified.';
   $('crypto-trades').innerHTML=trades.length?trades.map(row=>`<div class="holding"><strong>${esc(row.symbol)}</strong><span>${esc(row.stage || 'Managing')} · ${esc(cryptoQuantityLabel(row))}</span><b>${money(row.amount)} purchase</b><p class="help">Stop ${money(row.stop)} · Target ${money(row.target)}${row.reason?' · '+esc(row.reason):''}</p></div>`).join(''):'<p class="muted">No app-managed crypto positions in this snapshot. Broker positions and orders are listed below.</p>';
   $('crypto-history').innerHTML=cryptoHistoryMarkup(execution.history);
+}
+// Crypto paused (owner decision, enforced by the backend): every crypto section stays in the
+// page, grayed, with its controls disabled and explained. Turning crypto Off and incident
+// rechecks stay available so existing positions can always be managed.
+const cryptoControls=()=>['range-toggle','range-review','save-range','run-both','range-amount',...CRYPTO_MARKETS.map(symbol=>'range-'+symbol.split('/')[0].toLowerCase())];
+function renderCryptoPause(p) {
+  const paused=p.families[1].ownerPaused===true;
+  for(const id of cryptoControls()){
+    const node=$(id);
+    if(paused&&!(id==='range-toggle'&&p.families[1].enabled)){node.disabled=true;node.setAttribute?.('aria-disabled','true');node.title=CRYPTO_PAUSE_TOOLTIP;}
+    else{node.removeAttribute?.('aria-disabled');if(node.title===CRYPTO_PAUSE_TOOLTIP)node.title='';}
+  }
+  $('range-control').classList?.toggle('is-paused',paused);$('range-control').title=paused?CRYPTO_PAUSE_TOOLTIP:'';
+  $('crypto-area').classList?.toggle('is-paused',paused);
+  $('range-pause-badge').hidden=!paused;$('crypto-area-badge').hidden=!paused;$('crypto-pause-banner').hidden=!paused;$('crypto-paused-note').hidden=!paused;
+  if(paused)$('crypto-pause-banner').textContent=p.cryptoPause.message;
+  const option=$('strategy-view').querySelector?.('option[value="range_reversal"]');
+  if(option)option.textContent=paused?'Crypto (paused)':'Crypto';
+}
+function renderReadiness() {
+  const now=displayClock.now(),view=readinessView(snapshot,now,portfolioStatus(snapshot,appStatus(snapshot,now)));
+  const open=$('readiness-content').querySelector?.('details[open]');
+  $('readiness-content').innerHTML=readinessMarkup(view,readinessAction(view,snapshot));
+  const details=$('readiness-content').querySelector?.('details');if(open&&details)details.open=true;
+  $('socrates-readiness').dataset.status=view.status;
+  const trade=snapshot.execution?.trade;
+  $('socrates-trade').innerHTML=trade?socratesTradeMarkup(trade,snapshot.execution?.message):'';
+  $('socrates-trade').hidden=!trade;
+}
+// A lost connection must never leave an old "Ready" on screen.
+function renderReadinessUnavailable() {
+  $('readiness-content').innerHTML=readinessMarkup(readinessView(null,0,{title:'App connection unavailable',
+    text:'Reconnecting to check whether Socrates can trade. Nothing shown here can authorize an order.'}));
+  $('socrates-readiness').dataset.status='checking';
 }
 async function recheckCryptoIncidents() {
   if(!snapshot||cryptoRechecking||saving||toggling||strategySaving||familyConnectionUnavailable
@@ -217,6 +262,7 @@ function render() {
   const s=snapshot; if(!s)return;const now=displayClock.now();
   renderStrategyFamilies();
   renderStrategyControls();
+  renderReadiness();
   renderDailyReview();
   $('runtime-status').textContent=s.hosting?.message || 'Checking where the app is running…';
   const release=releaseStatus(s,now);
@@ -226,7 +272,7 @@ function render() {
   document.querySelector('.release-badge').dataset.state=release.tone;
   const stale=age(s.account_at,now)>60 || !!s.account_error;
   $('balance').textContent=money(s.account?.equity);
-  $('account-mode').textContent=s.account ? `${s.account.mode} account · ${s.live_enabled?'execution on':'execution off'}` : '';
+  $('account-mode').textContent=s.account ? `${s.account.mode} account · Live money ${s.live_enabled?'On':'Off'}` : '';
   const change=Number(s.account?.equity)-Number(s.account?.last_equity);
   $('day-change').textContent=s.account ? `${change>=0?'+':''}${money(change)} since previous close` : 'Waiting for account data';
   $('cash').textContent=`Cash ${money(s.account?.cash)}`;
@@ -237,11 +283,13 @@ function render() {
   $('analysis-updated').textContent=ago(s.analysis_at,now);
   const status=portfolioStatus(s,appStatus(s,now)), vixDisplay=vixStatus(s.data_health?.vix,now);
   $('status-title').textContent=status.title;
-  $('live-status').innerHTML=`Live money <strong>${s.live_enabled?'On':'Off'}</strong><span class="switch" aria-hidden="true"></span>`;
+  const reviewLive=!s.live_enabled&&(s.review_required===true||s.portfolio?.socrates?.review_required===true);
+  $('live-status').innerHTML=`Live money <strong>${s.live_enabled?'On':reviewLive?'Off · review rules':'Off'}</strong><span class="switch" aria-hidden="true"></span>`;
   $('live-status').classList.toggle('is-on',s.live_enabled);
+  $('live-status').classList.toggle('needs-review',reviewLive);
   $('live-status').disabled=toggling || strategySaving || (!portfolioView(s).globalOn && !portfolioView(s).enabled.some(f=>f.available));
   $('live-status').setAttribute('aria-label', s.live_enabled?'Global live money on. Turn off all new entries':'Global live money off. Review enabled strategies and turn on');
-  $('live-status').title='Controls new entries for all enabled strategies. Existing positions continue their exits.';
+  $('live-status').title=s.live_enabled?'Turn Live money Off: stops all new entries. Existing positions continue their exits.':'Review the rules and turn Live money On. Existing positions continue their exits either way.';
   $('status-text').textContent=liveError || status.text;
   const operations=operationStatus(s,now), session=sessionReview(s);
   if(!s.portfolio && operations.workerLabel==='Needs attention' && !s.execution?.trade){
@@ -263,7 +311,7 @@ function render() {
   $('market-overview').innerHTML=`<article class="card"><div class="section-heading"><h3>Nasdaq overview</h3><span>Broader price structure</span></div><div class="context-frames">${overview.frames.map(frame=>`<div><span class="help">${esc(frame.label)}</span><strong>${esc(frame.value)}</strong><span class="help">${frame.latestAt?`Candle ${esc(new Date(frame.latestAt).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}))}`:'Waiting for candles'}</span></div>`).join('')}</div><p class="help">${esc(overview.detail)}</p><details class="evidence"><summary>How to read the overview</summary><p>${esc(overview.explanation)}</p>${overview.frames.map(frame=>`<p><b>${esc(frame.label)}</b><span>${esc(frame.detail)}</span></p>`).join('')}</details></article>`;
   if(overviewOpen)$('market-overview').querySelector('details').open=true;
   const openMethods=new Set([...$('strategy-cards').querySelectorAll('details[open]')].map(node=>node.dataset.method));
-  $('strategy-cards').innerHTML=views.map(method=>`<article class="card strategy"><div class="section-heading"><h3>${esc(method.label)}</h3><span class="pill ${method.qualified?'green':''}">${esc(method.state)}</span></div><p class="observation">${esc(method.detail)}</p>${method.area?`<p class="help">Nearest watched QQQ area: ${money(method.area.low)}${method.area.low!==method.area.high?` – ${money(method.area.high)}`:''}</p>`:''}${method.event_at?`<p class="help">Event confirmed ${esc(new Date(method.event_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}${method.event_expires_at?` · expires ${esc(new Date(method.event_expires_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}`:''}</p>`:''}${method.direction?`<div class="levels"><span>${esc(method.direction.toUpperCase())}${method.selected?' · leading analysis':''}</span><span>Signal reference ${money(method.entry)} · Stop ${money(method.stop)} · Target ${money(method.target)}</span></div>`:''}<details class="evidence" data-method="${esc(method.id)}"><summary>Current observations & checks</summary>${method.checks.map(c=>`<p><b class="${c.passed?'pass':'wait'}">${c.passed?'✓':'○'} ${esc(c.name)}</b><span>${esc(c.detail)}</span></p>`).join('') || '<p>Waiting for valid data.</p>'}</details></article>`).join('')+`<article class="card"><div class="section-heading"><h3>Technology leaders</h3><span>Shared confirmation</span></div><p class="help leader-summary">${esc(leaders.detail)}</p><div class="leader-chips">${leaders.rows.map(row=>`<span class="leader-chip ${row.vote?'pass':'wait'}" title="${esc(row.reason)}${row.latestAt?' · Candle '+esc(new Date(row.latestAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})):''}"><b>${esc(row.symbol)}</b> ${esc(row.label)}${row.reactionLabel?`<small>Reaction ${esc(row.reactionLabel)}</small>`:''}</span>`).join('')}</div>${leaders.alignment?`<p class="help">${esc(leaders.alignment)}</p>`:''}${leaders.ruleText?`<p class="help">${esc(leaders.ruleText)} ${esc(leaders.timing)}</p>`:''}${leaders.scope?`<p class="help">${esc(leaders.scope)}</p>`:''}<p class="help">${esc(vixDisplay.headline)} ${esc(vixDisplay.quoteNote)}</p><p class="help">QQQ · Nasdaq ETF proxy. Both methods are checked independently; only one position can be open.</p></article>`;
+  $('strategy-cards').innerHTML=views.map(method=>`<article class="card strategy"><div class="section-heading"><h3>${esc(method.label)}</h3><span class="pill ${method.qualified?'green':''}">${esc(method.state)}</span></div><p class="observation">${esc(method.detail)}</p>${method.area?`<p class="help">Nearest watched QQQ area: ${money(method.area.low)}${method.area.low!==method.area.high?` – ${money(method.area.high)}`:''}</p>`:''}${method.event_at?`<p class="help">Event confirmed ${esc(new Date(method.event_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}${method.event_expires_at?` · expires ${esc(new Date(method.event_expires_at).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}))}`:''}</p>`:''}${method.direction?`<div class="levels"><span>${esc(method.direction.toUpperCase())}${method.selected?' · leading analysis':''}</span><span>Signal reference ${money(method.entry)} · Stop ${money(method.stop)} · Target ${money(method.target)}</span></div>`:''}<details class="evidence" data-method="${esc(method.id)}"><summary>Current observations & checks</summary>${method.checks.map(c=>`<p><b class="${c.passed?'pass':'wait'}">${c.passed?'✓':'○'} ${esc(c.name)}</b><span>${esc(c.detail)}</span></p>`).join('') || '<p>Waiting for valid data.</p>'}</details></article>`).join('')+`<article class="card"><div class="section-heading"><h3>Technology leaders</h3><span>Shared confirmation</span></div><p class="help leader-summary">${esc(leaders.detail)}</p><div class="leader-chips">${leaders.rows.map(row=>`<span class="leader-chip ${row.vote?'pass':'wait'}" title="${esc(row.reason)}${row.latestAt?' · Candle '+esc(new Date(row.latestAt).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})):''}"><b>${esc(row.symbol)}</b> ${esc(row.label)}${row.reactionLabel?`<small>Reaction ${esc(row.reactionLabel)}</small>`:''}</span>`).join('')}</div>${leaders.alignment?`<p class="help">${esc(leaders.alignment)}</p>`:''}${leaders.ruleText?`<p class="help">${esc(leaders.ruleText)} ${esc(leaders.timing)}</p>`:''}${leaders.scope?`<p class="help">${esc(leaders.scope)}</p>`:''}<p class="help">${esc(vixDisplay.headline)} ${esc(vixDisplay.quoteNote)}</p><p class="help">Both entry methods are checked independently. Longs buy QQQ, shorts buy PSQ; only one Socrates position can be open.</p></article>`;
   for(const node of $('strategy-cards').querySelectorAll('details')) node.open=openMethods.has(node.dataset.method);
   $('holding-count').textContent=`${s.positions.length} positions · ${s.orders.length} orders`;
   $('holdings').innerHTML=(!s.positions.length&&!s.orders.length)?`<p class="muted">${stale?'No positions in the last snapshot. Awaiting a fresh broker update.':'No open positions or working orders.'}</p>`:
@@ -316,7 +364,7 @@ function render() {
 async function refresh() {
   if(fetching||saving||toggling||strategySaving)return; fetching=true; const version=generation;
   try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling&&!strategySaving){acceptSnapshot(next);familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);render();refreshChart();}}
-  catch { if(version!==generation||saving||toggling||strategySaving)return; familyConnectionUnavailable=true;renderStrategyFamilies();if(snapshot)renderStrategyControls();chartData=null;scheduleChartRender(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
+  catch { if(version!==generation||saving||toggling||strategySaving)return; familyConnectionUnavailable=true;renderStrategyFamilies();if(snapshot)renderStrategyControls();renderReadinessUnavailable();chartData=null;scheduleChartRender(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
   finally{fetching=false;if(version!==generation&&!saving&&!toggling&&!strategySaving)refresh();}
 }
 async function changeLive(enabled) {
@@ -337,16 +385,29 @@ async function changeLive(enabled) {
     toggling=false;$('cancel-live').disabled=false;$('confirm-live').disabled=!$('accept-policy').checked;render();refresh();
   }
 }
+// Opens the review dialog only; the permission changes after the checkbox and confirm.
+// Never turns Live money Off: that stays the header switch's own action.
+function openLiveReview() {
+  if(!snapshot||toggling||strategySaving||saving)return;
+  const p=portfolioView(snapshot);
+  if(p.globalOn)return;
+  pendingLive=null;
+  liveReviewFingerprint=permissionFingerprint();
+  const review=snapshot.review_required===true||snapshot.portfolio?.socrates?.review_required===true;
+  const lines=p.enabled.flatMap(f=>f.id==='socrates'?snapshot.execution_policy.summary:f.policy);
+  $('live-title').textContent=review?'Accept the updated Socrates rules':'Turn Live money On';
+  $('confirm-live').textContent=review?'Accept updated rules':'Turn Live money On';
+  $('live-summary').textContent=`Live money · ${p.scope}. ${p.enabled.map(f=>f.label+': '+money(f.target)+' per purchase').join(' · ')}`;
+  $('live-key-points').innerHTML=p.enabled.some(f=>f.id==='socrates')?SOCRATES_KEY_RULES.map(line=>`<li>${esc(line)}</li>`).join(''):'';
+  $('live-rule-count').textContent=`(${lines.length})`;
+  $('live-policy').innerHTML=lines.map(line=>`<li>${esc(line)}</li>`).join('');
+  $('live-data-note').textContent='Live money permits new entries for the strategies above when every check passes. Turning it Off stops all new entries; existing positions continue their exits.';
+  $('live-error').textContent='';$('accept-policy').checked=false;$('confirm-live').disabled=true;$('live-dialog').showModal();
+}
 $('live-status').addEventListener('click',()=>{
   if(!snapshot||toggling||strategySaving||saving)return;
   if(portfolioView(snapshot).globalOn){changeLive(false);return;}
-  pendingLive=null;
-  const p=portfolioView(snapshot);
-  liveReviewFingerprint=permissionFingerprint();
-  $('live-summary').textContent=`Global Live · ${p.scope}. ${p.enabled.map(f=>f.label+': '+money(f.target)+' per purchase').join(' · ')}`;
-  $('live-policy').innerHTML=p.enabled.flatMap(f=>f.id==='socrates'?snapshot.execution_policy.summary:f.policy).map(line=>`<li>${esc(line)}</li>`).join('');
-  $('live-data-note').textContent='Global Live permits new entries for the enabled strategies above. Each strategy uses its own data and broker checks. Turning it Off stops all new entries; existing positions continue their exits.';
-  $('live-error').textContent='';$('accept-policy').checked=false;$('confirm-live').disabled=true;$('live-dialog').showModal();
+  openLiveReview();
 });
 $('cancel-live').addEventListener('click',()=>$('live-dialog').close());
 $('accept-policy').addEventListener('change',()=>{$('confirm-live').disabled=toggling || !$('accept-policy').checked;});
@@ -354,12 +415,20 @@ $('live-form').addEventListener('submit',event=>{event.preventDefault();if(!$('a
   if(liveReviewFingerprint!==permissionFingerprint()){$('live-error').textContent='Strategy settings changed while this review was open. Close it and review the current settings before turning on.';return;}
   changeLive(true);
 });
-for(const [button,id] of [['socrates-toggle','socrates'],['range-toggle','range_reversal']])$(button).addEventListener('click',()=>{
+function toggleFamily(id) {
   const family=portfolioView(snapshot).families.find(f=>f.id===id);
   if(!snapshot?.portfolio||!family||strategySaving||toggling||saving)return;
   if(family.enabled){changeStrategies({[id]:{enabled:false}});return;}
   if(!family.available)return;
   reviewStrategies({[id]:{enabled:true,...(id==='range_reversal'?{policy_version:family.policyVersion}:{})}});
+}
+for(const [button,id] of [['socrates-toggle','socrates'],['range-toggle','range_reversal']])$(button).addEventListener('click',()=>toggleFamily(id));
+// The summary's next-step button opens the same review dialogs as the controls it names;
+// it can only ever turn something On after review, never Off.
+$('readiness-content').addEventListener('click',event=>{
+  const kind=event?.target?.dataset?.action;
+  if(kind==='live')openLiveReview();
+  else if(kind==='socrates'&&snapshot&&!portfolioView(snapshot).families[0].enabled)toggleFamily('socrates');
 });
 $('run-both').addEventListener('click',()=>{
   const p=portfolioView(snapshot);if(!p.configured||p.families.some(f=>!f.available))return;

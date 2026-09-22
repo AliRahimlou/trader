@@ -135,6 +135,7 @@ import {readFile} from 'node:fs/promises';
 import {createDisplayClock,escape as esc} from './model.mjs';
 import {bindStrategyView,portfolioView} from './strategy-families.mjs';
 import * as chart from './chart.mjs';
+import * as readinessModule from './readiness.mjs';
 const source=(await readFile(new URL('./app.js',import.meta.url),'utf8')).replace(/^import .*?;\n/gm,'').replace('refresh();setInterval(refresh,10000);','');
 function appHarness({container=358,canvas=true}={}){
   const elements=new Map(),calls=[],contexts=new Map(),windowListeners={};
@@ -148,7 +149,7 @@ function appHarness({container=358,canvas=true}={}){
     return elements.get(id);
   };
   let frame=null;
-  const context=vm.createContext({URL,Date,esc,createDisplayClock,portfolioView,...chart,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),
+  const context=vm.createContext({URL,Date,esc,createDisplayClock,portfolioView,...chart,...readinessModule,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),
     location:{hostname:'example.test',port:''},AbortSignal:{timeout:()=>({})},setInterval(){},
     requestAnimationFrame:fn=>{frame=fn;return 1;},cancelAnimationFrame(){},getComputedStyle:()=>({getPropertyValue:name=>name==='--chart-up'?' #112233 ':''}),
     window:{devicePixelRatio:2,addEventListener(type,fn){windowListeners[type]=fn;}},
@@ -188,6 +189,7 @@ test('an unavailable chart shows the service reason and a connection loss clears
   assert.deepEqual(texts(h.contexts.get('qqq-chart')),['Waiting for candles']);
   h.app.refresh();h.calls[2].reject(Error('offline'));await flush();h.frame();
   assert.equal(h.app.state().chartData,null);assert.match(h.element('chart-status').textContent,/not available yet/);
+  assert.match(h.element('readiness-content').innerHTML,/Checking[^]*App connection unavailable/,'a lost connection never leaves an old Ready on screen');assert.equal(h.element('socrates-readiness').dataset.status,'checking');
 });
 test('without canvas support the wiring stays silent and sends no chart request',async()=>{
   const h=appHarness({canvas:false});

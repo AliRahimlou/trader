@@ -19,11 +19,19 @@ test('partial entry incident remains visible until durable reconciliation',()=>{
   partial.resolved_at=new Date(now+30000).toISOString();
   assert.equal(operationStatus(state,now+30000).incident,'');
 });
-test('small targets explain whole-share short constraint without raising the target',()=>{
+test('direction note explains the PSQ short proxy and fractional purchases without raising the target',()=>{
   const state={settings:{target_dollars:'5.00'},quote_health:{ask:700}};
-  assert.match(operationStatus(state).directionNote,/cannot open a short/);
+  const note=operationStatus(state).directionNote;
+  assert.match(note,/Short setups buy PSQ, the inverse Nasdaq-100 ETF/);
+  assert.match(note,/\$5\.00 buys a fraction of a share/);
+  assert.doesNotMatch(note,/whole share|cannot open a short/);
   assert.equal(state.settings.target_dollars,'5.00');
-  assert.doesNotMatch(operationStatus({...state,quote_health:{}}).directionNote,/cannot open a short/);
+  assert.doesNotMatch(operationStatus({...state,quote_health:{}}).directionNote,/fraction of a share/);
+});
+test('timing note carries the 4.5 rules, not the retired same-day windows',()=>{
+  const note=operationStatus({}).timingNote;
+  assert.match(note,/end of the next session/);assert.match(note,/within 0\.4%/);assert.match(note,/last 30 minutes/);
+  assert.doesNotMatch(note,/11:30|180|15-minute/);
 });
 test('unconfirmed exit remains prominent after Live pauses and across snapshots until resolved',()=>{
   const state={live_enabled:false,execution:{trade:{stage:'exiting',exit_pending:{
