@@ -32,7 +32,8 @@ def engine(tmp_path):
     {'latest_evidence_at': (NOW + timedelta(seconds=1)).isoformat()},
     {'latest_evidence_at': (NOW - timedelta(seconds=1)).isoformat()},
     {'event_expires_at': None}, {'event_expires_at': NOW.isoformat()},
-    {'event_expires_at': (NOW + timedelta(minutes=181)).isoformat()},
+    {'event_expires_at': (NOW + timedelta(days=3)).isoformat()},  # beyond the two-session lifetime
+    {'event_expires_at': (NOW - timedelta(hours=1)).isoformat()},  # before its own origin
 ])
 def test_invalid_versioned_event_blocks_before_broker_reads(engine, changes):
     executor, broker, store = engine
@@ -101,11 +102,13 @@ def test_equivalent_timestamp_offsets_keep_canonical_identity_valid(engine):
     assert len(broker.sent) == 2 and store.active_trade()['stage'] == 'open'
 
 
-def test_recent_event_from_previous_new_york_date_is_not_carried_forward(engine):
+def test_hourly_evidence_from_previous_new_york_date_is_not_carried_forward(engine):
+    # v5: the event itself may originate in the previous session, but the
+    # latest hourly evidence must belong to the current New York date.
     executor, broker, store = engine
     broker.at = datetime(2026, 9, 17, 4, 30, tzinfo=timezone.utc)
-    snapshot = aged_event(ready(broker.at), broker.at - timedelta(hours=1),
-                         broker.at - timedelta(minutes=15), broker.at)
+    snapshot = aged_event(ready(broker.at), broker.at - timedelta(hours=2),
+                         broker.at - timedelta(hours=1, minutes=15), broker.at - timedelta(hours=1))
     executor.tick(snapshot)
     assert not broker.sent and store.active_trade() is None
 

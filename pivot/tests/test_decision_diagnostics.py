@@ -58,7 +58,13 @@ def test_trace_preserves_actual_signals_and_never_authorizes_broker_orders():
     assert result['setup']['event_id'] == setup['event_id']
     assert result['setup']['leader_evidence_valid_until'] == setup['leader_evidence_valid_until']
     assert result['setup']['leader_observation_valid_until'] == setup['leader_observation_valid_until']
-    assert result['setup']['leader_rule'] == {'minimum_agree': 5, 'maximum_opposing': 1, 'persistence_minutes': 15}
+    assert result['setup']['leader_rule'] == {'minimum_agree': 4, 'maximum_opposing': 1, 'persistence_minutes': 60}
+    assert result['setup']['event_rule'] == {'sessions': 2}
+    assert result['setup']['area_rule'] == {'zone_tolerance': 0.001, 'touches': 2, 'max_areas': 16}
+    assert result['setup']['retest_at'] == setup['retest_at'] == setup['event_at']
+    assert result['vix']['base_bars'] == 4 and result['vix']['base_range'] == 0.02
+    assert all(zone['source'] for zone in result['vix']['zones'])
+    assert result['leaders']['AAPL']['vote_source'] == '5m repeated interaction'
     assert result['market_context']['descriptive_only'] is True
     assert result['market_context']['entry_veto'] is False
     assert result['leaders']['AAPL']['evidence_valid_until']
@@ -69,6 +75,7 @@ def test_trace_preserves_actual_signals_and_never_authorizes_broker_orders():
     assert all(row['order_authorized_by_trace'] is False for row in methods.values())
     # Every method retains its reaction evidence without duplicating full area history.
     assert methods['four_hour_retest']['leader_evidence']['AAPL']['reaction_zone']
+    assert methods['four_hour_retest']['leader_evidence']['AAPL']['vote_source'] == '5m repeated interaction'
     assert 'zones' not in methods['four_hour_retest']['leader_evidence']['AAPL']
 
 
