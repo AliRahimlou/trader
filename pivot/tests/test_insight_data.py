@@ -4,6 +4,7 @@ from datetime import timedelta
 import pytest
 
 from pivot.feeds import FeedError, ReadOnlyFeeds
+from pivot.insight_cache import CLOCK_SKEW
 from pivot.insight_data import load_history, confirm_quote
 from pivot.strategy import vix_candles_fresh
 from pivot.tests.test_insight_cache import NOW, SESSIONS, INFO, series, quote, Session, cache
@@ -44,6 +45,8 @@ def test_real_cache_pipeline_collects_once_and_preserves_source_times(tmp_path):
     assert first.bars == second.bars and len(network.calls) == 2
     assert vix_candles_fresh(second, later)
     assert details['budget']['used'] == more['budget']['used'] == 52
+    assert details['budget']['slot_attempt_limit'] == 6 and details['budget']['quote_refresh_limit'] == 4
+    assert details['budget']['projected_month_need'] == 330 and details['budget']['retry_headroom'] == 518
     assert details['entry_quote_required'] and details['market_open']
 
 
@@ -68,7 +71,7 @@ def test_cached_forming_bar_never_becomes_completed_by_passage_of_time():
     lambda p: p.series['series'].reverse(),
     lambda p: p.series['series'][1].update(open=True),
     lambda p: p.series['series'][1].update(high=float('nan')),
-    lambda p: p.series.update(last_update=(NOW + timedelta(seconds=1)).timestamp()*1000),
+    lambda p: p.series.update(last_update=(NOW + CLOCK_SKEW + timedelta(seconds=1)).timestamp()*1000),
     lambda p: setattr(p, 'received', NOW + timedelta(seconds=1)),
     lambda p: setattr(p, 'status', 'budget_exhausted'),
     lambda p: setattr(p, 'status', 'unavailable'),
@@ -114,7 +117,7 @@ def test_source_watermark_prevents_premature_completion():
 
 @pytest.mark.parametrize('change', [
     lambda p: p.point['data'][0].update(lp_time=(NOW-timedelta(seconds=91)).timestamp()),
-    lambda p: p.point['data'][0].update(lp_time=(NOW+timedelta(seconds=1)).timestamp()),
+    lambda p: p.point['data'][0].update(lp_time=(NOW+CLOCK_SKEW+timedelta(seconds=1)).timestamp()),
     lambda p: p.point['data'][0].update(code='CAPITALCOM:VIX'),
     lambda p: p.point['data'][0].update(delay_seconds=900),
     lambda p: p.point['data'][0].update(last_price=float('inf')),
@@ -130,9 +133,37 @@ def test_bad_entry_quote_cannot_be_used(change):
 def test_entry_quote_uses_actual_index_source_timestamp():
     provider = Saved()
     result = confirm_quote(provider, NOW, clock=lambda: NOW)
-    assert result == {'source':'insightsentry', 'symbol':'I:VIX', 'delay_seconds':0,
-                      'value':17, 'updated_at':(NOW-timedelta(seconds=5)).isoformat()}
+    assert result == {'source':'insightsentry', 'symbol':'I:VIX', 'delay_seconds':0, 'value':17,
+                      'updated_at':(NOW-timedelta(seconds=5)).isoformat(),
+                      'source_updated_at':(NOW-timedelta(seconds=5)).isoformat()}
     assert provider.quote_calls == 1
+
+
+def test_entry_quote_tolerates_source_clock_skew_and_reports_host_bounded_age():
+    provider = Saved()
+    ahead = NOW + CLOCK_SKEW
+    provider.point['data'][0]['lp_time'] = ahead.timestamp()
+    result = confirm_quote(provider, NOW, clock=lambda: NOW)
+    assert result['updated_at'] == NOW.isoformat()
+    assert result['source_updated_at'] == ahead.isoformat()
+    provider.point['data'][0]['lp_time'] = (ahead + timedelta(seconds=1)).timestamp()
+    with pytest.raises(FeedError): confirm_quote(provider, NOW, clock=lambda: NOW)
+
+
+def test_history_tolerates_source_watermark_within_clock_skew():
+    provider = Saved()
+    ahead = NOW + CLOCK_SKEW
+    provider.series['last_update'] = ahead.timestamp() * 1000
+    market, details = load_history(provider, NOW, SESSIONS, clock=lambda: NOW)
+    # The watermark is bounded by receipt, so the forming bar stays incomplete.
+    assert market.bars[15][-1].end == NOW.replace(second=0)
+    assert details['source_updated_at'] == NOW.isoformat()
+
+
+def test_headroom_reserved_status_blocks_analysis_with_its_own_reason():
+    provider = Saved(); provider.status = 'headroom_reserved'
+    with pytest.raises(FeedError) as error: load_history(provider, NOW, SESSIONS, clock=lambda: NOW)
+    assert 'reserved for scheduled collection' in str(error.value)
 
 
 def test_provider_selection_uses_insightsentry_key_without_secret_in_diagnostics():

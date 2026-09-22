@@ -1,7 +1,39 @@
 """Read-only VIX collection with a durable, conservative free-plan budget.
 
-Cached provider timestamps are never advanced by reads. Each scheduled history
-slot gets at most two attempts; recovery uses the same cross-process allowance.
+Cached provider timestamps are never advanced by reads. Every request is
+claimed durably before it is sent, so a crash or unknown outcome consumes its
+claim. The slot policy is time based (app choice, not a video rule):
+
+* A data slot is one 15-minute candle (history), one hour (metadata) or one
+  900-second bucket (entry quotes). Within a slot, another attempt may follow
+  a retryable failure after ``RETRY_BACKOFF`` for as long as the slot lasts,
+  up to ``SLOT_ATTEMPT_LIMIT`` claims per slot in total.
+* A late publication (well-formed data whose required candle or fresh quote
+  is not out yet) is the normal provider behaviour; its retries are bounded
+  only by the slot cap and the monthly headroom below. A genuine transport or
+  HTTP failure is a *recovery* and is additionally capped by
+  ``RECOVERY_DAY_LIMIT`` and ``RECOVERY_MONTH_LIMIT``. Invalid or unverified
+  responses never earn another attempt in the same slot.
+* Entry quotes may succeed at most ``QUOTE_REFRESH_LIMIT`` times per slot
+  (the first quote included); a transient failure is retryable after the
+  backoff inside the slot.
+
+Monthly headroom arithmetic (InsightSentry Free: 1,000 requests/month,
+5/minute). The local ceiling is ``monthly_limit`` = 900 with ``reserved`` = 50
+kept for manual probes, so the app itself sends at most 850 per month. First
+attempts of every slot are admitted until that ceiling. Retries are admitted
+only while the scheduled remainder of the month still fits::
+
+    used + reserved + PROJECTED_DAILY_REQUESTS × remaining weekdays < monthly_limit
+
+where ``PROJECTED_DAILY_REQUESTS`` = 30 covers one trading day: 26 regular
+session candle closes (6.5 h / 15 min), one after-close catch-up, one
+metadata refresh and two entry quotes. Remaining weekdays count today. A
+23-weekday month therefore starts with 900 − 50 − 690 = 160 requests of retry
+headroom; each scheduled day spends about 30 and releases 30 of projection,
+so the headroom shrinks only by retries actually made. When it is gone, retries
+stop while scheduled first attempts continue to the hard ceiling. The rolling
+5-per-minute check applies to every claim.
 """
 import json
 import math
@@ -12,6 +44,7 @@ from pathlib import Path
 
 import requests
 
+from .data_health import SOURCE_CLOCK_SKEW_SECONDS
 from .insight_probe import ProbeError, _get
 from .insight_validation import _aware, _calendar
 
@@ -20,8 +53,13 @@ PREFIX = '/v3/symbols/CBOE%3AVIX'
 INTERVAL = timedelta(minutes=15)
 GRACE = timedelta(seconds=30)
 RETRY_BACKOFF = timedelta(seconds=30)
-RECOVERY_MONTH_LIMIT = 50
-RECOVERY_DAY_LIMIT = 4
+# A source timestamp this far ahead of the host clock is clock skew, not fraud.
+CLOCK_SKEW = timedelta(seconds=SOURCE_CLOCK_SKEW_SECONDS)
+SLOT_ATTEMPT_LIMIT = 6
+QUOTE_REFRESH_LIMIT = 4
+RECOVERY_MONTH_LIMIT = 120
+RECOVERY_DAY_LIMIT = 12
+PROJECTED_DAILY_REQUESTS = 30
 
 
 class LatePublication(ValueError):
@@ -38,10 +76,24 @@ def _source_time(value, *, milliseconds=False):
     return datetime.fromtimestamp(_number(value) / (1000 if milliseconds else 1), timezone.utc)
 
 
+def _projected_need(now):
+    """Scheduled requests still expected this month: weekdays from today through month end."""
+    day = now.date()
+    last = (day.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    weekdays = sum(1 for offset in range((last - day).days + 1)
+                   if (day + timedelta(days=offset)).weekday() < 5)
+    return weekdays * PROJECTED_DAILY_REQUESTS
+
+
 def _validate(kind, payload, now, required_end=None):
-    """Validate identity, source freshness, and structure before durable storage."""
+    """Validate identity, source freshness, and structure before durable storage.
+
+    Source timestamps up to ``CLOCK_SKEW`` ahead of the host clock are accepted;
+    anything further ahead is still rejected as a future source.
+    """
     if payload.get('error'):
         raise ValueError('Provider error')
+    horizon = now + CLOCK_SKEW
     if kind == 'quote':
         rows = payload.get('data')
         if not isinstance(rows, list) or len(rows) != 1:
@@ -51,11 +103,11 @@ def _validate(kind, payload, now, required_end=None):
                 _number(row['delay_seconds']) != 0 or _number(row['last_price']) <= 0):
             raise ValueError('Invalid quote')
         updated = _source_time(row['lp_time'])
-        if updated > now:
+        if updated > horizon:
             raise ValueError('Future source')
         if payload.get('last_update') is not None:
             outer = _source_time(payload['last_update'], milliseconds=True)
-            if outer > now:
+            if outer > horizon:
                 raise ValueError('Future response')
             if now - outer > timedelta(seconds=90):
                 raise LatePublication('Stale response')
@@ -70,7 +122,7 @@ def _validate(kind, payload, now, required_end=None):
                 not isinstance(rows, list) or not 1 <= len(rows) <= 1000):
             raise ValueError('Invalid series')
         updated = _source_time(payload['last_update'], milliseconds=True)
-        if updated > now:
+        if updated > horizon:
             raise ValueError('Future source')
         previous = None
         for row in rows:
@@ -88,11 +140,15 @@ def _validate(kind, payload, now, required_end=None):
         if required_end is not None and not any(
                 _source_time(row['time']) + INTERVAL == required_end <= updated for row in rows):
             raise LatePublication('Latest completed candle missing')
-    if updated > now:
+    if updated > horizon:
         raise ValueError('Future source')
     if kind == 'quote' and now - updated > timedelta(seconds=90):
         raise LatePublication('Stale source')
     return updated.isoformat()
+
+
+def _quote_fresh(now, source_at):
+    return -CLOCK_SKEW <= now - source_at < timedelta(seconds=90)
 
 
 class InsightCache:
@@ -119,29 +175,43 @@ class InsightCache:
             db.execute('CREATE TABLE IF NOT EXISTS insight_cache ('
                        'kind TEXT PRIMARY KEY, payload TEXT NOT NULL, received_at TEXT NOT NULL, '
                        'source_updated_at TEXT)')
-            # Additive migration keeps every old quota claim consumed.
+            # Additive migration keeps every old quota claim consumed. Legacy
+            # extra attempts predate the late/recovery split and stay counted
+            # as recoveries, which is the conservative reading.
             db.execute('BEGIN IMMEDIATE')
             columns = {row[1] for row in db.execute('PRAGMA table_info(insight_requests)')}
             for name, definition in (('base_slot', 'TEXT'), ('attempt', 'INTEGER NOT NULL DEFAULT 0'),
-                                     ('retryable', 'INTEGER NOT NULL DEFAULT 0'), ('retry_at', 'REAL')):
+                                     ('retryable', 'INTEGER NOT NULL DEFAULT 0'), ('retry_at', 'REAL'),
+                                     ('late', 'INTEGER NOT NULL DEFAULT 0'),
+                                     ('recovery', 'INTEGER NOT NULL DEFAULT 0')):
                 if name not in columns:
                     db.execute(f'ALTER TABLE insight_requests ADD COLUMN {name} {definition}')
+                    if name == 'recovery':
+                        db.execute('UPDATE insight_requests SET recovery=1 WHERE attempt>0')
             db.execute('UPDATE insight_requests SET base_slot=slot WHERE base_slot IS NULL')
 
     def _db(self):
         return sqlite3.connect(self.path, timeout=10)
 
+    def _headroom(self, db, now):
+        """Retry headroom after the scheduled remainder of the month is set aside."""
+        used = db.execute('SELECT COUNT(*) FROM insight_requests WHERE month=?',
+                          (now.strftime('%Y-%m'),)).fetchone()[0]
+        projected = _projected_need(now)
+        return used, projected, self.monthly_limit - used - self.reserved - projected
+
     def diagnostics(self, now):
         now = _aware(now)
         with self._db() as db:
-            used = db.execute('SELECT COUNT(*) FROM insight_requests WHERE month=?',
-                              (now.strftime('%Y-%m'),)).fetchone()[0]
+            used, projected, headroom = self._headroom(db, now)
             last = db.execute('SELECT error, finished FROM insight_requests ORDER BY at DESC, id DESC LIMIT 1').fetchone()
             success = db.execute('SELECT MAX(received_at) FROM insight_cache').fetchone()[0]
             recovery_month, recovery_day = self._recovery_counts(db, now)
         return {'source': 'insightsentry', 'symbol': SYMBOL, 'budget_month': now.strftime('%Y-%m'),
                 'budget_used': used + self.reserved, 'requests_recorded': used,
                 'reserved_requests': self.reserved, 'budget_limit': self.monthly_limit,
+                'projected_month_need': projected, 'retry_headroom': max(0, headroom),
+                'slot_attempt_limit': SLOT_ATTEMPT_LIMIT, 'quote_refresh_limit': QUOTE_REFRESH_LIMIT,
                 'recovery_month_used': recovery_month, 'recovery_month_limit': RECOVERY_MONTH_LIMIT,
                 'recovery_day_used': recovery_day, 'recovery_day_limit': RECOVERY_DAY_LIMIT,
                 'last_success_at': success, 'error': last[0] if last else None,
@@ -154,6 +224,10 @@ class InsightCache:
             return {'payload': None, 'received_at': None, 'source_updated_at': None}
         return {'payload': json.loads(row[0]), 'received_at': row[1], 'source_updated_at': row[2]}
 
+    def _attempts(self, db, kind, slot):
+        return db.execute('SELECT finished,error,attempt,retryable,retry_at,late FROM insight_requests '
+                          'WHERE kind=? AND base_slot=? ORDER BY attempt', (kind, slot)).fetchall()
+
     def _result(self, kind, now, status, next_at=None, error=None, *, slot=None):
         # Diagnostics summarize the whole collector; a particular data envelope
         # must describe only its own operation, never another endpoint's error.
@@ -165,38 +239,45 @@ class InsightCache:
                 error = row[0] if row else None
             elif status == 'budget_exhausted':
                 error = 'The local monthly request allowance is exhausted.'
+            elif status == 'headroom_reserved':
+                error = 'The remaining monthly allowance is reserved for scheduled collection.'
             elif status == 'rate_limited':
                 error = 'The local request rate limit has been reached.'
         retry_at, retry_reason = None, None
         if slot is not None:
             with self._db() as db:
-                attempt = db.execute('SELECT finished,error,attempt,retryable,retry_at FROM insight_requests '
-                                     'WHERE kind=? AND base_slot=? ORDER BY attempt DESC LIMIT 1', (kind, slot)).fetchone()
+                rows = self._attempts(db, kind, slot)
                 recovery_month, recovery_day = self._recovery_counts(db, now)
-                total_used = db.execute('SELECT COUNT(*) FROM insight_requests WHERE month=?',
-                                        (now.strftime('%Y-%m'),)).fetchone()[0]
-            if attempt:
-                if not attempt[0]:
+                total_used, _, headroom = self._headroom(db, now)
+            if rows:
+                finished, failure, _, retryable, retry_stamp, late = rows[-1]
+                successes = sum(1 for row in rows if row[0] and not row[1])
+                pending = status != 'current' and (failure or kind == 'quote')
+                if not finished:
                     retry_reason = 'Request outcome unknown; this claim cannot be retried'
-                elif status == 'budget_exhausted' or (status != 'current' and
-                        (attempt[1] or kind == 'quote') and total_used + self.reserved >= self.monthly_limit):
+                elif status == 'budget_exhausted' or (pending and total_used + self.reserved >= self.monthly_limit):
                     retry_reason = 'Total monthly allowance exhausted; no recovery request is permitted'
-                elif attempt[2] >= 1 and (attempt[1] or (kind == 'quote' and status == 'cached')):
-                    retry_reason = 'Recovery attempt consumed; waiting for the next data slot'
-                elif attempt[1] and not attempt[3]:
+                elif failure and not retryable:
                     retry_reason = 'Invalid or unverified response; waiting for the next data slot'
-                elif recovery_month >= RECOVERY_MONTH_LIMIT or recovery_day >= RECOVERY_DAY_LIMIT:
+                elif pending and len(rows) >= SLOT_ATTEMPT_LIMIT:
+                    retry_reason = 'Slot attempt limit reached; waiting for the next data slot'
+                elif pending and not failure and successes >= QUOTE_REFRESH_LIMIT:
+                    retry_reason = 'Quote refresh limit reached; waiting for the next data slot'
+                elif pending and headroom <= 0:
+                    retry_reason = 'Monthly headroom is reserved for scheduled collection; waiting for the next data slot'
+                elif failure and not late and (recovery_month >= RECOVERY_MONTH_LIMIT or recovery_day >= RECOVERY_DAY_LIMIT):
                     retry_reason = 'Recovery allowance exhausted; waiting for the next data slot'
-                elif attempt[2] == 0 and attempt[1] and attempt[3]:
-                    retry_at = datetime.fromtimestamp(attempt[4], timezone.utc)
-                    retry_reason = 'Temporary failure; one bounded recovery attempt is available'
+                elif failure and retryable:
+                    retry_at = datetime.fromtimestamp(retry_stamp, timezone.utc)
+                    retry_reason = ('Publication pending; another attempt follows the backoff' if late else
+                                    'Temporary failure; a bounded recovery attempt is available')
                     if next_at is None or retry_at < next_at:
                         next_at = retry_at
-                elif kind == 'quote' and attempt[2] == 0 and not attempt[1] and status != 'current':
+                elif pending and not failure:
                     source_at = self._cached('quote')['source_updated_at']
                     if source_at:
                         retry_at = max(now, _aware(source_at) + timedelta(seconds=90))
-                        retry_reason = 'One bounded refresh is available after the quote expires'
+                        retry_reason = 'A bounded refresh is available after the quote expires'
                         next_at = retry_at
         if status == 'rate_limited':
             with self._db() as db:
@@ -210,42 +291,56 @@ class InsightCache:
         return result
 
     def _recovery_counts(self, db, now):
-        month = db.execute('SELECT COUNT(*) FROM insight_requests WHERE month=? AND attempt>0',
+        """Genuine-error recoveries only; late-publication retries are not counted."""
+        month = db.execute('SELECT COUNT(*) FROM insight_requests WHERE month=? AND recovery=1',
                            (now.strftime('%Y-%m'),)).fetchone()[0]
         start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        day = db.execute('SELECT COUNT(*) FROM insight_requests WHERE at>=? AND attempt>0', (start,)).fetchone()[0]
+        day = db.execute('SELECT COUNT(*) FROM insight_requests WHERE at>=? AND recovery=1', (start,)).fetchone()[0]
         return month, day
 
     def _reserve(self, kind, slot, now, *, refresh_success=False):
+        """Claim one request durably, or say why none is permitted right now.
+
+        Every branch runs inside BEGIN IMMEDIATE so concurrent collectors in any
+        process see the same ledger; an unfinished claim stays in flight forever.
+        """
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            existing = db.execute('SELECT finished,error,attempt,retryable,retry_at FROM insight_requests '
-                                  'WHERE kind=? AND base_slot=? ORDER BY attempt DESC LIMIT 1', (kind, slot)).fetchone()
-            attempt = 0
-            if existing:
-                finished, error, prior_attempt, retryable, retry_at = existing
+            rows = self._attempts(db, kind, slot)
+            attempt, recovery = 0, 0
+            if rows:
+                finished, error, prior, retryable, retry_at, late = rows[-1]
                 if not finished:
                     return None, 'in_flight'
                 if not error and not refresh_success:
                     return None, 'cached'
-                if prior_attempt >= 1 or (error and not retryable):
+                if error and not retryable:
+                    return None, 'unavailable'
+                if len(rows) >= SLOT_ATTEMPT_LIMIT:
                     return None, 'unavailable' if error else 'cached'
+                if not error and sum(1 for row in rows if row[0] and not row[1]) >= QUOTE_REFRESH_LIMIT:
+                    return None, 'cached'
                 if error and now.timestamp() < retry_at:
                     return None, 'retry_wait'
-                month, day = self._recovery_counts(db, now)
-                if month >= RECOVERY_MONTH_LIMIT or day >= RECOVERY_DAY_LIMIT:
-                    return None, 'recovery_budget_exhausted'
-                attempt = 1
-            used = db.execute('SELECT COUNT(*) FROM insight_requests WHERE month=?', (now.strftime('%Y-%m'),)).fetchone()[0]
+                recovery = int(bool(error) and not late)
+                if recovery:
+                    month, day = self._recovery_counts(db, now)
+                    if month >= RECOVERY_MONTH_LIMIT or day >= RECOVERY_DAY_LIMIT:
+                        return None, 'recovery_budget_exhausted'
+                attempt = prior + 1
+            used, _, headroom = self._headroom(db, now)
             if used + self.reserved >= self.monthly_limit:
                 return None, 'budget_exhausted'
+            if attempt and headroom <= 0:
+                return None, 'headroom_reserved'
             recent = db.execute('SELECT COUNT(*) FROM insight_requests WHERE at>?',
                                 (now.timestamp() - 60,)).fetchone()[0]
             if recent >= 5:
                 return None, 'rate_limited'
-            claim_slot = slot if attempt == 0 else slot + ':recovery'
-            cursor = db.execute('INSERT INTO insight_requests (at,month,kind,slot,base_slot,attempt) VALUES (?,?,?,?,?,?)',
-                                (now.timestamp(), now.strftime('%Y-%m'), kind, claim_slot, slot, attempt))
+            claim_slot = slot if attempt == 0 else slot + ':recovery' + ('' if attempt == 1 else str(attempt))
+            cursor = db.execute('INSERT INTO insight_requests (at,month,kind,slot,base_slot,attempt,recovery) '
+                                'VALUES (?,?,?,?,?,?,?)',
+                                (now.timestamp(), now.strftime('%Y-%m'), kind, claim_slot, slot, attempt, recovery))
             return cursor.lastrowid, None
 
     def _request(self, kind, slot, now, path, params, next_at, required_end=None, *, refresh_success=False):
@@ -262,14 +357,16 @@ class InsightCache:
             if self._key in json.dumps(payload, ensure_ascii=False):
                 raise ValueError('Reflected credential')
         except (ProbeError, ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
-            retryable = isinstance(exc, LatePublication) or (isinstance(exc, ProbeError) and exc.retryable)
+            late = isinstance(exc, LatePublication)
+            retryable = late or (isinstance(exc, ProbeError) and exc.retryable)
             failed_at = max(now, _aware(self._clock()))
-            error = ('InsightSentry VIX observation is not published yet.' if isinstance(exc, LatePublication) else
+            error = ('InsightSentry VIX observation is not published yet.' if late else
                      'InsightSentry connection is temporarily unavailable.' if retryable else
                      'InsightSentry did not return valid, current VIX data.')
             with self._db() as db:
-                db.execute('UPDATE insight_requests SET finished=1,error=?,retryable=?,retry_at=? WHERE id=?',
-                           (error, int(retryable), (failed_at + RETRY_BACKOFF).timestamp() if retryable else None, request_id))
+                db.execute('UPDATE insight_requests SET finished=1,error=?,retryable=?,retry_at=?,late=? WHERE id=?',
+                           (error, int(retryable), (failed_at + RETRY_BACKOFF).timestamp() if retryable else None,
+                            int(late), request_id))
             return self._result(kind, failed_at, 'unavailable', next_at, error, slot=slot)
         with self._db() as db:
             db.execute('INSERT INTO insight_cache VALUES (?,?,?,?) ON CONFLICT(kind) DO UPDATE SET '
@@ -317,8 +414,8 @@ class InsightCache:
                     return self._result('history', now, 'cached', next_at)
                 except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
                     pass
-        # After-close catch-up uses the final session slot, including its single
-        # bounded recovery allowance; repeated polling cannot create more claims.
+        # After-close catch-up uses the final session slot, with the same
+        # per-slot attempt cap; repeated polling cannot create more claims.
         return self._request('history', slot, now, PREFIX + '/series',
                              {'bar_type': 'minute', 'bar_interval': 15, 'dp': 1000,
                               'extended': 'false', 'abbr': 'false'}, next_at, required_end)
@@ -330,8 +427,8 @@ class InsightCache:
             refresh = _aware(cached['received_at']) + timedelta(hours=24)
             if _aware(cached['received_at']) <= now < refresh:
                 return self._result('metadata', now, 'cached', refresh)
-        # Failed metadata has one bounded recovery, then a new slot next hour;
-        # successful metadata stays cached for a full day. All calls share quota.
+        # Failed metadata retries after the backoff within its hourly slot, then
+        # a new slot next hour; successful metadata stays cached for a full day.
         return self._request('metadata', now.strftime('%Y-%m-%dT%H'), now, PREFIX + '/info', None,
                              now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
 
@@ -340,10 +437,10 @@ class InsightCache:
         cached = self._cached('quote')
         if cached['source_updated_at']:
             source_at = _aware(cached['source_updated_at'])
-            if timedelta(0) <= now - source_at < timedelta(seconds=90):
+            if _quote_fresh(now, source_at):
                 return self._result('quote', now, 'cached', source_at + timedelta(seconds=90))
-        # At most one bounded recovery/refresh per candle shares the total budget.
-        # Merely polling cannot extend the original quote's timestamp.
+        # A stale quote may be refreshed up to QUOTE_REFRESH_LIMIT successes per
+        # candle slot; merely polling cannot extend the original quote's timestamp.
         slot = int(now.timestamp() // 900)
         result = self._request('quote', str(slot), now, '/v3/symbols/quotes', {'codes': SYMBOL},
                                datetime.fromtimestamp((slot + 1) * 900, timezone.utc), refresh_success=True)
@@ -358,7 +455,7 @@ class InsightCache:
         if result['payload'] is None or result['source_updated_at'] is None:
             return result
         source_at = _aware(result['source_updated_at'])
-        fresh = timedelta(0) <= now - source_at < timedelta(seconds=90)
+        fresh = _quote_fresh(now, source_at)
         result['status'] = 'cached' if fresh else 'stale'
         result['error'] = None
         if fresh:

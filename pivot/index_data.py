@@ -4,6 +4,7 @@ from math import isfinite
 from urllib.parse import urlsplit, parse_qsl
 from .models import Bar, Market
 from .feeds import FeedError
+from .data_health import SOURCE_CLOCK_SKEW_SECONDS
 
 
 def load_vix(feeds, now, *, received_at=None):
@@ -28,7 +29,8 @@ def load_vix(feeds, now, *, received_at=None):
         seen = received_at or datetime.now(timezone.utc)
         updated = datetime.fromtimestamp(point['last_updated'] / 1_000_000_000, timezone.utc)
         value = float(point['value'])
-        if not isfinite(value) or value <= 0 or not 0 <= (seen - updated).total_seconds() <= 90:
+        # A source stamp within CLOCK_SKEW ahead of the host clock is skew, not a future value.
+        if not isfinite(value) or value <= 0 or not -SOURCE_CLOCK_SKEW_SECONDS <= (seen - updated).total_seconds() <= 90:
             raise ValueError()
     except (KeyError, TypeError, ValueError, OverflowError):
         raise FeedError('Actual VIX snapshot is stale, future-dated or invalid') from None

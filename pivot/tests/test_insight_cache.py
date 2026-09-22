@@ -8,7 +8,8 @@ import time
 import pytest
 import requests
 
-from pivot.insight_cache import InsightCache, SYMBOL
+from pivot.insight_cache import (InsightCache, SYMBOL, CLOCK_SKEW, SLOT_ATTEMPT_LIMIT, QUOTE_REFRESH_LIMIT,
+                                 RECOVERY_DAY_LIMIT, RECOVERY_MONTH_LIMIT, _projected_need)
 
 NOW = datetime(2026, 9, 16, 15, 0, 31, tzinfo=timezone.utc)
 SESSIONS = {'2026-09-16': {'open': NOW.replace(hour=13, minute=30, second=0),
@@ -171,18 +172,23 @@ def test_metadata_reuses_verified_identity_for_24_hours(tmp_path):
     assert len(session.calls) == 2
 
 
-def test_failed_metadata_has_one_backoff_recovery_then_next_hour(tmp_path):
+def test_failed_metadata_retries_after_each_backoff_within_its_hour(tmp_path):
+    # Updated from the old one-recovery pin: genuine errors now retry every
+    # RETRY_BACKOFF inside the hourly slot, each counted as a recovery.
     session = Session(requests.Timeout('private'), requests.Timeout('private'), INFO)
     provider = cache(tmp_path, session)
     assert provider.metadata(NOW)['budget_used'] == 51
     restarted = cache(tmp_path, session)
     assert restarted.metadata(NOW + timedelta(seconds=29))['status'] == 'retry_wait'
     assert restarted.metadata(NOW + timedelta(seconds=30))['status'] == 'unavailable'
-    assert restarted.metadata(NOW + timedelta(minutes=30))['status'] == 'unavailable'
+    assert restarted.metadata(NOW + timedelta(seconds=59))['status'] == 'retry_wait'
     assert len(session.calls) == 2
-    recovered = restarted.metadata(NOW + timedelta(hours=1))
+    recovered = restarted.metadata(NOW + timedelta(minutes=30))
     assert recovered['status'] == 'current'
     assert recovered['payload'] == INFO and recovered['budget_used'] == 53
+    assert restarted.diagnostics(NOW)['recovery_day_used'] == 2
+    assert restarted.metadata(NOW + timedelta(hours=1))['status'] == 'cached'
+    assert len(session.calls) == 3
 
 
 @pytest.mark.parametrize('info', [dict(INFO, code='CBOE:VX1!'), dict(INFO, delay_seconds=900),
@@ -194,30 +200,48 @@ def test_wrong_or_delayed_identity_is_not_cached(tmp_path, info):
     assert result['payload'] is None
 
 
-def test_quote_has_only_one_budgeted_refresh_per_candle(tmp_path):
-    later = NOW + timedelta(seconds=100)
-    session = Session(quote(), quote(later), quote(NOW + timedelta(minutes=15)))
+def test_quote_refreshes_are_capped_per_candle_slot(tmp_path):
+    # Updated from the old single-refresh pin: QUOTE_REFRESH_LIMIT successful
+    # quotes per 900-second slot, the first included; a fresh quote is reused.
+    stamps = [NOW + timedelta(seconds=100 * n) for n in range(QUOTE_REFRESH_LIMIT)]
+    session = Session(*[quote(at) for at in stamps], quote(NOW + timedelta(minutes=15)))
     provider = cache(tmp_path, session)
     first = provider.quote(NOW)
     assert provider.quote(NOW + timedelta(seconds=40))['payload'] == first['payload']
-    refreshed = provider.quote(later)
-    assert refreshed['status'] == 'current'
-    expired = provider.quote(NOW + timedelta(seconds=200))
+    for at in stamps[1:]:
+        refreshed = provider.quote(at)
+        assert refreshed['status'] == 'current' and refreshed['source_updated_at'] == (at - timedelta(seconds=5)).isoformat()
+    assert len(session.calls) == QUOTE_REFRESH_LIMIT
+    expired = provider.quote(stamps[-1] + timedelta(seconds=100))
     assert expired['status'] == 'stale'
     assert expired['source_updated_at'] == refreshed['source_updated_at']
-    assert len(session.calls) == 2
+    assert 'refresh limit' in expired['retry_reason']
+    assert len(session.calls) == QUOTE_REFRESH_LIMIT
+    assert provider.diagnostics(NOW)['recovery_day_used'] == 0
     assert provider.quote(NOW + timedelta(minutes=15))['status'] == 'current'
-    assert len(session.calls) == 3
+    assert len(session.calls) == QUOTE_REFRESH_LIMIT + 1
 
 
-def test_stale_quote_is_not_saved_and_only_has_one_recovery(tmp_path):
-    session = Session(quote(NOW - timedelta(minutes=10)), quote(NOW - timedelta(minutes=10)))
+def test_stale_quote_is_not_saved_and_slot_attempts_are_capped(tmp_path):
+    # Updated from the old one-recovery pin: a stale (late) quote may be retried
+    # after each backoff until SLOT_ATTEMPT_LIMIT claims exist in the slot.
+    stale = quote(NOW - timedelta(minutes=10))
+    session = Session(*[stale] * (SLOT_ATTEMPT_LIMIT + 1))
     provider = cache(tmp_path, session)
     assert provider.quote(NOW)['payload'] is None
     assert provider.quote(NOW + timedelta(seconds=29))['status'] == 'retry_wait'
-    assert provider.quote(NOW + timedelta(seconds=30))['payload'] is None
-    assert provider.quote(NOW + timedelta(minutes=5))['status'] == 'unavailable'
-    assert len(session.calls) == 2
+    for n in range(1, SLOT_ATTEMPT_LIMIT):
+        result = provider.quote(NOW + timedelta(seconds=30 * n))
+        assert result['status'] == 'unavailable' and result['payload'] is None
+    assert len(session.calls) == SLOT_ATTEMPT_LIMIT
+    capped = provider.quote(NOW + timedelta(minutes=5))
+    assert capped['status'] == 'unavailable' and capped['retry_at'] is None
+    assert 'attempt limit' in capped['retry_reason']
+    assert len(session.calls) == SLOT_ATTEMPT_LIMIT
+    # Late publications are the provider's normal behaviour, not recoveries.
+    assert provider.diagnostics(NOW)['recovery_day_used'] == 0
+    assert provider.quote(NOW + timedelta(minutes=15))['status'] == 'unavailable'
+    assert len(session.calls) == SLOT_ATTEMPT_LIMIT + 1
 
 
 def test_invalid_series_preserves_previous_data_and_timestamps(tmp_path):
@@ -253,13 +277,16 @@ def test_after_close_catch_up_happens_once_then_no_weekend_polling(tmp_path):
     assert len(session.calls) == 1
 
 
-def test_failed_after_close_catch_up_not_retried_repeatedly(tmp_path):
-    session = Session(requests.Timeout('private'), requests.Timeout('private'))
+def test_failed_after_close_catch_up_is_bounded_by_the_slot_attempt_cap(tmp_path):
+    # Updated from the old two-attempt pin: the final session slot lasts until
+    # the next open, so overnight polling can spend at most SLOT_ATTEMPT_LIMIT.
+    session = Session(*[requests.Timeout('private')] * SLOT_ATTEMPT_LIMIT)
     provider = cache(tmp_path, session)
-    provider.history(NOW.replace(hour=21), SESSIONS)
-    provider.history(NOW.replace(hour=22), SESSIONS)
+    for minute in range(0, 10 * (SLOT_ATTEMPT_LIMIT + 2), 10):
+        provider.history(NOW.replace(hour=21) + timedelta(minutes=minute), SESSIONS)
     provider.history(NOW.replace(hour=23), SESSIONS)
-    assert len(session.calls) == 2
+    assert len(session.calls) == SLOT_ATTEMPT_LIMIT
+    assert provider.diagnostics(NOW)['recovery_day_used'] == SLOT_ATTEMPT_LIMIT - 1
 
 
 @pytest.mark.parametrize('sessions', [None, {}, {'bad': {'open': '2026-09-16T09:30:00', 'close': 'invalid'}}])
@@ -337,7 +364,8 @@ def test_quote_peek_exposes_fresh_and_stale_copy_without_requests_or_timestamp_c
     assert stale['payload'] == original['payload']
     assert stale['received_at'] == original['received_at']
     assert stale['source_updated_at'] == original['source_updated_at']
-    assert provider.peek_quote(NOW - timedelta(seconds=10))['status'] == 'stale'
+    assert provider.peek_quote(NOW - timedelta(seconds=10))['status'] == 'cached'  # Within clock skew.
+    assert provider.peek_quote(NOW - timedelta(seconds=11))['status'] == 'stale'
     assert provider.diagnostics(NOW) == before
     assert len(session.calls) == 1
 
@@ -363,8 +391,8 @@ def test_late_history_publication_recovers_without_accepting_missing_candle(tmp_
     ('metadata', dict(INFO, delay_seconds=900)),
     ('metadata', dict(INFO, reflected='test-key')),
     ('history', dict(series(), code='VIXY')),
-    ('history', dict(series(), last_update=(NOW+timedelta(seconds=1)).timestamp()*1000)),
-    ('quote', dict(quote(), last_update=(NOW+timedelta(seconds=1)).timestamp()*1000)),
+    ('history', dict(series(), last_update=(NOW+CLOCK_SKEW+timedelta(seconds=1)).timestamp()*1000)),
+    ('quote', dict(quote(), last_update=(NOW+CLOCK_SKEW+timedelta(seconds=1)).timestamp()*1000)),
 ])
 def test_invalid_responses_do_not_earn_in_slot_recovery(tmp_path, kind, payload):
     session = Session(payload)
@@ -414,25 +442,25 @@ def _consume_recovery(provider, at, slot):
 
 def test_daily_recovery_budget_is_shared_across_endpoints_and_restarts(tmp_path):
     provider = cache(tmp_path, Session())
-    for i in range(4):
+    for i in range(RECOVERY_DAY_LIMIT):
         assert _consume_recovery(provider, NOW+timedelta(minutes=2*i), str(i))[0]
     restarted = cache(tmp_path, Session())
-    assert _consume_recovery(restarted, NOW+timedelta(minutes=10), 'last') == (None, 'recovery_budget_exhausted')
-    assert restarted.diagnostics(NOW)['requests_recorded'] == 9
-    assert restarted.diagnostics(NOW)['recovery_day_used'] == 4
+    assert _consume_recovery(restarted, NOW+timedelta(minutes=30), 'last') == (None, 'recovery_budget_exhausted')
+    assert restarted.diagnostics(NOW)['requests_recorded'] == 2 * RECOVERY_DAY_LIMIT + 1
+    assert restarted.diagnostics(NOW)['recovery_day_used'] == RECOVERY_DAY_LIMIT == 12
     assert _consume_recovery(restarted, NOW+timedelta(days=1), 'tomorrow')[0]
 
 
 def test_monthly_recovery_cap_does_not_add_to_total_allowance(tmp_path):
     provider = cache(tmp_path, Session())
     start = NOW.replace(day=1)
-    for i in range(50):
-        at = start+timedelta(days=i//4, minutes=(i%4)*2)
+    for i in range(RECOVERY_MONTH_LIMIT):
+        at = start+timedelta(days=i//RECOVERY_DAY_LIMIT, minutes=(i%RECOVERY_DAY_LIMIT)*2)
         assert _consume_recovery(provider, at, str(i))[0]
     at = start+timedelta(days=13)
     assert _consume_recovery(provider, at, 'last') == (None, 'recovery_budget_exhausted')
-    assert provider.diagnostics(at)['recovery_month_used'] == 50
-    assert provider.diagnostics(at)['budget_used'] == 151
+    assert provider.diagnostics(at)['recovery_month_used'] == RECOVERY_MONTH_LIMIT == 120
+    assert provider.diagnostics(at)['budget_used'] == 2 * RECOVERY_MONTH_LIMIT + 51
 
 
 def test_total_allowance_blocks_recovery_before_its_smaller_cap(tmp_path):
@@ -482,12 +510,12 @@ def test_http_failures_have_typed_bounded_recovery(tmp_path, status, retryable):
     assert bool(first['retry_at']) == retryable
     provider.metadata(NOW+timedelta(seconds=30))
     provider.metadata(NOW+timedelta(minutes=5))
-    assert session.calls == (2 if retryable else 1)
+    assert session.calls == (3 if retryable else 1)
 
 
 def test_future_quote_with_stale_outer_timestamp_never_retries(tmp_path):
     payload=quote(NOW-timedelta(minutes=10))
-    payload['data'][0]['lp_time']=(NOW+timedelta(seconds=1)).timestamp()
+    payload['data'][0]['lp_time']=(NOW+CLOCK_SKEW+timedelta(seconds=1)).timestamp()
     provider=cache(tmp_path,Session(payload))
     assert provider.quote(NOW)['retry_at'] is None
     assert provider.quote(NOW+timedelta(minutes=2))['status']=='unavailable'
@@ -504,3 +532,127 @@ def test_recovery_is_subject_to_shared_rolling_rate_limit(tmp_path):
     assert result['retry_at']==(NOW+timedelta(seconds=60)).isoformat()
     assert len(provider.session.calls)==1
     assert provider.metadata(NOW+timedelta(seconds=60))['status']=='current'
+
+
+def test_third_attempt_after_two_late_publications_succeeds_without_recovery_use(tmp_path):
+    late = series(NOW - timedelta(minutes=15))
+    published = NOW + timedelta(seconds=60)
+    session = Session(late, late, series(published))
+    provider = cache(tmp_path, session)
+    first = provider.history(NOW, SESSIONS)
+    assert first['status'] == 'unavailable' and first['retry_at'] == (NOW + timedelta(seconds=30)).isoformat()
+    assert 'Publication pending' in first['retry_reason']
+    assert provider.history(NOW + timedelta(seconds=15), SESSIONS)['status'] == 'retry_wait'
+    second = provider.history(NOW + timedelta(seconds=30), SESSIONS)
+    assert second['status'] == 'unavailable' and second['retry_at'] == (NOW + timedelta(seconds=60)).isoformat()
+    third = cache(tmp_path, session).history(published, SESSIONS)
+    assert third['status'] == 'current' and third['source_updated_at'] == published.isoformat()
+    assert len(session.calls) == 3
+    state = provider.diagnostics(published)
+    assert state['requests_recorded'] == 3
+    assert state['recovery_day_used'] == 0 and state['recovery_month_used'] == 0
+    assert provider.history(published + timedelta(seconds=30), SESSIONS)['status'] == 'cached'
+    assert len(session.calls) == 3
+
+
+def test_history_slot_attempt_cap_holds_across_restarts(tmp_path):
+    late = series(NOW - timedelta(minutes=15))
+    session = Session(*[late] * (SLOT_ATTEMPT_LIMIT + 1))
+    provider = cache(tmp_path, session)
+    for n in range(SLOT_ATTEMPT_LIMIT):
+        assert provider.history(NOW + timedelta(seconds=30 * n), SESSIONS)['status'] == 'unavailable'
+    restarted = cache(tmp_path, session)
+    capped = restarted.history(NOW + timedelta(seconds=30 * SLOT_ATTEMPT_LIMIT), SESSIONS)
+    assert capped['status'] == 'unavailable' and capped['retry_at'] is None
+    assert 'attempt limit' in capped['retry_reason']
+    assert len(session.calls) == SLOT_ATTEMPT_LIMIT == 6
+    # The next candle slot starts fresh.
+    assert restarted.history(NOW + timedelta(minutes=15), SESSIONS)['status'] == 'unavailable'
+    assert len(session.calls) == SLOT_ATTEMPT_LIMIT + 1
+
+
+def test_late_retries_share_the_rolling_minute_limit_with_other_claims(tmp_path):
+    late = series(NOW - timedelta(minutes=15))
+    provider = cache(tmp_path, Session(late, late, series(NOW + timedelta(seconds=90))))
+    provider.history(NOW, SESSIONS)
+    for n in range(4):
+        assert provider._reserve('research', str(n), NOW + timedelta(seconds=1))[0]
+    limited = provider.history(NOW + timedelta(seconds=30), SESSIONS)
+    assert limited['status'] == 'rate_limited'
+    assert limited['retry_at'] == (NOW + timedelta(seconds=60)).isoformat()
+    assert len(provider.session.calls) == 1
+    assert provider.history(NOW + timedelta(seconds=61), SESSIONS)['status'] == 'unavailable'
+    assert len(provider.session.calls) == 2
+
+
+def test_projected_need_counts_remaining_weekdays_including_today():
+    assert _projected_need(NOW) == 11 * 30  # Wed Sep 16 through Wed Sep 30, 2026.
+    assert _projected_need(NOW.replace(day=1)) == 22 * 30
+    assert _projected_need(NOW.replace(day=30)) == 30
+    assert _projected_need(datetime(2026, 2, 28, tzinfo=timezone.utc)) == 0  # Saturday.
+
+
+def test_monthly_headroom_projection_blocks_retries_but_not_first_attempts(tmp_path):
+    late = series(NOW - timedelta(minutes=15))
+    # 1 used + 50 reserved + 330 projected == 381: no retry headroom remains.
+    provider = cache(tmp_path, Session(late, INFO, late), monthly_limit=381, reserved=50)
+    first = provider.history(NOW, SESSIONS)
+    assert first['status'] == 'unavailable' and first['retry_at'] is None
+    assert 'reserved for scheduled collection' in first['retry_reason']
+    blocked = provider.history(NOW + timedelta(seconds=30), SESSIONS)
+    assert blocked['status'] == 'headroom_reserved' and blocked['retry_at'] is None
+    assert 'reserved for scheduled collection' in blocked['retry_reason']
+    assert blocked['error'] == 'The remaining monthly allowance is reserved for scheduled collection.'
+    assert provider.diagnostics(NOW)['retry_headroom'] == 0
+    assert provider.diagnostics(NOW)['projected_month_need'] == 330
+    # Scheduled first attempts still proceed to the hard ceiling.
+    assert provider.metadata(NOW + timedelta(seconds=31))['status'] == 'current'
+    assert len(provider.session.calls) == 2
+    roomier = cache(tmp_path, provider.session, monthly_limit=383, reserved=50)
+    assert roomier.history(NOW + timedelta(seconds=32), SESSIONS)['status'] == 'unavailable'
+    assert len(provider.session.calls) == 3
+
+
+def test_quote_transient_failure_is_retryable_after_backoff_within_slot(tmp_path):
+    at = NOW + timedelta(seconds=30)
+    provider = cache(tmp_path, Session(requests.Timeout('private'), quote(at)))
+    failed = provider.quote(NOW)
+    assert failed['status'] == 'unavailable' and failed['retry_at'] == at.isoformat()
+    assert 'bounded recovery' in failed['retry_reason']
+    assert provider.quote(NOW + timedelta(seconds=29))['status'] == 'retry_wait'
+    assert provider.quote(at)['status'] == 'current'
+    assert provider.diagnostics(at)['recovery_day_used'] == 1
+
+
+def test_source_timestamps_within_clock_skew_are_accepted_and_fresh(tmp_path):
+    ahead = NOW + CLOCK_SKEW
+    point = quote(ahead + timedelta(seconds=5))
+    point['last_update'] = ahead.timestamp() * 1000
+    session = Session(dict(series(), last_update=ahead.timestamp() * 1000), point)
+    provider = cache(tmp_path, session)
+    history = provider.history(NOW, SESSIONS)
+    assert history['status'] == 'current' and history['source_updated_at'] == ahead.isoformat()
+    point = provider.quote(NOW)
+    assert point['status'] == 'current' and point['source_updated_at'] == ahead.isoformat()
+    assert provider.quote(NOW + timedelta(seconds=1))['status'] == 'cached'
+    assert provider.peek_quote(NOW)['status'] == 'cached'
+    assert len(session.calls) == 2
+
+
+def test_legacy_recovery_claims_migrate_as_counted_recoveries(tmp_path):
+    path = tmp_path / 'vix.sqlite3'
+    slot = NOW.replace(second=0).isoformat()
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE insight_requests(id INTEGER PRIMARY KEY,at REAL NOT NULL,month TEXT NOT NULL,'
+                   'kind TEXT NOT NULL,slot TEXT NOT NULL,error TEXT,finished INTEGER NOT NULL DEFAULT 0,'
+                   'base_slot TEXT,attempt INTEGER NOT NULL DEFAULT 0,retryable INTEGER NOT NULL DEFAULT 0,'
+                   'retry_at REAL,UNIQUE(kind,slot))')
+        db.execute('INSERT INTO insight_requests(at,month,kind,slot,error,finished,base_slot,attempt,retryable,retry_at) '
+                   'VALUES(?,?,?,?,?,1,?,0,1,?)', (NOW.timestamp(), '2026-09', 'history', slot, 'temporary', slot, NOW.timestamp()))
+        db.execute('INSERT INTO insight_requests(at,month,kind,slot,error,finished,base_slot,attempt) '
+                   'VALUES(?,?,?,?,?,1,?,1)', (NOW.timestamp() + 30, '2026-09', 'history', slot + ':recovery', 'failed', slot))
+    provider = cache(tmp_path, Session())
+    assert provider.diagnostics(NOW)['recovery_day_used'] == 1
+    assert provider.diagnostics(NOW)['requests_recorded'] == 2
+    again = cache(tmp_path, Session())
+    assert again.diagnostics(NOW)['recovery_day_used'] == 1
