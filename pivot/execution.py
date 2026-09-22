@@ -9,6 +9,7 @@ from copy import deepcopy
 from hashlib import sha256
 from math import isfinite
 import json
+import logging
 import re
 from threading import Lock
 from zoneinfo import ZoneInfo
@@ -31,6 +32,7 @@ PROTECTION_CONFIRM_SECONDS = 30
 PARTIAL_ENTRY_CONFIRM_SECONDS = 30
 EXIT_CONFIRM_SECONDS = 30
 MANUAL_FLAT_CONFIRM_SECONDS = 30
+ORDER_NOT_FOUND_CONFIRM_SECONDS = 60
 SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v3'
 PAPER_SIGNAL_POLICY_VERSION = 'synthetic-paper-commissioning-v1'
 PAPER_SIGNAL_PURPOSE = 'broker_order_lifecycle_only'
@@ -40,6 +42,7 @@ SIGNAL_FIELDS = ('policy_version', 'strategy_id', 'event_id', 'event_origin_at',
                  'leader_evidence_valid_until', 'leader_observation_at',
                  'leader_observations_synchronized', 'leader_observation_valid_until')
 NEW_YORK = ZoneInfo('America/New_York')
+logger = logging.getLogger('pivot.execution')
 CHECKS = {'Current Nasdaq observation', 'Premarked levels', 'Nasdaq level event',
           'Magnificent Seven at their zones', 'Actual VIX zone reaction', 'Stop and target'}
 SIGNAL_GATES = {'Current Nasdaq observation': 'signal_observation', 'Premarked levels': 'signal_levels',
@@ -444,6 +447,7 @@ class Executor:
                 self.message = saved['exit_pending']['reason']
         except Exception as exc:
             outcome, exception_kind = 'unexpected_error', UNEXPECTED_EXCEPTION_KINDS.get(type(exc), 'unexpected')
+            logger.exception('Stock execution tick failed unexpectedly')
             self.message = 'Execution needs attention: broker state could not be validated. An order may already have been attempted; waiting for reconciliation.'
         finally:
             try:
@@ -583,7 +587,11 @@ class Executor:
         quote = self.broker.quote('QQQ')
         self._gate('quote_validation')
         bid, ask = checked_quote(quote, self.now())
-        entry_valid_until = min(timestamp(snapshot['data_valid_until']), timestamp(quote['t'])+timedelta(seconds=15), expires).isoformat()
+        # The quote is already required to be at most 15 seconds old. Anchor the
+        # submission budget to its receipt, not its exchange timestamp: the broker
+        # reads that follow must not consume a window that was partly spent
+        # before the quote arrived, or entries churn "expired before submission".
+        entry_valid_until = min(timestamp(snapshot['data_valid_until']), self.now()+timedelta(seconds=15), expires).isoformat()
         direction = setup['direction']
         self._gate('signal_direction')
         if direction not in ('long', 'short'):
@@ -600,11 +608,21 @@ class Executor:
         amount = authorization['settings']['target_dollars']
         buying_power = (self.portfolio.available(account['account_ref'], account['buying_power'])
                         if self.portfolio else account['buying_power'])
-        plan = purchase_plan(amount, price, buying_power, direction, asset.get('fractionable') is True)
         if direction == 'short':
             self._gate('short_eligibility')
             if account.get('shorting_enabled') is not True or not asset.get('shortable') or not asset.get('easy_to_borrow'):
-                raise Waiting('This short requires account permission and available QQQ borrow')
+                raise Waiting('This account cannot short QQQ (shorting is not enabled); short setups are skipped, not errors')
+        self._gate('purchase_size')
+        try:
+            plan = purchase_plan(amount, price, buying_power, direction, asset.get('fractionable') is True)
+        except ValueError as exc:
+            # A valid setup that cannot be sized is a skipped opportunity, not
+            # invalid data: shorts need whole shares within 1% of the target.
+            if direction == 'short':
+                raise Waiting(f'Short setups need whole QQQ shares within 1% of the ${amount} purchase target; '
+                              'this short is skipped') from None
+            raise Waiting(f'Purchase cannot be sized: {exc}') from None
+        if direction == 'short':
             self._gate('short_reserve')
             if decimal(plan['quantity']) * ask * decimal('1.03') > decimal(buying_power):
                 raise Waiting('Not enough buying power for the broker’s short-sale reserve')
@@ -791,9 +809,17 @@ class Executor:
                 self._check_unknown_protection(trade)
             raise
         if not order:
-            if name == 'stop':
-                self._check_unknown_protection(trade)
-            raise Waiting('Order status is uncertain. Waiting for its broker identifier; no duplicate will be sent.')
+            order = self._resolve_never_reached_broker(trade, name)
+            if order is None:
+                if name == 'stop':
+                    self._check_unknown_protection(trade)
+                raise Waiting('Order status is uncertain. Waiting for its broker identifier; no duplicate will be sent.')
+            return order
+        if (op.get('last_seen') or {}).get('evidence') == 'not_found_at_broker':
+            # The broker now reports an order this app had concluded never
+            # arrived. Adopt the actual evidence; the synthetic record cannot win.
+            op['last_seen'] = {}
+            self.store.event('order_late_arrival', {'trade_id': trade['id'], 'operation': name, 'symbol': trade['symbol']})
         self._gate('order_identity')
         try:
             self._validate_order_payload(order, op['payload'], op.get('last_seen') or {})
@@ -903,6 +929,54 @@ class Executor:
         self._diagnostic_trade = trade
         self._diagnostic_outcome = 'completed'
         self.message = trade['reason']
+
+    def _resolve_never_reached_broker(self, trade, name):
+        """Bounded terminal resolution for a POST that never created a broker order.
+
+        A transport failure can leave a claimed operation with no broker order at
+        all. Alpaca indexes client_order_id on acceptance, so a lookup that keeps
+        returning 404 after the confirmation window, with no unknown QQQ order and
+        no unexplained QQQ exposure, shows the request never arrived. Recording
+        that as terminal evidence lets management continue: an entry finishes
+        without a fill, a missing stop closes the position through the existing
+        protection-failure exit, and a missing exit is followed by the next exit.
+        A later order with the same identifier is adopted, never duplicated.
+        """
+        op = trade['ops'][name]
+        seen = op.get('last_seen') or {}
+        if seen.get('evidence') == 'not_found_at_broker':
+            return deepcopy(seen)
+        if op.get('state') != 'attempted' or seen:
+            return None
+        now = self.now()
+        if not op.get('not_found_since'):
+            op['not_found_since'] = now.isoformat()
+            self.store.save_trade(trade)
+            return None
+        if elapsed(op['not_found_since'], now) < ORDER_NOT_FOUND_CONFIRM_SECONDS:
+            return None
+        payload = op['payload']
+        ours = {o['payload']['client_order_id'] for o in trade['ops'].values()}
+        try:
+            open_orders = self.broker.orders()
+            positions = self.broker.positions()
+        except FeedError:
+            return None
+        for order in open_orders:
+            if order.get('symbol') == trade['symbol'] and (
+                    order.get('client_order_id') == payload['client_order_id'] or order.get('client_order_id') not in ours):
+                return None  # The order, or an unexplained order, exists; keep reconciling.
+        held = next((p for p in positions if p.get('symbol') == trade['symbol']), None)
+        if name == 'entry' and held is not None:
+            return None  # Exposure without a known fill cannot prove the entry never arrived.
+        op['last_seen'] = {'symbol': payload['symbol'], 'side': payload['side'], 'status': 'expired',
+                           'qty': payload.get('qty'), 'notional': payload.get('notional'), 'filled_qty': '0',
+                           'client_order_id': payload['client_order_id'], 'evidence': 'not_found_at_broker',
+                           'confirmed_at': now.isoformat()}
+        self.store.save_trade(trade)
+        self.store.event('order_not_found', {'trade_id': trade['id'], 'operation': name, 'symbol': trade['symbol'],
+                                             'not_found_since': op['not_found_since']})
+        return deepcopy(op['last_seen'])
 
     def _finish(self, trade, reason):
         self._gate('trade_finish')

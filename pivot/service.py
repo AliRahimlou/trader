@@ -1,4 +1,5 @@
 """Account, analysis and order loops with separate locks and durable execution permission."""
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from contextlib import nullcontext
@@ -13,6 +14,7 @@ from .data_health import stock_health, vix_health, quote_health, expire_health
 from .diagnostics import build_decision_trace
 from .observations import ObservationArchive
 from .worker_health import WorkerHealth, next_tick
+logger = logging.getLogger('pivot.service')
 
 
 def publication_catchup_bucket(markets, sessions, now):
@@ -186,6 +188,7 @@ class Service:
                 function()
             except Exception:
                 failed = True
+                logger.exception('%s worker cycle failed', name)
                 with self.lock:
                     if name == 'crypto_execution':
                         self.state['crypto_worker_error'] = 'Crypto execution needs attention; check its orders and positions.'

@@ -6,7 +6,7 @@ from hashlib import sha256
 import pytest
 
 from pivot.broker import BrokerRejected
-from pivot.crypto_execution import CryptoRangeExecutor, POLICY_VERSION, checked_signal, CryptoWaiting, rounded
+from pivot.crypto_execution import CryptoRangeExecutor, POLICY_VERSION, IOC_SETTLE_GRACE_SECONDS, checked_signal, CryptoWaiting, rounded
 from pivot.crypto_store import CryptoStore
 from pivot.feeds import FeedError
 from pivot.models import Bar, Market
@@ -223,6 +223,8 @@ def test_partial_unsettled_entry_cancels_before_protecting(engine):
     e, b, store, _, _ = engine
     b.entry_mode = 'partial_pending'
     tick(e)
+    assert not b.canceled  # The venue gets a short grace to settle the immediate order.
+    b.at += timedelta(seconds=IOC_SETTLE_GRACE_SECONDS); tick(e)
     assert b.canceled == [b.sent[0]['client_order_id']]
     assert len(b.sent) == 2 and store.active_trade('BTC/USD')['partial_entry']
 
@@ -416,7 +418,7 @@ def test_off_on_generation_cannot_revive_prepared_intent(engine):
 def test_prepared_intent_rechecks_fresh_quote_and_external_exposure(engine):
     e, b, store, _, _ = engine
     reserve_without_submit(e, b)
-    b.ask = D('95.01')
+    b.ask = D('95.05')  # Beyond the immediate-limit buffer.
     tick(e)
     assert not b.sent and not store.active_trades()
 
@@ -480,6 +482,7 @@ def test_unresolved_partial_entry_deadline_survives_later_account_outage(engine)
     e, b, store, _, _ = engine
     b.entry_mode = 'partial_pending'; b.cancel_mode = 'unknown'
     tick(e)
+    b.at += timedelta(seconds=IOC_SETTLE_GRACE_SECONDS); tick(e)  # Cancellation requested after the settle grace.
     b.at += timedelta(seconds=20); tick(e)
     b.at += timedelta(seconds=11)
     def unavailable(): raise FeedError('Offline')

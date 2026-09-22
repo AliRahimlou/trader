@@ -2,11 +2,11 @@
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_UP
 
 import pytest
 
-from pivot.crypto_execution import CryptoRangeExecutor, POLICY_VERSION
+from pivot.crypto_execution import CryptoRangeExecutor, POLICY_VERSION, IOC_LIMIT_BUFFER, rounded
 from pivot.crypto_store import CryptoStore, ConcurrentChange
 from pivot.models import Bar, Market
 from pivot.policy import POLICY_VERSION as MAIN_POLICY
@@ -51,7 +51,7 @@ class IncrementCheckingBroker(FakeBroker):
     def quote(self, symbol):
         self.quote_count += 1
         if self.bump and self.quote_count == 2:
-            self.ask += D('.01')  # Still well inside the original 0.1% drift rule.
+            self.ask += D('30')  # Beyond the immediate-limit buffer, still inside the original 0.1% drift rule.
         result = super().quote(symbol)
         return {**result, 'bs': '.00099874', 'as': '.0010043'}
 
@@ -116,7 +116,7 @@ def test_tiny_ask_move_before_any_post_can_replan_original_still_fresh_signal(tm
     assert len(broker.sent) == 2  # One fake entry and its quantity-matched protection.
     assert crypto.active_trade('BTC/USD')['id'] == abandoned['id']
     assert main.session_entry_allowance(broker.at)['used'] == 1
-    assert D(broker.sent[0]['limit_price']) == D('86646.466')
+    assert D(broker.sent[0]['limit_price']) == rounded(D('86676.456') * (1 + IOC_LIMIT_BUFFER), D('.000000001'), ROUND_UP)
 
 
 def test_same_metadata_and_cash_support_five_dollar_protected_entry(tmp_path):

@@ -76,15 +76,18 @@ def test_both_analyzers_complete_five_dollar_shared_account_lifecycles(tmp_path,
     assert main.active_trade()['stage'] == 'open'
     assert crypto_store.active_trade('BTC/USD')['stage'] == 'open'
     assert verifications == [now]
-    assert venue.cash == Decimal('90')
-    assert len(portfolio.reservations('shared-audit-account')) == 2
     qqq_buy = next(order for order in venue.sent if order['symbol'] == 'QQQ' and order['side'] == 'buy')
     btc_buy = next(order for order in venue.sent if order['symbol'] == 'BTC/USD' and order['side'] == 'buy')
     assert qqq_buy['notional'] == '5.00'
-    assert Decimal(btc_buy['qty']) == Decimal('.00005')
+    # The immediate limit carries a small buffer above the ask, so the quantity is sized
+    # to the limit and the fill at the ask spends slightly less than the $5 target.
+    btc_spent = Decimal(btc_buy['qty']) * Decimal('100000')
+    assert Decimal('4.95') <= btc_spent <= Decimal('5') and Decimal(btc_buy['qty']) * Decimal(btc_buy['limit_price']) <= Decimal('5')
+    assert venue.cash == Decimal('100') - Decimal('5.00') - btc_spent
+    assert len(portfolio.reservations('shared-audit-account')) == 2
     owned = dict(venue.holdings)
     assert 0 < owned['QQQ'] < 1
-    assert owned['BTC/USD'] == Decimal('.000049875')
+    assert 0 < owned['BTC/USD'] < Decimal(btc_buy['qty'])  # Net of the venue's buy fee.
     for order in venue.orders():
         assert Decimal(order['qty']) == owned[order['symbol']]
 

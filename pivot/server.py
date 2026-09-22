@@ -1,5 +1,6 @@
 """Owner-controlled runtime. Hosted access uses an authenticated local reverse proxy."""
 import argparse
+import logging
 import os
 from pathlib import Path
 from dotenv import dotenv_values
@@ -15,6 +16,8 @@ def main():
     parser.add_argument('--host', choices=['127.0.0.1', '0.0.0.0'], default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8011)
     args = parser.parse_args()
+    # Worker and execution failures were previously invisible in container logs.
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     root = Path(__file__).resolve().parent.parent
     # Only explicit provider keys are consumed. Legacy LIVE_* flags cannot enable orders.
     config = {**dotenv_values(root / '.env'), **os.environ}

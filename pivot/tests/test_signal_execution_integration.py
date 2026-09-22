@@ -113,7 +113,7 @@ def test_valid_short_signal_is_not_executable_at_owner_small_dollar_target(tmp_p
     executor.tick(snapshot)
     assert not broker.sent and store.active_trade() is None
     assert broker.confirmed == []  # Sizing fails before spending a VIX quote.
-    assert 'No supported share quantity' in executor.message
+    assert 'whole QQQ shares' in executor.message  # Skipped short, reported as a wait rather than invalid data.
 
 
 def test_actual_analyzer_leader_failure_never_reaches_broker_submission(tmp_path):

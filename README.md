@@ -6,7 +6,7 @@ Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 re
 
 See [execution behavior and remaining limits](docs/live-execution.md).
 
-Both engines share a durable maximum of **two new entry attempts per New York calendar session**. Rejected, uncertain and already-claimed attempts consume the allowance; completing a trade or restarting does not refund it. Protection and exits remain available after the allowance is exhausted. The dashboard reports the shared allowance separately from fills. See [version 4.3.0 repair notes](docs/production-v4.3.0.md).
+Both engines share a durable maximum of **two new entry attempts per New York calendar session**. Rejected, uncertain and already-claimed attempts consume the allowance; completing a trade or restarting does not refund it. Protection and exits remain available after the allowance is exhausted. The dashboard reports the shared allowance separately from fills. See [version 4.3.0 repair notes](docs/production-v4.3.0.md) and the [4.3.2 execution-safety fixes](docs/production-v4.3.2.md) (lost broker requests resolve after 60 seconds instead of stranding a position; skipped shorts, submission budget, immediate-limit buffer and container logs).
 
 ## Hosted app
 
