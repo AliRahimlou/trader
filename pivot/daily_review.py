@@ -16,7 +16,7 @@ import sqlite3
 from zoneinfo import ZoneInfo
 
 from .models import timestamp
-from .performance import trade_result
+from .performance import socrates_labels, trade_result
 
 SCHEMA = 'daily-trading-review-v1'
 NY = ZoneInfo('America/New_York')
@@ -171,6 +171,31 @@ def _fill(op):
     return seen, Decimal(qty) if qty is not None and Decimal(qty) >= 0 else None, price
 
 
+SOCRATES_METHODS = {'four_hour_retest': 'QQQ broke a four-hour level and returned to it',
+                    'prior_day_sweep': "QQQ swept the previous day's high or low"}
+
+
+def _price(value):
+    money = _money(value)
+    return money if money is not None and Decimal(money) > 0 else None
+
+
+def _signal_geometry(value):
+    """The QQQ plan a Socrates trade came from (allowlisted prices only)."""
+    if not isinstance(value, dict) or value.get('symbol') != 'QQQ' or value.get('direction') not in ('long', 'short'):
+        return None
+    return {'symbol': 'QQQ', 'direction': value['direction'],
+            **{key: _price(value.get(key)) for key in ('entry', 'stop', 'target')}}
+
+
+def _execution_geometry(trade):
+    """The PSQ purchase that executed a QQQ short (translated stop and target)."""
+    geometry = trade.get('proxy_geometry') if isinstance(trade.get('proxy_geometry'), dict) else {}
+    return {'symbol': 'PSQ', 'side': 'buy', 'kind': 'inverse_etf',
+            'reference': _price(geometry.get('reference')), 'stop': _price(trade.get('stop')),
+            'target': _price(trade.get('target')), 'signal_price': _price(geometry.get('signal_price'))}
+
+
 def _trade_view(trade, family, account_ref, net_rows):
     ops = trade.get('ops') if isinstance(trade.get('ops'), dict) else {}
     seen, qty, price = _fill(ops.get('entry'))
@@ -208,6 +233,14 @@ def _trade_view(trade, family, account_ref, net_rows):
               'exit_price': None, 'gross_pnl': None, 'gross_status': 'unverified',
               'net_pnl': None, 'cost_status': 'pending', 'outcome': 'unresolved',
               'source_references': deepcopy(SOURCE_REFERENCES[family])}
+    if family == 'socrates':
+        # A PSQ proxy trade shows both sides: the QQQ short signal and the PSQ purchase.
+        labels = socrates_labels(trade)
+        result.update(labels, signal=_signal_geometry(trade.get('signal_geometry')),
+                      execution=_execution_geometry(trade) if labels['proxy'] else None)
+        if labels['label']:
+            method = SOCRATES_METHODS.get(signal.get('strategy_id'))
+            result['entry_reason'] = labels['label'] + (f' · {method}' if method else '')
     exits = [_fill(op) for name, op in ops.items() if name != 'entry' and op.get('state') not in ('prepared', 'aborted_before_submit')]
     known_exits = [(q, Decimal(p)) for _, q, p in exits if q is not None and q > 0 and p is not None]
     if known_exits and all(q is not None and (q == 0 or p is not None) for _, q, p in exits):
