@@ -143,6 +143,8 @@ main>*,.grid>*,.workspace-main>*{min-width:0}
 .status-bar p{color:var(--muted);font-size:12px;margin-top:2px}
 .status-bar>span:last-child{margin-left:auto;white-space:nowrap;font-size:12px}
 .status-dot{width:8px;height:8px;background:var(--ok);border-radius:50%;flex:none}
+.status-bar[data-tone="attention"]{background:var(--warn-bg);border-color:var(--warn-border)}
+.status-bar[data-tone="attention"] .status-dot{background:var(--warn)}
 .execution-scope{display:block;color:var(--muted);font-size:11px;margin-bottom:2px}
 
 /* Strategy controls */

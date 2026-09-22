@@ -285,7 +285,7 @@ def api_service(tmp_path):
 
 @pytest.mark.parametrize('payload', [
     {'range_reversal': {'enabled': True, 'target_dollars': '5.00', 'symbols': ['BTC/USD'], 'policy_version': CRYPTO_POLICY}},
-    {'range_reversal': {'enabled': False}},
+    {'range_reversal': {'enabled': False, 'target_dollars': '6.00'}},
     {'range_reversal': {'target_dollars': '6.00'}},
     {'socrates': {'enabled': True}, 'range_reversal': {'enabled': True, 'policy_version': CRYPTO_POLICY}}])
 def test_strategies_endpoint_refuses_crypto_changes_while_paused(tmp_path, monkeypatch, payload):
@@ -342,7 +342,7 @@ def test_pause_does_not_change_deployment_permission_or_readiness(tmp_path, monk
         pause(monkeypatch)
         paused = client.get('/api/deployment-readiness').json()
         client.get('/api/snapshot')
-        assert client.put('/api/strategies', json={'range_reversal': {'enabled': False}},
+        assert client.put('/api/strategies', json={'range_reversal': {'target_dollars': '6.00'}},
                           headers=HEADERS).status_code == 409
         after = client.get('/api/deployment-readiness').json()
     assert _deployment_permission(service.store)[1] == unpaused_token
@@ -350,3 +350,15 @@ def test_pause_does_not_change_deployment_permission_or_readiness(tmp_path, monk
         assert payload == unpaused
     assert paused['ok'] is True and paused['permission_token'] == unpaused_token
     assert paused['saved_live_enabled'] is True and paused['live_enabled'] is True
+
+
+def test_turning_crypto_off_is_allowed_while_paused(tmp_path, monkeypatch):
+    """Off only removes risk, so it is the one crypto change accepted while paused."""
+    pause(monkeypatch)
+    service, broker, reads = api_service(tmp_path)
+    service.crypto_store.configure({'enabled': True, 'policy': CRYPTO_POLICY, 'account_ref': 'fake-account-only'})
+    with TestClient(create_app(service, background=False)) as client:
+        response = client.put('/api/strategies', json={'range_reversal': {'enabled': False}}, headers=HEADERS)
+    assert response.status_code == 200
+    assert service.crypto_store.control()['enabled'] is False
+    assert broker.sent == []

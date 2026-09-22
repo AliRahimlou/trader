@@ -291,6 +291,7 @@ function render() {
   $('live-status').setAttribute('aria-label', s.live_enabled?'Global live money on. Turn off all new entries':'Global live money off. Review enabled strategies and turn on');
   $('live-status').title=s.live_enabled?'Turn Live money Off: stops all new entries. Existing positions continue their exits.':'Review the rules and turn Live money On. Existing positions continue their exits either way.';
   $('status-text').textContent=liveError || status.text;
+  document.querySelector('.status-bar')?.setAttribute('data-tone', s.live_enabled?'ok':'attention');
   const operations=operationStatus(s,now), session=sessionReview(s);
   if(!s.portfolio && operations.workerLabel==='Needs attention' && !s.execution?.trade){
     $('status-title').textContent='App worker needs attention';
@@ -358,7 +359,7 @@ function render() {
     </details>`+s.data_errors.filter(e=>!e.startsWith('VIX:')).map(e=>`<p class="help error">${esc(e)}</p>`).join('');
   if(detailOpen)$('data-connections').querySelector('details').open=true;
   $('journal').innerHTML=s.events.length?s.events.map(e=>`<p><b>${esc(e.kind.replaceAll('_',' '))}</b> · ${esc(new Date(e.at).toLocaleString())}${e.detail?.reason?`<br>${esc(e.detail.reason)}`:''}</p>`).join(''):'<p class="muted">No saved changes yet.</p>';
-  $('trade-results').innerHTML=(s.trade_results || []).length?s.trade_results.map(t=>`<p><b>${esc(t.symbol)} · ${esc(t.direction || 'Trade')}</b>${t.completed_at?` · ${esc(new Date(t.completed_at).toLocaleString())}`:''}<br>${t.status==='verified_gross'?`Gross result ${money(t.gross_pnl)} · ${esc(t.quantity)} shares. Fees are not included; net profit is not verified.`:'Result unverified: complete broker fill evidence is unavailable.'}</p>`).join(''):'<p class="muted">No completed trades recorded. Trading profit has not been established.</p>';
+  $('trade-results').innerHTML=(s.trade_results || []).length?s.trade_results.map(t=>`<p><b>${esc(t.label || `${t.symbol} · ${t.direction || 'Trade'}`)}</b>${t.completed_at?` · ${esc(new Date(t.completed_at).toLocaleString())}`:''}<br>${t.status==='verified_gross'?`Gross result ${money(t.gross_pnl)} · ${esc(t.quantity)} shares. Fees are not included; net profit is not verified.`:'Result unverified: complete broker fill evidence is unavailable.'}</p>`).join(''):'<p class="muted">No completed trades recorded. Trading profit has not been established.</p>';
   formChanged();
 }
 async function refresh() {

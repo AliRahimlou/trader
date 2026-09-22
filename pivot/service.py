@@ -765,8 +765,10 @@ class Service:
         from .execution import Executor
         if not isinstance(payload, dict) or not payload or set(payload) - {'socrates','range_reversal'}:
             raise ValueError('Choose a valid strategy setting')
-        if 'range_reversal' in payload and feature_flags.crypto_paused():
+        if ('range_reversal' in payload and feature_flags.crypto_paused()
+                and payload['range_reversal'] != {'enabled': False}):
             # Refused before any read or write: saved crypto rows stay exactly as they are.
+            # Turning crypto Off is the one change allowed while paused; it only removes risk.
             raise feature_flags.CryptoPaused()
         stock = payload.get('socrates')
         if stock is not None and (not isinstance(stock, dict) or set(stock) != {'enabled'} or type(stock['enabled']) is not bool):
