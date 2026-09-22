@@ -81,6 +81,7 @@ def test_rejected_entry_pauses_socrates_only_and_crypto_keeps_its_permission(tmp
     portfolio.register('range_reversal', crypto.active_trades)
     portfolio.enabled_predicate = lambda family: (store.strategy_selection()['socrates'] if family == 'socrates'
                                                   else crypto.control()['enabled'])
+    portfolio.crypto_paused = lambda: False  # As when crypto is re-enabled (PIVOT_CRYPTO_PAUSED=0).
     executor.portfolio = portfolio
     enable(executor)
     broker.entry_mode = 'reject'

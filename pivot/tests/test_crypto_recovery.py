@@ -2,9 +2,19 @@
 from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal
+import pytest
 from test_crypto_execution import engine, tick, MAIN_POLICY
 from test_crypto_audit import seeded
 from pivot.feeds import FeedError
+
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
 
 
 def test_definitive_rejected_entry_recovers_when_flat_without_mutation_or_permission_change(engine):

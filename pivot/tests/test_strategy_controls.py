@@ -13,6 +13,16 @@ from pivot.service import Service
 from pivot.store import Store
 from pivot.tests.test_execution import FakeBroker
 
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
+
+
 HEADERS = {'origin':'http://testserver', 'x-pivot-intent':'settings'}
 
 

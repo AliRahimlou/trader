@@ -15,6 +15,16 @@ from pivot.models import Bar, Market
 from pivot.range_reversal import OPENING_BARS_MINIMUM, RULE_VERSION, analyze
 from pivot.tests.test_crypto_execution import NOW, engine, signal  # noqa: F401 (fixture)
 
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
+
+
 D = Decimal
 BTC_ENTRY = D('81500')
 TICK = D('.000000001')

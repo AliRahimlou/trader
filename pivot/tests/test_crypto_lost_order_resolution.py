@@ -2,12 +2,22 @@
 from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal as D
+import pytest
 from pivot.crypto_execution import CryptoRangeExecutor, ORDER_NOT_FOUND_CONFIRM_SECONDS
 from pivot.crypto_store import CryptoStore
 from pivot.feeds import FeedError
 from pivot.portfolio import Portfolio
 from pivot.store import Store
 from pivot.tests.test_crypto_execution import FakeBroker, tick, MAIN_POLICY, POLICY_VERSION
+
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
 
 
 class LossyBroker(FakeBroker):

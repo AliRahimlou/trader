@@ -14,6 +14,7 @@ import os
 import re
 import stat
 
+from . import feature_flags
 from .broker import PROXY_SYMBOLS
 from .sizing import decimal
 from .crypto_markets import ALIASES
@@ -37,6 +38,9 @@ class Portfolio:
         self._sources, self._symbols = {}, {}
         self._started = False
         self.enabled_predicate = lambda family: True
+        # Release-level pause, read at call time (pivot.feature_flags). It is
+        # independent of the saved permission rows, which it never changes.
+        self.crypto_paused = feature_flags.crypto_paused
         # Socrates owns QQQ (long setups) and its inverse-ETF proxy PSQ (short
         # setups executed as a PSQ buy); a Socrates ledger row in any other
         # instrument is unverifiable exposure and fails closed.
@@ -65,6 +69,9 @@ class Portfolio:
 
     def family_enabled(self, family):
         try:
+            # A release pause outranks the saved crypto permission; the saved row is left unchanged.
+            if family == 'range_reversal' and self.crypto_paused() is not False:
+                return False
             return self.enabled_predicate(family) is True
         except Exception:
             return False

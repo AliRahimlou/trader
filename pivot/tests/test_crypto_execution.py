@@ -16,6 +16,16 @@ from pivot.policy import POLICY_VERSION as MAIN_POLICY
 from pivot.portfolio import Portfolio
 from pivot.store import Store
 
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
+
+
 D = Decimal
 NOW = datetime(2026, 9, 19, 8, 10, 10, tzinfo=timezone.utc)
 
@@ -123,7 +133,9 @@ class FakeBroker:
 
 
 @pytest.fixture
-def engine(tmp_path):
+def engine(tmp_path, monkeypatch):
+    # Importing modules receive this fixture without this module's autouse one.
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
     main = Store(tmp_path/'state.sqlite3')
     crypto = CryptoStore(main.path)
     portfolio = Portfolio(main)

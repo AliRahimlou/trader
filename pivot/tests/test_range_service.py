@@ -1,10 +1,20 @@
 """New observational family stays outside Socrates state and execution."""
 from copy import deepcopy
 from types import SimpleNamespace
+import pytest
 
 from pivot.feeds import ReadOnlyFeeds
 from pivot.service import Service
 from pivot.store import Store
+
+
+@pytest.fixture(autouse=True)
+def crypto_engine_enabled(monkeypatch):
+    """These tests exercise the crypto engine as it runs when re-enabled (PIVOT_CRYPTO_PAUSED=0).
+
+    4.5.1 pauses crypto by default; test_crypto_pause.py covers the paused release.
+    """
+    monkeypatch.setenv('PIVOT_CRYPTO_PAUSED', '0')
 
 
 def test_snapshot_observer_failure_keeps_account_and_permission_available(tmp_path):

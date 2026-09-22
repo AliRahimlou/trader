@@ -14,6 +14,7 @@ from .data_health import stock_health, vix_health, quote_health, expire_health
 from .diagnostics import build_decision_trace
 from .observations import ObservationArchive
 from .worker_health import WorkerHealth, next_tick
+from . import feature_flags
 logger = logging.getLogger('pivot.service')
 
 
@@ -92,6 +93,10 @@ class Service:
         self.range_watch_error = None
         self.extra_range_watches = {}
         self.extra_range_errors = {}
+        # Decided once at start: a paused release never builds or starts the
+        # crypto observers, so no crypto market data is polled. The crypto
+        # execution worker still runs to manage any stranded position.
+        self.crypto_observers_paused = feature_flags.crypto_paused()
         self.activity_ledger = None
         self.daily_reviews = None
         self.review_collection = {'status': 'starting', 'last_attempt_at': None,
@@ -108,7 +113,7 @@ class Service:
         except Exception:
             pass  # Observation failure is visible below, independent of trading permission.
         from .feeds import ReadOnlyFeeds
-        if isinstance(feeds, ReadOnlyFeeds):
+        if isinstance(feeds, ReadOnlyFeeds) and not self.crypto_observers_paused:
             from .range_watch import BitcoinBars, RangeWatch
             from .crypto_markets import SYMBOLS
             try:
@@ -545,13 +550,22 @@ class Service:
             result['entry_allowance'] = {'status': 'blocked', 'limit': 2, 'used': None,
                 'remaining': 0, 'families': None, 'scope': 'per_family', 'timezone': 'America/New_York',
                 'reason': 'Session entry allowance could not be verified.'}
+        pause = feature_flags.strategy_pause()
+        crypto_paused = pause['range_reversal']['paused']
+        result['strategy_pause'] = pause
+        result['portfolio']['range_reversal']['paused'] = crypto_paused
         result['crypto_execution'] = self.crypto_executor.snapshot() if self.crypto_executor else {
             'message':'Crypto broker execution is not configured for this runtime.', 'at':None, 'trades':[], 'incidents':[]}
+        result['crypto_execution']['paused'] = crypto_paused
+        if crypto_paused:
+            result['crypto_execution']['message'] = feature_flags.CRYPTO_PAUSED_MESSAGE
         result['worker_health'] = self.worker_health()
         result['strategy_families'] = {
             'socrates': {'family_id':'socrates', 'label':'Socrates', 'execution_status':'owner_controlled',
                          'analysis':deepcopy(result.get('setup'))},
-            'range_reversal': {**self.range_snapshot(), 'analyses':self.range_analyses()}}
+            'range_reversal': ({'family_id':'range_reversal', 'label':'4H Range Reversal', 'state':'PAUSED',
+                                'detail':'Paused: Socrates-only focus.'} if crypto_paused
+                               else {**self.range_snapshot(), 'analyses':self.range_analyses()})}
         result['native_history'] = self.native_capture.status() if self.native_capture else {
             'status':'unavailable', 'research_only':True, 'live_entry_ready':False,
             'detail':'Separate native validation history is not configured.'}
@@ -639,6 +653,9 @@ class Service:
         from .execution import Executor
         if not isinstance(payload, dict) or not payload or set(payload) - {'socrates','range_reversal'}:
             raise ValueError('Choose a valid strategy setting')
+        if 'range_reversal' in payload and feature_flags.crypto_paused():
+            # Refused before any read or write: saved crypto rows stay exactly as they are.
+            raise feature_flags.CryptoPaused()
         stock = payload.get('socrates')
         if stock is not None and (not isinstance(stock, dict) or set(stock) != {'enabled'} or type(stock['enabled']) is not bool):
             raise ValueError('Socrates permission must be on or off')

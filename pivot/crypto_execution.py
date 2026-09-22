@@ -11,6 +11,7 @@ from hashlib import sha256
 from threading import Lock, RLock
 from zoneinfo import ZoneInfo
 
+from . import feature_flags
 from .broker import BrokerRejected
 from .crypto_broker import canonical_symbol
 from .crypto_store import SYMBOLS, ConcurrentChange
@@ -210,8 +211,13 @@ class CryptoRangeExecutor:
         self.decision_error = None
         self.last_preflight_symbol = None
         self.entry_preflights_remaining = 0
+        # Release pause (Socrates-only focus), read at call time: no new entry is
+        # planned or sent; saved permissions and existing-trade management are unchanged.
+        self.paused = lambda: feature_flags.crypto_paused() is not False
 
     def enabled(self):
+        if self.paused():
+            return False
         control, main = self.store.control(), self.main_store.control()
         return (main.get('enabled') is True and main.get('policy') == MAIN_POLICY_VERSION
                 and control.get('enabled') is True and control.get('policy') == POLICY_VERSION
@@ -224,10 +230,13 @@ class CryptoRangeExecutor:
         trades = self.store.active_trades()
         visible = ('id', 'symbol', 'stage', 'direction', 'amount', 'stop', 'target', 'reason',
                    'created_at', 'filled_qty', 'net_entry_qty', 'partial_entry', 'stop_op', 'exit_pending')
+        paused = self.paused()
         return {'execution_available': True, 'live_enabled': self.enabled(), 'policy_version': POLICY_VERSION,
+                'paused': paused,
                 'review_required': control['enabled'] and control.get('policy') != POLICY_VERSION,
                 'control': {k: control[k] for k in ('enabled', 'symbols', 'target_dollars', 'generation')},
-                'message': self.message, 'at': self.last_at, 'markets': deepcopy(self.market_messages),
+                'message': feature_flags.CRYPTO_PAUSED_MESSAGE if paused else self.message,
+                'at': self.last_at, 'markets': deepcopy(self.market_messages),
                 'trades': [{k: t.get(k) for k in visible if k in t} for t in trades],
                 'history': [{k: t.get(k) for k in (*visible, 'completed_at') if k in t} for t in self.store.history(10)],
                 'decision_review': self._decision_review(),
@@ -397,6 +406,15 @@ class CryptoRangeExecutor:
                     # may build a new authorized plan inside the same original
                     # signal deadline; it never revives the expired payload.
                     retired_unsent.add(trade['symbol'])
+            if self.paused():
+                # Management above ran exactly as when crypto is Off. No entry is
+                # prepared, replanned or checked, and with no active trade this
+                # tick made no broker call at all. Saved permissions are untouched.
+                if not trades:
+                    self.message = feature_flags.CRYPTO_PAUSED_MESSAGE
+                for symbol in self.store.control()['symbols']:
+                    decisions.setdefault(symbol, ('paused', feature_flags.CRYPTO_PAUSED_MESSAGE, self.now()))
+                return
             if not self.enabled():
                 self.message = 'Crypto entries are off. Existing crypto positions continue their exits.'
                 for symbol in self.store.control()['symbols']:
@@ -454,6 +472,8 @@ class CryptoRangeExecutor:
         return {'crypto': self.store.control(), 'global': self.main_store.entry_authorization()}
 
     def _entry(self, analysis, symbol):
+        if self.paused():
+            raise CryptoWaiting(feature_flags.CRYPTO_PAUSED_MESSAGE)
         if not self.enabled() or self.store.incidents():
             raise CryptoWaiting('Crypto new entries are off or paused')
         event, expiry = checked_signal(analysis, symbol, self.now())
@@ -555,6 +575,7 @@ class CryptoRangeExecutor:
             self.store.save_trade(trade)
 
     def _entry_expired(self, trade):
+        # enabled() is False while paused, so a recovered unsent entry retires without a broker call.
         return (not self.enabled() or trade['authorization'] != self._authorization()
                 or not self.now() < timestamp(trade['expires_at'])
                 or not fresh(trade['created_at'], self.now(), 10))
