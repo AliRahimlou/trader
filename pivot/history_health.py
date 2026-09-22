@@ -3,13 +3,43 @@ from datetime import timedelta
 
 from .models import timestamp
 
+# Frames whose final bucket of a session may be shorter than the nominal length.
+# Video rule: the creator marks four-hour levels on continuous futures candles,
+# so an afternoon extreme is a four-hour extreme. App interpretation (4.5.0):
+# the QQQ regular session is split into 09:30-13:30 and 13:30-16:00 buckets;
+# the closing bucket carries only 150 minutes (fewer on an early close) but
+# stays tagged 240 minutes so frame consumers keep working. Hourly and
+# fifteen-minute frames remain full buckets only.
+PARTIAL_CLOSING_FRAMES = (240,)
+
+
+def bucket_ends(opening, closing, minutes):
+    """Completed-bucket end times of one session, anchored at its open.
+
+    Daily means the actual session close. Intraday frames list every full
+    bucket; frames in ``PARTIAL_CLOSING_FRAMES`` also end a final, shorter
+    bucket at the close (an early close before the first full bucket yields
+    one partial bucket ending at that close). Other remainders are dropped.
+    """
+    if minutes == 1440:
+        return [closing]
+    ends = []
+    end = opening + timedelta(minutes=minutes)
+    while end <= closing:
+        ends.append(end)
+        end += timedelta(minutes=minutes)
+    if minutes in PARTIAL_CLOSING_FRAMES and (not ends or ends[-1] < closing):
+        ends.append(closing)
+    return ends
+
 
 def frame_gaps(bars, sessions, minutes, now):
     """Return calendar-relative gaps without inventing candles or market sessions.
 
     All supplied sessions participate, including sessions before the first candle
     or after the final candle. Daily means the actual session close. Intraday
-    frames require a full bucket; overnight and short closing buckets do not count.
+    frames require a full bucket; overnight and short closing buckets do not count,
+    except the four-hour closing bucket, which ends at the session close.
     A 90-second publication allowance applies to each expected closing timestamp.
     No calendar means no gap inference, for standalone synthetic observations.
     """
@@ -25,14 +55,7 @@ def frame_gaps(bars, sessions, minutes, now):
         opened, closed = timestamp(session['open']), timestamp(session['close'])
         if closed <= opened:
             raise ValueError('Trading session must close after its opening')
-        if minutes == 1440:
-            if closed <= cutoff:
-                expected.add(closed)
-            continue
-        end = opened + timedelta(minutes=minutes)
-        while end <= closed and end <= cutoff:
-            expected.add(end)
-            end += timedelta(minutes=minutes)
+        expected.update(end for end in bucket_ends(opened, closed, minutes) if end <= cutoff)
     missing = expected - observed
     if missing:
         first = min(missing).isoformat()

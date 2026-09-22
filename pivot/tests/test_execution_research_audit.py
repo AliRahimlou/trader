@@ -50,14 +50,22 @@ def test_25_dollar_fractional_fill_and_exit_use_actual_nine_decimal_quantity(aud
     assert not broker.position_data and store.active_trade() is None
 
 
-def test_25_dollar_target_does_not_admit_unavailable_fractional_short(audit_engine):
+def test_25_dollar_short_executes_as_a_fractional_psq_purchase_with_mirrored_geometry(audit_engine):
+    """Previously skipped (no whole $675 QQQ share for $25); now a $25 PSQ buy carries the short's distances."""
     executor, broker, store = audit_engine
     broker.bid, broker.ask = '675.00', '675.01'
+    broker.quotes['PSQ'] = ('33.19', '33.20')
     snapshot = ready(direction='short')
-    snapshot['setup'].update(entry=675, stop=690, target=660)
+    snapshot['setup'].update(entry=675, stop=690, target=660)  # +2.222% to the stop, -2.222% to the target.
     executor.tick(snapshot)
-    assert not broker.sent and store.active_trade() is None
-    assert 'whole QQQ shares' in executor.message  # Skipped short, reported as a wait.
+    assert [(o['symbol'], o['side']) for o in broker.sent] == [('PSQ', 'buy'), ('PSQ', 'sell')]
+    assert broker.sent[0]['notional'] == '25.00' and 'qty' not in broker.sent[0]
+    trade = store.active_trade()
+    assert trade['stage'] == 'open' and trade['symbol'] == 'PSQ' and trade['direction'] == 'long'
+    assert trade['signal_symbol'] == 'QQQ' and trade['signal_direction'] == 'short' and trade['proxy'] == 'inverse_etf'
+    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'short', 'entry': '675', 'stop': '690', 'target': '660'}
+    assert (trade['proxy_geometry']['reference'], trade['stop'], trade['target']) == ('33.20', '32.46', '33.94')
+    assert broker.sent[1]['stop_price'] == '32.46' and Decimal(broker.sent[1]['qty']) == Decimal('25') / Decimal('33.20')
 
 
 @pytest.mark.parametrize('purpose', ['entry', 'stop', 'exit0'])

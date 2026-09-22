@@ -50,3 +50,38 @@ def test_waiting_settings_save_does_not_block_health_request(tmp_path, monkeypat
     asyncio.run(exercise())
     assert service.store.settings()['target_dollars'] == '5.00'
     assert service.store.control()['enabled'] is False
+
+
+def test_waiting_chart_copy_does_not_block_health_request(tmp_path, monkeypatch):
+    service = Service(None, Store(tmp_path / 'audit.db'))
+    entered, release, finished = Event(), Event(), Event()
+
+    def waiting_chart_inputs():
+        # The look-left copy is taken under the worker lock; a slow analysis
+        # cycle must not stall health checks or the Live controls.
+        entered.set()
+        try:
+            release.wait(2)
+            return None
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(service, 'chart_inputs', waiting_chart_inputs, raising=False)
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=create_app(service, background=False))
+        async with httpx.AsyncClient(transport=transport, base_url='http://testserver') as client:
+            chart = asyncio.create_task(client.get('/api/chart'))
+            try:
+                assert await asyncio.to_thread(entered.wait, 2)
+                assert not finished.is_set(), 'Chart copy blocked the API event loop'
+                health = await asyncio.wait_for(client.get('/api/health'), timeout=1)
+                assert health.status_code == 200
+                assert not finished.is_set(), 'Health request waited for the chart copy'
+            finally:
+                release.set()
+                response = await asyncio.wait_for(chart, timeout=2)
+            assert response.status_code == 503
+            assert response.json()['available'] is False
+
+    asyncio.run(exercise())

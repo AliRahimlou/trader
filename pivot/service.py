@@ -64,6 +64,9 @@ class Service:
         self.lock, self.stop_event = Lock(), Event()
         self.threads = []
         self._stock_catchup_buckets = set()
+        # Latest validated analysis inputs (Market objects, not JSON) for chart
+        # rendering; kept outside self.state, which is serialised. See chart_inputs().
+        self.latest_inputs = None
         from .execution import Executor
         self.executor = Executor(broker, store) if broker else None
         from .portfolio import Portfolio
@@ -400,7 +403,8 @@ class Service:
         checked_at=datetime.now(timezone.utc)
         stocks=stock_health(markets, getattr(self.feeds, 'stock_sessions', {}), checked_at, error=stock_error,
             fetch_seconds=getattr(self.feeds, 'stock_fetch_seconds', None), refresh_mode=getattr(self.feeds, 'stock_refresh_mode', None),
-            full_at=getattr(self.feeds, 'stock_last_full_at', None))
+            full_at=getattr(self.feeds, 'stock_last_full_at', None),
+            leader_daily_error=getattr(self.feeds, 'stock_leader_daily_error', None))
         index=vix_health(vix, checked_at, error=vix_error, details=getattr(self.feeds, 'vix_diagnostics', None))
         if markets and stocks['status'] != 'current' and not stock_error:
             errors.append('One or more required stock histories are missing, incomplete or stale')
@@ -409,11 +413,18 @@ class Service:
         deadlines=[now+timedelta(seconds=90), *[m.observed_at+timedelta(seconds=90) for m in markets.values()]]
         if stocks.get('valid_until'): deadlines.append(datetime.fromisoformat(stocks['valid_until']))
         if index['valid_until']: deadlines.append(datetime.fromisoformat(index['valid_until']))
+        setup = analyze(qqq, markets, vix, checked_at) if qqq else None
+        sessions = getattr(self.feeds, 'stock_sessions', {})
         with self.lock:
-            self.state.update(data_health={'stocks':stocks, 'vix':index, 'ready':ready}, data_valid_until=min(deadlines).isoformat() if ready else None, analysis_at=checked_at.isoformat(),setup=analyze(qqq,markets,vix,checked_at) if qqq else None, observations=observations,data_errors=errors,
+            self.state.update(data_health={'stocks':stocks, 'vix':index, 'ready':ready}, data_valid_until=min(deadlines).isoformat() if ready else None, analysis_at=checked_at.isoformat(),setup=setup, observations=observations,data_errors=errors,
                 market_context=market_context(qqq, checked_at),
                 feeds={'stocks':qqq.source if qqq else 'unavailable',
                        'vix':'current' if index['status']=='current' else 'unavailable or delayed'})
+            if markets and not stock_error:
+                # Plain attributes, never JSON state: QQQ frames 15/60/240/1440, leaders 5/1440,
+                # the VIX market (or None), the exchange calendar and the analysis result.
+                self.latest_inputs = {'at': checked_at, 'markets': markets, 'vix': vix,
+                                      'sessions': sessions, 'setup': setup}
         self._record_decision(markets, vix, checked_at)
         if ready and self.threads and not self.stop_event.is_set() and self.native_capture:
             # Optional history collection has its own bounded daemon and budget;
@@ -422,6 +433,15 @@ class Service:
                 self.native_capture.start(getattr(self.feeds, 'stock_sessions', {}), checked_at)
             except Exception:
                 pass
+
+    def chart_inputs(self):
+        """Deep copy of the latest validated analysis inputs, or None before the first success.
+
+        Read-only evidence for chart rendering ('look left' at the levels the
+        app holds); it carries no trading authority and never touches state.
+        """
+        with self.lock:
+            return deepcopy(self.latest_inputs)
 
     def _record_decision(self, markets, vix, checked_at):
         """Observational only: failures cannot modify the setup or execution permission."""

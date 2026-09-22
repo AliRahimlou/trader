@@ -2,9 +2,9 @@
 
 Socrates execution follows the **17:25 and 18:11 recordings**, with the 12:45 recording supplementary. A separate **4H Range Reversal** live-capable Alpaca crypto engine follows the September 19 recording. The view menu changes display only; persistent strategy controls select which engines may trade under the global Live switch.
 
-**Current state (version 4.4.0): the app connects to Alpaca and InsightSentry Free actual VIX, with protected AllSpark hosting and remote GitHub updates, and has never sent an order.** The September 21 audit found that the 4.3 numerical interpretations (a nearest-micro-level target with a median 0.52 R, a 1.5-tick VIX zone with no persistence, a single conflicting leader vetoing all seven, one session allowance shared by both engines) made a qualifying entry nearly impossible. Version 4.4.0 changes those interpretations behind new policy versions: a minimum reward-to-risk with the event level excluded from targets, a VIX-scaled swing tolerance with persistence and invalidation, neutral instead of veto for a conflicting leader, two entry attempts per strategy per session, a strategy-scoped pause instead of global Live-off on a stock rejection (with an optional `PIVOT_ALERT_WEBHOOK_URL` alert), a 30-minute entry cutoff, a 5-second clock-skew tolerance, a crypto net-expectancy cost gate after fees, a gap-tolerant opening range and time-based VIX retries. **After rollout both strategies show “review required”; the owner must accept the new policies in the app before new entries resume.** Purchase amounts and markets are unchanged. The VIX integration keeps completed candles in a durable cache and checks a fresh actual-index quote before an otherwise valid entry; its free allowance is guarded across restarts. Order handling has passed offline simulated-broker tests and 60-day replays; paper-account/live fills and profitability have not been established.
+**Current state (version 4.5.0): the app connects to Alpaca and InsightSentry Free actual VIX, with protected AllSpark hosting and remote GitHub updates, and has never sent an order.** The September 22 frame-by-frame re-read of the 18:11 recording (NQ futures 4h chart with extended hours, a handful of hand-drawn lines at swing points touched more than once over five to six weeks, kept on the 1h, break-then-retest including a fade at a just-reclaimed line, leaders read against period levels, a VIX with no lines where “look left” means a prior consolidation base) showed that the app's mechanical levels, continuation-only retest, 180-minute event life, 5-of-7 quorum and skipped shorts did not match what he does. Version 4.5.0 aligns them behind a new Socrates policy version (`nasdaq-qqq-execution-v7-video-aligned`): an afternoon four-hour bucket, swing-pivot areas with ±0.1% bands, two non-adjacent interactions and a cap of the 16 nearest, a retest that is any return to the level with the direction taken from the leaders and VIX, an event life to the end of the next session, leader period levels (previous day/week/Monday extremes, session/week/month opens, session VWAP) with a 4-of-7 majority and a 60-minute reaction window, VIX consolidation bases beside swing clusters, a PSQ inverse-ETF proxy for shorts (intraday only, stop and target translated by percentage), and a “Look left” chart panel backed by `/api/chart`. The 4.4.0 rules it builds on (minimum reward-to-risk with the event level excluded, VIX persistence, per-strategy allowances, strategy-scoped pause, 30-minute cutoff, crypto net-cost gate) are unchanged. Still not aligned: Alpaca has no futures, regular session only, no supply/demand boxes, no 5-minute VIX, no weekly/monthly VWAP. **After rollout both strategies show “review required”; the owner must accept the new policies in the app before new entries resume.** Purchase amounts and markets are unchanged. The VIX integration keeps completed candles in a durable cache and checks a fresh actual-index quote before an otherwise valid entry; its free allowance is guarded across restarts. Order handling has passed offline simulated-broker tests and 60-day replays; paper-account/live fills and profitability have not been established.
 
-See the [4.4.0 release note](docs/production-v4.4.0.md) and [execution behavior and remaining limits](docs/live-execution.md).
+See the [4.5.0 release note](docs/production-v4.5.0.md), the [4.4.0 release note](docs/production-v4.4.0.md) and [execution behavior and remaining limits](docs/live-execution.md).
 
 Each engine has its own durable maximum of **two new entry attempts per New York calendar session** (shared across both engines before 4.4.0). Rejected, uncertain and already-claimed attempts consume the allowance; completing a trade or restarting does not refund it. Protection and exits remain available after the allowance is exhausted. The dashboard reports each engine's allowance separately from fills. See [version 4.3.0 repair notes](docs/production-v4.3.0.md) and the [4.3.2 execution-safety fixes](docs/production-v4.3.2.md) (lost broker requests resolve after 60 seconds instead of stranding a position; skipped shorts, submission budget, immediate-limit buffer and container logs).
 
@@ -16,9 +16,9 @@ See the [deployment verification](docs/allspark-deployment-audit.md) for the ins
 
 ## Socrates flow
 
-Premark Nasdaq areas (previous-day extremes and repeated four-hour levels) → observe a break/retest or sweep → confirm the technology leaders at supply/demand (five of seven agree, at most one opposing; a conflicting leader is neutral) → confirm the actual VIX reacting the opposite way at a VIX-scaled swing area, with persistence → evaluate the documented trade plan (target excludes the event's own level and must meet the minimum reward-to-risk) and current broker checks. No new entries in the final 30 minutes; positions close five minutes before the close.
+Premark Nasdaq areas (previous-day extremes and four-hour swing-pivot levels touched at least twice, two buckets per session) → observe an hourly break and a later return to the level, or a sweep; an event lives to the end of the next session → take the direction from the technology leaders at their interaction zones and period levels (four of seven agree, at most one opposing, within 60 minutes; a conflicting leader is neutral; mixed means no trade) → confirm the actual VIX reacting the opposite way at a swing cluster or consolidation base, with persistence → evaluate the documented trade plan (target excludes the event's own level and must meet the minimum reward-to-risk) and current broker checks. A short buys PSQ, the inverse ETF, intraday only. No new entries in the final 30 minutes; positions close five minutes before the close. The “Look left” panel shows the candles, areas and events the worker used.
 
-These are related source variants in one workflow. The app does not add opening-range/FVG, ranking scores, daily-bias heuristics, volatility ETF proxies, 5-minute tape conditions, or VWAP requirements.
+These are related source variants in one workflow. The app does not add opening-range/FVG, ranking scores, daily-bias heuristics, volatility ETF proxies, 5-minute tape conditions, or a VWAP entry requirement (the session VWAP is one of the leader period levels, not a gate).
 
 ## 4H Range Reversal flow
 
@@ -42,6 +42,7 @@ Build the completed first four-hour crypto range (gap-tolerant since 4.4.0, with
 - [Version 4.3.0 shared entry allowance and execution verification](docs/production-v4.3.0.md)
 - [Version 4.3.2 lost broker requests, skipped shorts and submission budget](docs/production-v4.3.2.md)
 - [Version 4.4.0 minimum reward-to-risk, VIX-scaled gate, neutral leaders, per-engine allowances](docs/production-v4.4.0.md)
+- [Version 4.5.0 video-aligned levels, retests, leaders and VIX, PSQ short proxy, “Look left” chart](docs/production-v4.5.0.md)
 - [Detailed 4H Range Reversal source review and precise observation rules](docs/research/range-reversal-video-20260919.md)
 - [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
 - [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
@@ -57,6 +58,7 @@ Use `.venv/bin/python -m pip install -r requirements.txt` and `npm --prefix dash
 ## Layout
 
 - `pivot/strategy.py`: primary Nasdaq setup analysis; no order submission.
+- `pivot/chart_data.py`: read-only `/api/chart` payload (completed 4h/1h candles, areas with interaction counts, previous-day levels, live events, leader period levels, VIX bases) for the “Look left” panel.
 - `pivot/rulebook.py`: rules with source timestamps and unresolved definitions.
 - `pivot/feeds.py`: read-only Alpaca and direct-index adapters.
 - `pivot/index_data.py`, `pivot/data_health.py`: actual VIX provenance and per-input freshness checks.
@@ -71,7 +73,7 @@ Use `.venv/bin/python -m pip install -r requirements.txt` and `npm --prefix dash
 - `pivot/observations.py`, `pivot/worker_health.py`: private reproducible input history and independent worker-progress checks.
 - `research/`: disconnected strategy comparisons, exact observation replay and an explicitly isolated paper-broker workflow.
 - `pivot/performance.py`: evidence-based completed-trade gross results; fees remain separate.
-- `pivot/web/`: small standalone interface, no old dashboard imports.
+- `pivot/web/`: small standalone interface, no old dashboard imports; `chart.mjs` renders the “Look left” candles and lines from `/api/chart`.
 - `pivot/tests/`: isolated tests; all HTTP requests denied.
 - `deploy/`: tested Docker image, private-network hosting, serialized GitHub updater and rollout tests.
 

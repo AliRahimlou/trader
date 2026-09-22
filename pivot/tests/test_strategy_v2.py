@@ -9,10 +9,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from pivot.models import Bar, Market, MAG7, Zone
-from pivot.strategy import (ANALYSIS_VERSION, CANDLE_PUBLICATION_GRACE_SECONDS, AnalysisPolicy, analyze, interaction_zones,
-                            leader_confirmation, leader_diagnostics, location_events)
+from pivot.strategy import (ANALYSIS_VERSION, CANDLE_PUBLICATION_GRACE_SECONDS, ET, AnalysisPolicy, analyze,
+                            event_expiry, interaction_zones, leader_confirmation, leader_diagnostics, location_events)
 
-NOW = datetime(2026, 9, 16, 16, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 16, 16, tzinfo=timezone.utc)  # 12:00 ET, Wednesday
+# v5 fixture: the frozen three-candle leader window keeps the older wall-clock
+# witnesses about deadlines readable; the 60-minute default has its own tests.
+SHORT_WINDOW = AnalysisPolicy(persistence_bars=3)
 
 
 def candle(at, opened=100, high=105, low=95, close=100, minutes=5):
@@ -117,7 +120,7 @@ def test_current_rejection_persists_without_latest_zone_touch_and_expires_by_wal
     market.observed_at = NOW
     market.bars[5] += [candle(NOW-timedelta(minutes=5), 105, 105.05, 104.95, 105),
                        candle(NOW, 106, 106.05, 105.95, 106)]
-    row = leader_diagnostics({'AAPL': market}, NOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    row = leader_diagnostics({'AAPL': market}, NOW, SHORT_WINDOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
     assert row['vote'] == 'long' and row['age_minutes'] == 10
     assert row['reaction_at'] == (NOW-timedelta(minutes=10)).isoformat()
     assert row['reason'] == 'persistent reaction'
@@ -125,8 +128,10 @@ def test_current_rejection_persists_without_latest_zone_touch_and_expires_by_wal
     assert market.bars[5][-1].low > zone['high']
     later = NOW+timedelta(minutes=5)
     market.observed_at = later
-    expired = leader_diagnostics({'AAPL': market}, later, setup_at=NOW-timedelta(minutes=20))['AAPL']
+    expired = leader_diagnostics({'AAPL': market}, later, SHORT_WINDOW, setup_at=NOW-timedelta(minutes=20))['AAPL']
     assert expired['vote'] is None
+    # The v5 default window (twelve candles) keeps the same reaction for an hour.
+    assert leader_diagnostics({'AAPL': market}, later, setup_at=NOW-timedelta(minutes=20))['AAPL']['vote'] == 'long'
 
 
 def test_persistent_reaction_cannot_cross_a_missing_five_minute_bar():
@@ -172,7 +177,7 @@ def event_bars():
 
 
 def event_zone():
-    return Zone(99.9, 100.1, NOW-timedelta(days=3), '4h repeated interaction')
+    return Zone(99.9, 100.1, NOW-timedelta(days=3), '4h swing area')
 
 
 def test_retests_keep_origin_identity_first_confirmation_and_fixed_expiry():
@@ -183,10 +188,18 @@ def test_retests_keep_origin_identity_first_confirmation_and_fixed_expiry():
     assert first['id'] == second['id']
     assert first['origin'] == second['origin'] == bars[-2]
     assert first['confirmed'] == second['confirmed'] == bars[-1]
-    assert first['expires_at'] == second['expires_at'] == NOW+timedelta(hours=2)
+    # v5: the event lives to the end of the next regular session (Thursday 16:00 ET).
+    expiry = datetime(2026, 9, 17, 16, tzinfo=ET)
+    assert first['expires_at'] == second['expires_at'] == event_expiry(bars[-2].end) == expiry
     assert second['state'] == 'CONFIRMING'
-    expired = location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(hours=2))[0]
-    assert expired['state'] == 'EXPIRED'
+    assert location_events(bars, [zone], 'four_hour_retest', expiry-timedelta(seconds=1))[0]['state'] == 'CONFIRMING'
+    # Once its lifetime has ended the origin candle can no longer report an event at all.
+    assert location_events(bars, [zone], 'four_hour_retest', expiry) == []
+    # A one-session policy expires at the origin session's close instead.
+    assert location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(hours=4),
+                           AnalysisPolicy(event_sessions=1)) == []
+    assert location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(hours=3, minutes=59),
+                           AnalysisPolicy(event_sessions=1))[0]['expires_at'] == datetime(2026, 9, 16, 16, tzinfo=ET)
 
 
 def test_unclosed_future_retest_and_late_constructed_area_do_not_qualify():
@@ -208,7 +221,9 @@ def test_event_invalidates_on_opposite_close_hourly_gap_and_session_change():
     gap_bars = bars[:2]+[candle(later, 102, 105, 100, 104, 60)]
     gap = location_events(gap_bars, [zone], 'four_hour_retest', later)[0]
     assert gap['state'] == 'INVALIDATED' and 'missing' in gap['reason']
-    assert location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(days=1)) == []
+    # v5: the next session still carries the event; the one after does not.
+    assert location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(days=1))[0]['state'] == 'CONFIRMING'
+    assert location_events(bars, [zone], 'four_hour_retest', NOW+timedelta(days=2)) == []
 
 
 def test_previous_day_sweep_holds_its_origin_and_has_explicit_invalidation():
@@ -225,7 +240,8 @@ def test_previous_day_sweep_holds_its_origin_and_has_explicit_invalidation():
 
 def test_both_methods_are_reported_even_when_four_hour_method_also_passes():
     market, leaders, vix, now = setup_scenario('short', 'four_hour_retest')
-    market.bars[1440] = [candle(now-timedelta(days=1), high=109.5, low=90, minutes=1440)]
+    # The swept previous-day high sits inside the latest candle's range (4.5.0 proximity).
+    market.bars[1440] = [candle(now-timedelta(days=1), high=110.2, low=90, minutes=1440)]
     market.previous_session = '2026-09-15'
     result = analyze(market, leaders, vix, now)
     branches = {row['id']: row for row in result['strategies']}
@@ -275,10 +291,10 @@ def test_event_id_is_independent_of_leader_direction_and_future_target_geometry(
 
 @pytest.mark.parametrize('direction', ['long', 'short'])
 @pytest.mark.parametrize('agreeing,opposing,expected', [
-    (5, 1, True), (5, 2, False), (4, 1, False),
-    (7, 0, True), (6, 1, True), (5, 0, True), (4, 0, False),
+    (4, 1, True), (4, 2, False), (3, 1, False), (3, 0, False),
+    (7, 0, True), (6, 1, True), (5, 1, True), (5, 2, False), (4, 0, True),
 ])
-def test_leader_vote_requires_five_companies_and_allows_one_opposing(direction, agreeing, opposing, expected):
+def test_leader_vote_requires_four_companies_and_allows_one_opposing(direction, agreeing, opposing, expected):
     opposite = 'short' if direction == 'long' else 'long'
     leaders = {symbol: leader_market(symbol, direction if i < agreeing else
                                     opposite if i < agreeing+opposing else None)
@@ -349,14 +365,16 @@ def test_common_observation_time_does_not_require_simultaneous_reactions():
 
 def test_ready_candidate_expires_with_its_earliest_counted_leader_reaction():
     market, leaders, vix, now = setup_scenario('long', 'four_hour_retest')
-    for symbol, age in zip(MAG7, (10, 5, 0, 0, 0, None, None)):
+    # Three of the five agreeing reactions are ten minutes old, so their
+    # shared deadline ends the four-company quorum when it passes.
+    for symbol, age in zip(MAG7, (10, 10, 10, 0, 0, None, None)):
         leader = leader_market(symbol, 'long' if age is not None else None,
                                at=NOW-timedelta(minutes=age or 0))
         for minutes in range((age or 0)-5, -1, -5):
             leader.bars[5].append(candle(NOW-timedelta(minutes=minutes), 106, 106.05, 105.95, 106))
         leader.observed_at = now
         leaders[symbol] = leader
-    result = analyze(market, leaders, vix, now)
+    result = analyze(market, leaders, vix, now, SHORT_WINDOW)
     deadline = now+timedelta(minutes=5)
     assert result['state'] == 'SETUP_READY'
     assert result['leader_observations_synchronized'] is True
@@ -370,7 +388,7 @@ def test_ready_candidate_expires_with_its_earliest_counted_leader_reaction():
     for observed_at in (deadline-timedelta(seconds=1), deadline):
         for observed in (market, vix, *leaders.values()):
             observed.observed_at = observed_at
-        checked = analyze(market, leaders, vix, observed_at)
+        checked = analyze(market, leaders, vix, observed_at, SHORT_WINDOW)
         if observed_at < deadline:
             assert checked['state'] == 'SETUP_READY'
             assert checked['leader_evidence_valid_until'] == deadline.isoformat()
@@ -379,15 +397,16 @@ def test_ready_candidate_expires_with_its_earliest_counted_leader_reaction():
             assert checked['leader_evidence']['AAPL']['vote'] is None
 
 
-@pytest.mark.parametrize('persistence_bars', [1, 2, 3])
+@pytest.mark.parametrize('persistence_bars', [1, 3, 12, 24])
 def test_candidate_leader_deadline_uses_the_declared_persistence_policy(persistence_bars):
     market, leaders, vix, now = setup_scenario()
     policy = AnalysisPolicy(persistence_bars=persistence_bars)
     result = analyze(market, leaders, vix, now, policy)
     assert result['state'] == 'SETUP_READY'
     assert result['leader_evidence_valid_until'] == (now+timedelta(minutes=5*persistence_bars)).isoformat()
-    assert result['leader_rule'] == {'minimum_agree': 5, 'maximum_opposing': 1,
+    assert result['leader_rule'] == {'minimum_agree': 4, 'maximum_opposing': 1,
                                      'persistence_minutes': 5*persistence_bars}
+    assert analyze(market, leaders, vix, now)['leader_rule']['persistence_minutes'] == 60
 
 
 def test_candidate_deadline_includes_the_permitted_opposing_vote():
@@ -401,7 +420,7 @@ def test_candidate_deadline_includes_the_permitted_opposing_vote():
     result = analyze(market, leaders, vix, now)
     assert result['state'] == 'SETUP_READY'
     assert result['leader_evidence']['GOOGL']['vote'] == 'short'
-    assert result['leader_evidence_valid_until'] == (now+timedelta(minutes=5)).isoformat()
+    assert result['leader_evidence_valid_until'] == (now+timedelta(minutes=50)).isoformat()
 
 
 def test_candidate_exposes_observation_expiry_before_the_reaction_window_ends():
@@ -411,7 +430,7 @@ def test_candidate_exposes_observation_expiry_before_the_reaction_window_ends():
         item.observed_at = checked_at
     result = analyze(market, leaders, vix, checked_at)
     observation_deadline = base+timedelta(minutes=5, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)
-    reaction_deadline = base+timedelta(minutes=15)
+    reaction_deadline = base+timedelta(minutes=60)
     assert result['state'] == 'SETUP_READY'
     assert result['leader_evidence_valid_until'] == reaction_deadline.isoformat()
     assert result['leader_observation_valid_until'] == observation_deadline.isoformat()
@@ -445,7 +464,7 @@ def test_new_candle_refreshes_observation_deadline_without_extending_reaction_ag
     assert result['leader_observation_at'] == (base+timedelta(minutes=5)).isoformat()
     assert result['leader_observation_valid_until'] == (
         base+timedelta(minutes=10, seconds=CANDLE_PUBLICATION_GRACE_SECONDS)).isoformat()
-    assert result['leader_evidence_valid_until'] == (base+timedelta(minutes=15)).isoformat()
+    assert result['leader_evidence_valid_until'] == (base+timedelta(minutes=60)).isoformat()
     assert all(row['reaction_at'] == base.isoformat() for row in result['leader_evidence'].values())
 
 
@@ -466,8 +485,10 @@ def test_conflicting_active_reactions_within_one_company_are_neutral_not_a_veto(
     leaders['TSLA'] = leader_market('TSLA', None)
     okay, reason = leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))
     assert okay and 'AAPL: conflicting, neutral' in reason
-    # Four agreeing plus the neutral company is still short of the quorum.
+    # v5: four agreeing plus the neutral company meets the quorum; three do not.
     leaders['GOOGL'] = leader_market('GOOGL', None)
+    assert leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))[0]
+    leaders['META'] = leader_market('META', None)
     assert not leader_confirmation(leaders, 'long', NOW, setup_at=NOW-timedelta(minutes=20))[0]
 
 

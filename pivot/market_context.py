@@ -29,31 +29,53 @@ def _closed_frame(market, minutes, now):
 def _gap_reason(bars, minutes, hourly):
     """Check observed-session continuity without inventing a holiday calendar.
 
-    Full RTH buckets are end-stamped: hourly 10:30 through 15:30, four-hour
-    13:30 ET. Early-close sessions can end after the 12:30 hourly bucket and
-    have no full four-hour bucket. An entirely absent session cannot be proven
-    missing without the exchange calendar; service data health owns that check.
+    Full RTH hourly buckets are end-stamped 10:30 through 15:30 ET; early-close
+    sessions can end after the 12:30 bucket. Four-hour buckets are two per
+    session since 4.5.0: 09:30-13:30 and the closing bucket 13:30-16:00 (still
+    tagged 240 minutes; an early close yields the buckets that fit, the last
+    ending at the close). Completed hourly candles prove which four-hour
+    buckets a session must have: a 13:30 hourly candle proves the first, any
+    later hourly candle proves the closing one. An entirely absent session
+    cannot be proven missing without the exchange calendar; service data
+    health owns that check. This frame stays descriptive-only.
     """
     for previous, current in zip(bars, bars[1:]):
+        left, right = previous.end.astimezone(ET), current.end.astimezone(ET)
+        if minutes == 240:
+            if left.date() == right.date():
+                # Only the morning bucket may be followed by the closing bucket of its day.
+                if (left.hour, left.minute) == (13, 30) and right > left:
+                    continue
+                return 'A completed candle is missing within an observed session.'
+            # A new session begins with its first bucket: 13:30 or an earlier early close.
+            if (right.hour, right.minute) <= (13, 30):
+                continue
+            return 'Candle spacing cannot establish continuous session history.'
         if current.end - previous.end == timedelta(minutes=minutes):
             continue
-        left, right = previous.end.astimezone(ET), current.end.astimezone(ET)
         if left.date() == right.date():
             return 'A completed candle is missing within an observed session.'
-        valid_boundary = ((minutes == 60 and (left.hour, left.minute) in ((12, 30), (15, 30))
-                           and (right.hour, right.minute) == (10, 30))
-                          or (minutes == 240 and (left.hour, left.minute) == (13, 30)
-                              and (right.hour, right.minute) == (13, 30)))
+        valid_boundary = ((left.hour, left.minute) in ((12, 30), (15, 30))
+                          and (right.hour, right.minute) == (10, 30))
         if not valid_boundary:
             return 'Candle spacing cannot establish continuous session history.'
     if bars and minutes == 240:
-        observed = {bar.end for bar in bars}
-        # A completed 13:30 hourly candle demonstrates that this session has
-        # reached the full four-hour boundary. Short sessions do not supply it.
-        expected = {bar.end for bar in hourly if bar.end >= bars[0].end
-                    and (bar.end.astimezone(ET).hour, bar.end.astimezone(ET).minute) == (13, 30)}
-        if expected - observed:
-            return 'A four-hour candle is missing for an observed full session.'
+        by_day = {}
+        for bar in bars:
+            by_day.setdefault(bar.end.astimezone(ET).date(), []).append(bar.end.astimezone(ET))
+        last_hourly_day = hourly[-1].end.astimezone(ET).date() if hourly else None
+        for bar in hourly:
+            if bar.end < bars[0].end:
+                continue
+            local = bar.end.astimezone(ET)
+            ends = by_day.get(local.date(), [])
+            if (local.hour, local.minute) == (13, 30) and not any((e.hour, e.minute) == (13, 30) for e in ends):
+                return 'A four-hour candle is missing for an observed full session.'
+            # The closing bucket is only proven due once a later session has been observed;
+            # during the afternoon the hourly frame runs ahead of it by design.
+            if ((local.hour, local.minute) > (13, 30) and local.date() < last_hourly_day
+                    and not any(e >= local for e in ends)):
+                return 'A four-hour closing candle is missing for an observed full session.'
     return None
 
 
@@ -112,6 +134,8 @@ def market_context(market, now):
 
     Freshness follows the hourly QQQ input, while each frame exposes its own
     candle timestamp. Missing/invalid inputs produce unknown, never a vote.
+    The four-hour structure reads both session buckets (13:30 and the closing
+    bucket), so afternoon extremes participate in confirmed swings.
     """
     hourly, error = _closed_frame(market, 60, now)
     error = error or _gap_reason(hourly, 60, hourly)

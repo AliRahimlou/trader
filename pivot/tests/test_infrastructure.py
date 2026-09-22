@@ -42,7 +42,7 @@ def test_resampling_requires_complete_contiguous_closed_intervals():
     start=datetime(2026,9,16,13,30,tzinfo=timezone.utc)
     bars=[Bar(start+timedelta(minutes=15*i),15,100,101,99,100,10,100) for i in range(1,27)]
     assert len(resample(bars,60))==6
-    assert len(resample(bars,240))==1
+    assert len(resample(bars,240))==2  # 09:30-13:30 and the 13:30-16:00 closing bucket (4.5.0)
     assert len(daily(bars))==1
     assert len(resample(bars[1:],60))==5
     assert not daily(bars[:-1])

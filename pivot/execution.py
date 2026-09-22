@@ -2,10 +2,15 @@
 
 Every broker POST has a durable, unique intent. An uncertain response is looked up,
 never blindly retried. This module is also exercised with an offline fake broker.
+
+Since 4.5.0 the executor is symbol-aware: a long setup buys QQQ and a short setup
+buys PSQ (inverse-ETF proxy, an app interpretation the videos do not mention).
+Every trade record names its traded 'symbol'; management never assumes QQQ.
 """
 from datetime import datetime, timezone, timedelta
 from contextlib import nullcontext
 from copy import deepcopy
+from decimal import ROUND_HALF_UP
 from hashlib import sha256
 from math import isfinite
 import json
@@ -13,7 +18,7 @@ import logging
 import re
 from threading import Lock
 from zoneinfo import ZoneInfo
-from .broker import BrokerRejected
+from .broker import BrokerRejected, PROXY_KIND, PROXY_SYMBOL, PROXY_SYMBOLS, SIGNAL_SYMBOL
 from .feeds import FeedError
 from .models import timestamp
 from .policy import POLICY_VERSION
@@ -21,7 +26,8 @@ from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
 from .deployment import DeploymentHold
 from .portfolio import PortfolioBlocked
-from .strategy import ANALYSIS_VERSION, LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS
+from .strategy import (ANALYSIS_VERSION, LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS, MAX_PERSISTENCE_BARS,
+                       event_expiry)
 
 TERMINAL = {'filled', 'canceled', 'expired', 'rejected'}
 WORKING_PROTECTION = {'new', 'partially_filled'}
@@ -60,8 +66,8 @@ EXECUTION_GATES = set(SIGNAL_GATES.values()) | {
     'signal_checks', 'signal_age_policy', 'setup_deduplication', 'broker_snapshot', 'account_status',
     'account_identity', 'account_mode', 'market_session', 'entry_cutoff', 'existing_exposure',
     'asset_eligibility', 'quote_read', 'quote_validation', 'quote_stale', 'quote_invalid', 'quote_spread',
-    'signal_direction', 'price_geometry', 'price_drift', 'purchase_size', 'short_eligibility',
-    'short_reserve', 'vix_entry_quote', 'final_analysis_freshness', 'final_data_expiry',
+    'signal_direction', 'price_geometry', 'price_drift', 'purchase_size', 'proxy_eligibility',
+    'vix_entry_quote', 'final_analysis_freshness', 'final_data_expiry',
     'entry_reservation', 'trade_management', 'order_prepare', 'order_submit', 'order_lookup',
     'order_identity', 'order_rejection', 'order_reconciliation', 'position_reconciliation',
     'order_cancel', 'protection', 'trade_finish', 'owner_attention', 'exit_management',
@@ -133,7 +139,7 @@ def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
                 or not 0 < zone['low'] <= zone['high']):
             raise ValueError
         established = timestamp(zone['established_at'])
-        identity = ['QQQ', setup['strategy_id'], float(zone['low']).hex(), float(zone['high']).hex(),
+        identity = [SIGNAL_SYMBOL, setup['strategy_id'], float(zone['low']).hex(), float(zone['high']).hex(),
                     established.astimezone(timezone.utc).isoformat(), origin.astimezone(timezone.utc).isoformat()]
         if paper:
             identity = [PAPER_SIGNAL_POLICY_VERSION, PAPER_SIGNAL_PURPOSE, *identity]
@@ -142,8 +148,8 @@ def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
             raise ValueError
         if (established >= origin - timedelta(minutes=60)
                 or not origin <= event <= evidence <= now
-                or expires != origin + timedelta(minutes=180)
-                or leader_deadline > now + timedelta(minutes=15)
+                or not origin < expires <= event_expiry(origin)
+                or leader_deadline > now + timedelta(minutes=LEADER_MINUTES * MAX_PERSISTENCE_BARS)
                 or setup.get('leader_observations_synchronized') is not True
                 or observation_at > now
                 or observation_deadline != observation_at + timedelta(
@@ -153,8 +159,7 @@ def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
         raise Waiting('Waiting for a current setup under the active video rules') from None
     if (now >= expires or now >= leader_deadline or now >= observation_deadline
             or (now - evidence).total_seconds() > 3690
-            or any(at.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()
-                   for at in (origin, event, evidence))):
+            or evidence.astimezone(NEW_YORK).date() != now.astimezone(NEW_YORK).date()):
         raise ExpiredSignal('Waiting for a current setup under the active video rules')
     return min(expires, leader_deadline, observation_deadline)
 
@@ -167,22 +172,46 @@ def closing(clock, now, seconds=300):
     return (timestamp(clock['next_close']) - now).total_seconds() <= seconds
 
 
-def checked_quote(quote, now):
+def checked_quote(quote, now, symbol=SIGNAL_SYMBOL):
+    """Freshness, validity and spread rules; identical for the QQQ signal and the PSQ proxy."""
     try:
         if not recent(quote['t'], now, 15):
-            raise Waiting('Waiting for a current QQQ quote', code='quote_stale')
+            raise Waiting(f'Waiting for a current {symbol} quote', code='quote_stale')
         bid, ask = decimal(quote['bp']), decimal(quote['ap'])
         if bid <= 0 or ask < bid or decimal(quote['bs']) <= 0 or decimal(quote['as']) <= 0:
-            raise Waiting('Waiting for a valid QQQ bid and ask', code='quote_invalid')
+            raise Waiting(f'Waiting for a valid {symbol} bid and ask', code='quote_invalid')
         if (ask - bid) / bid > decimal('.005'):
-            raise Waiting('QQQ spread is too wide; waiting', code='quote_spread')
+            raise Waiting(f'{symbol} spread is too wide; waiting', code='quote_spread')
         return bid, ask
     except Waiting:
         raise
     except (KeyError, TypeError, ValueError, ArithmeticError):
         # A malformed quote is unavailable data too. Position management must
         # still place the known protective stop after a confirmed entry fill.
-        raise Waiting('Waiting for a valid QQQ bid and ask', code='quote_invalid') from None
+        raise Waiting(f'Waiting for a valid {symbol} bid and ask', code='quote_invalid') from None
+
+
+def proxy_translation(proxy_ask, entry, stop, target):
+    """Translate a QQQ short's geometry (stop > entry > target) onto a PSQ purchase.
+
+    App interpretation, not a video rule: the videos short Nasdaq futures and say
+    nothing about an inverse ETF. PSQ tracks -1x QQQ's daily move, so the same
+    fractional distances are mirrored around the current PSQ ask, rounded to
+    cents: stop = ask * (1 - (S - E) / E) below it, target = ask * (1 + (E - T) / E)
+    above it. ``entry`` must be the live QQQ price the entry is admitted at (the
+    QQQ bid a short would sell at), not the plan's hourly-close reference: the
+    PSQ exits then sit as far away as QQQ's structural stop and target levels
+    are from where QQQ trades now. Daily-reset decay and PSQ's own spread are
+    accepted as the cost of executing a setup this cash account could not
+    otherwise take.
+    """
+    proxy_ask, entry, stop, target = map(decimal, (proxy_ask, entry, stop, target))
+    if not 0 < target < entry < stop or proxy_ask <= 0:
+        raise ValueError('A short proxy needs stop > entry > target and a positive proxy ask')
+    cent = decimal('.01')
+    proxy_stop = (proxy_ask * (1 - (stop - entry) / entry)).quantize(cent, rounding=ROUND_HALF_UP)
+    proxy_target = (proxy_ask * (1 + (entry - target) / entry)).quantize(cent, rounding=ROUND_HALF_UP)
+    return proxy_ask, proxy_stop, proxy_target
 
 
 class Executor:
@@ -334,6 +363,10 @@ class Executor:
                     'id': identity if isinstance(identity, str) and re.fullmatch(r'[a-f0-9]{24}', identity) else None,
                     'stage': trade_state if trade_state in ('entering', 'open', 'exiting', 'attention', 'finished') else None,
                     'direction': trade.get('direction') if trade.get('direction') in ('long', 'short') else None,
+                    'symbol': trade.get('symbol') if trade.get('symbol') in PROXY_SYMBOLS else None,
+                    'signal_symbol': trade.get('signal_symbol') if trade.get('signal_symbol') == SIGNAL_SYMBOL else None,
+                    'signal_direction': trade.get('signal_direction') if trade.get('signal_direction') in ('long', 'short') else None,
+                    'proxy': trade.get('proxy') if trade.get('proxy') == PROXY_KIND else None,
                     'operation_states': operations,
                 } if trade else None,
                 'submission_attempted_this_tick': self._submission_attempted is True,
@@ -414,7 +447,8 @@ class Executor:
                 'review_required': review_required,
                 **self._execution_diagnostics_snapshot(),
                 'execution': {'message': self.message, 'at': self.last_at,
-                    'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'amount', 'stop', 'target', 'reason',
+                    'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'signal_symbol', 'signal_direction', 'proxy',
+                                                      'signal_geometry', 'proxy_geometry', 'amount', 'stop', 'target', 'reason',
                                                       'partial_entry', 'exit_pending', 'flat_reconciliation_started_at')} if trade else None}}
 
     def tick(self, snapshot):
@@ -520,7 +554,8 @@ class Executor:
 
     @staticmethod
     def _event_key(setup):
-        identity = f'{POLICY_VERSION}|QQQ|{setup["event_id"]}'
+        # The opportunity is the QQQ event whichever instrument executes it.
+        identity = f'{POLICY_VERSION}|{SIGNAL_SYMBOL}|{setup["event_id"]}'
         return sha256(identity.encode()).hexdigest()[:24]
 
     def _entry_candidate(self, setup, now):
@@ -552,10 +587,10 @@ class Executor:
                 return candidate, expires, key
         raise Waiting('This setup has already been handled; waiting for the next event')
 
-    def _assert_entry_exposure(self, account_ref, positions, orders, *, excluding_trade_id=None):
+    def _assert_entry_exposure(self, account_ref, positions, orders, *, symbol=SIGNAL_SYMBOL, excluding_trade_id=None):
         if self.portfolio:
             self.portfolio.assert_exposure(account_ref, positions, orders, requesting_family='socrates',
-                                           symbol='QQQ', excluding_trade_id=excluding_trade_id)
+                                           symbol=symbol, excluding_trade_id=excluding_trade_id)
         elif positions or orders:
             raise Waiting('Waiting for existing broker positions and orders to finish')
 
@@ -605,14 +640,24 @@ class Executor:
         self._gate('entry_cutoff')
         if closing(clock, self.now(), ENTRY_CUTOFF_SECONDS):
             raise Waiting('No new entries in the final 30 minutes of the market session')
+        direction = setup['direction']
+        self._gate('signal_direction')
+        if direction not in ('long', 'short'):
+            raise Waiting('Setup direction is missing')
+        # A long buys QQQ. A short is executed as a PSQ purchase (inverse-ETF
+        # proxy, see proxy_translation): every management step below then treats
+        # the trade as a long in its traded symbol. App choice, not a video rule.
+        proxy = direction == 'short'
+        traded = PROXY_SYMBOL if proxy else SIGNAL_SYMBOL
         self._gate('existing_exposure')
-        self._assert_entry_exposure(account['account_ref'], positions, orders)
-        self._gate('asset_eligibility')
-        asset = self.broker.asset('QQQ')
-        if asset.get('symbol') != 'QQQ' or asset.get('status') != 'active' or asset.get('tradable') is not True:
-            raise Waiting('QQQ is not currently tradable')
+        self._assert_entry_exposure(account['account_ref'], positions, orders, symbol=traded)
+        self._gate('proxy_eligibility' if proxy else 'asset_eligibility')
+        asset = self.broker.asset(traded)
+        if asset.get('symbol') != traded or asset.get('status') != 'active' or asset.get('tradable') is not True:
+            raise Waiting(f'{traded} is not currently tradable' + ('; this short setup is skipped, not an error' if proxy else ''))
+        fractionable = asset.get('fractionable') is True
         self._gate('quote_read')
-        quote = self.broker.quote('QQQ')
+        quote = self.broker.quote(SIGNAL_SYMBOL)
         self._gate('quote_validation')
         bid, ask = checked_quote(quote, self.now())
         # The quote is already required to be at most 15 seconds old. Anchor the
@@ -620,40 +665,46 @@ class Executor:
         # reads that follow must not consume a window that was partly spent
         # before the quote arrived, or entries churn "expired before submission".
         entry_valid_until = min(timestamp(snapshot['data_valid_until']), self.now()+timedelta(seconds=15), expires).isoformat()
-        direction = setup['direction']
-        self._gate('signal_direction')
-        if direction not in ('long', 'short'):
-            raise Waiting('Setup direction is missing')
-        price = ask if direction == 'long' else bid
         self._gate('price_geometry')
         stop, target, reference = map(decimal, (setup['stop'], setup['target'], setup['entry']))
         if not (0 < stop < bid <= ask < target if direction == 'long' else 0 < target < bid <= ask < stop):
             raise Waiting('Price has left the entry area between the stop and target')
         self._gate('price_drift')
-        if abs(price / reference - 1) > decimal('.01'):
+        # The signal reference is a QQQ price for both directions; a short is
+        # still gated on QQQ having stayed near its retest before PSQ is read.
+        if abs((ask if direction == 'long' else bid) / reference - 1) > decimal('.01'):
             raise Waiting('Price has moved more than 1% from the signal; skipping this entry')
+        price, execution_stop, execution_target, proxy_geometry = ask, stop, target, None
+        if proxy:
+            self._gate('quote_read')
+            proxy_quote = self.broker.quote(PROXY_SYMBOL)
+            self._gate('quote_validation')
+            proxy_bid, proxy_ask = checked_quote(proxy_quote, self.now(), PROXY_SYMBOL)
+            self._gate('price_geometry')
+            # Distances are measured from the live QQQ bid admitted above, not the
+            # plan's hourly-close reference, so the PSQ stop and target mirror
+            # where QQQ's structural stop and target levels are from here.
+            price, execution_stop, execution_target = proxy_translation(proxy_ask, bid, stop, target)
+            if not 0 < execution_stop < proxy_bid <= proxy_ask < execution_target:
+                raise Waiting(f'{PROXY_SYMBOL} is not between its translated stop and target; skipping this short')
+            proxy_geometry = {'symbol': PROXY_SYMBOL, 'kind': PROXY_KIND, 'reference': str(proxy_ask),
+                              'bid': str(proxy_bid), 'stop': str(execution_stop), 'target': str(execution_target),
+                              'signal_price': str(bid),
+                              'note': ('QQQ short distances from the live QQQ bid to its stop and target, mirrored '
+                                       'onto a PSQ purchase; app interpretation, not a video rule')}
         self._gate('purchase_size')
         amount = authorization['settings']['target_dollars']
         buying_power = (self.portfolio.available(account['account_ref'], account['buying_power'])
                         if self.portfolio else account['buying_power'])
-        if direction == 'short':
-            self._gate('short_eligibility')
-            if account.get('shorting_enabled') is not True or not asset.get('shortable') or not asset.get('easy_to_borrow'):
-                raise Waiting('This account cannot short QQQ (shorting is not enabled); short setups are skipped, not errors')
-        self._gate('purchase_size')
         try:
-            plan = purchase_plan(amount, price, buying_power, direction, asset.get('fractionable') is True)
+            plan = purchase_plan(amount, price, buying_power, 'long', fractionable)
         except ValueError as exc:
             # A valid setup that cannot be sized is a skipped opportunity, not
-            # invalid data: shorts need whole shares within 1% of the target.
-            if direction == 'short':
-                raise Waiting(f'Short setups need whole QQQ shares within 1% of the ${amount} purchase target; '
-                              'this short is skipped') from None
+            # invalid data: a non-fractionable proxy needs whole shares within 1%.
+            if proxy and not fractionable:
+                raise Waiting(f'{PROXY_SYMBOL} is not fractionable and no whole-share quantity fits within 1% of the '
+                              f'${amount} purchase target; this short is skipped') from None
             raise Waiting(f'Purchase cannot be sized: {exc}') from None
-        if direction == 'short':
-            self._gate('short_reserve')
-            if decimal(plan['quantity']) * ask * decimal('1.03') > decimal(buying_power):
-                raise Waiting('Not enough buying power for the broker’s short-sale reserve')
         # A cheap candle cache does not prove that a current index quote exists.
         # This read-only check runs only for an otherwise actionable entry.
         if getattr(self.broker, 'requires_vix_entry_quote', False):
@@ -675,16 +726,21 @@ class Executor:
             raise Waiting('Data verification expired during broker checks; waiting for a fresh update')
         # One attempt per underlying event, including a rejected or completed
         # attempt. A later retest or changed leader direction cannot re-enter it.
-        payload = {'symbol': 'QQQ', 'side': 'buy' if direction == 'long' else 'sell',
-                   'type': 'market', 'time_in_force': 'day', 'extended_hours': False}
-        if direction == 'long' and asset.get('fractionable') is True:
+        payload = {'symbol': traded, 'side': 'buy', 'type': 'market', 'time_in_force': 'day', 'extended_hours': False}
+        if fractionable:
             payload['notional'] = plan['target_dollars']
         else:
             payload['qty'] = plan['quantity']
         fields = SIGNAL_FIELDS + (('commissioning_purpose',) if self.expected_account_mode == 'paper' else ())
-        trade = {'id': key, 'stage': 'entering', 'symbol': 'QQQ', 'direction': direction,
+        # 'direction' is the executed side in 'symbol' (always a purchase here);
+        # 'signal_direction' keeps the QQQ setup's side for the journal and UI.
+        trade = {'id': key, 'stage': 'entering', 'symbol': traded, 'direction': 'long',
+                 'signal_symbol': SIGNAL_SYMBOL, 'signal_direction': direction, 'proxy': PROXY_KIND if proxy else None,
+                 'signal_geometry': {'symbol': SIGNAL_SYMBOL, 'direction': direction, 'entry': str(reference),
+                                     'stop': str(stop), 'target': str(target)},
+                 'proxy_geometry': proxy_geometry,
                  'signal': {field: setup[field] for field in fields},
-                 'amount': plan['target_dollars'], 'stop': str(stop), 'target': str(target),
+                 'amount': plan['target_dollars'], 'stop': str(execution_stop), 'target': str(execution_target),
                  'created_at': self.now().isoformat(), 'data_valid_until': entry_valid_until, 'ops': {}, 'exit_number': 0, 'account_ref': account['account_ref'],
                  'authorization': authorization, 'execution_mode': self.expected_account_mode}
         self._prepare(trade, 'entry', payload, persist=False)
@@ -699,7 +755,8 @@ class Executor:
             if not self.store.reserve_trade(trade, expected_authorization=authorization):
                 raise Waiting('This setup has already been handled; waiting for the next event')
         self._diagnostic_trade = trade
-        self.store.event('entry_planned', {k: trade[k] for k in ('symbol', 'direction', 'amount', 'stop', 'target')})
+        self.store.event('entry_planned', {k: trade[k] for k in ('symbol', 'direction', 'signal_symbol', 'signal_direction',
+                                                                 'proxy', 'amount', 'stop', 'target')})
         self._manage(trade)
 
     def _prepare(self, trade, name, payload, persist=True):
@@ -766,8 +823,8 @@ class Executor:
             if account.get('mode') != self.expected_account_mode:
                 raise Waiting('The account environment changed before entry submission')
             self._gate('existing_exposure')
-            self._assert_entry_exposure(account['account_ref'], self.broker.positions(),
-                                        self.broker.orders(), excluding_trade_id=trade['id'])
+            self._assert_entry_exposure(account['account_ref'], self.broker.positions(), self.broker.orders(),
+                                        symbol=trade['symbol'], excluding_trade_id=trade['id'])
             self._gate('market_session')
             clock = self.broker.clock()
             self._diagnostic_broker_snapshot['clock'] = clock
@@ -824,7 +881,7 @@ class Executor:
                                           'client_order_id':op['payload']['client_order_id'],'evidence':'http_rejection',
                                           'reason':detail}
                         self.store.save_trade(trade)
-                        self._pause(f'The broker rejected a QQQ {name} order ({detail}); no order was created at Alpaca. '
+                        self._pause(f'The broker rejected a {trade["symbol"]} {name} order ({detail}); no order was created at Alpaca. '
                                     'Review the account and this code before enabling Socrates again.')
                         self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol'],
                                                            'evidence': 'http_rejection', 'reason': detail})
@@ -864,7 +921,7 @@ class Executor:
             # Keep the lifecycle and last verified evidence intact. A later good
             # lookup must still resume supervision, including while entries are
             # paused; malformed evidence cannot authorize a competing sale.
-            self._pause(f'A QQQ {name} order at the broker does not match its saved request. Review Alpaca before enabling Socrates again.')
+            self._pause(f'A {trade["symbol"]} {name} order at the broker does not match its saved request. Review Alpaca before enabling Socrates again.')
             incidents = trade.setdefault('order_validation', {})
             if name not in incidents or incidents[name].get('resolved_at'):
                 incidents[name] = {'first_observed_at': self.now().isoformat(),
@@ -885,7 +942,7 @@ class Executor:
             # A successful HTTP response can later become a venue rejection.
             # Pause entries just as for HTTP rejection, but keep the broker's
             # actual fill evidence so existing exposure can still be managed.
-            self._pause(f'The venue rejected a QQQ {name} order. Review Alpaca before enabling Socrates again.')
+            self._pause(f'The venue rejected a {trade["symbol"]} {name} order. Review Alpaca before enabling Socrates again.')
             if (op.get('last_seen') or {}).get('status') != 'rejected':
                 self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol'],
                                                    'evidence': 'broker_status'})
@@ -970,8 +1027,9 @@ class Executor:
 
         A transport failure can leave a claimed operation with no broker order at
         all. Alpaca indexes client_order_id on acceptance, so a lookup that keeps
-        returning 404 after the confirmation window, with no unknown QQQ order and
-        no unexplained QQQ exposure, shows the request never arrived. Recording
+        returning 404 after the confirmation window, with no unknown order and no
+        unexplained exposure in the trade's symbol (QQQ or PSQ), shows the request
+        never arrived. Recording
         that as terminal evidence lets management continue: an entry finishes
         without a fill, a missing stop closes the position through the existing
         protection-failure exit, and a missing exit is followed by the next exit.
@@ -1035,12 +1093,13 @@ class Executor:
         self._pause(reason)
         trade.update(stage='attention', reason=reason)
         self.store.save_trade(trade)
-        self.store.event('execution_needs_attention', {'symbol':'QQQ','reason':reason})
+        self.store.event('execution_needs_attention', {'symbol':trade['symbol'],'reason':reason})
         raise Waiting(reason)
 
     def _reconcile_attention(self, trade):
         # Manual resolution is read-only: never compete with an owner's changes.
-        if any(p['symbol']=='QQQ' for p in self.broker.positions()) or any(o['symbol']=='QQQ' for o in self.broker.orders()):
+        symbol=trade['symbol']
+        if any(p['symbol']==symbol for p in self.broker.positions()) or any(o['symbol']==symbol for o in self.broker.orders()):
             raise Waiting(trade['reason'])
         for name, op in trade['ops'].items():
             if op['state']=='prepared':
@@ -1049,12 +1108,12 @@ class Executor:
             if order['status'] not in TERMINAL | {'replaced'}:
                 raise Waiting(trade['reason'])
         # Confirm flatness again after order lookups, which can take time.
-        if any(p['symbol']=='QQQ' for p in self.broker.positions()) or any(o['symbol']=='QQQ' for o in self.broker.orders()):
+        if any(p['symbol']==symbol for p in self.broker.positions()) or any(o['symbol']==symbol for o in self.broker.orders()):
             raise Waiting(trade['reason'])
         # Socrates stays paused after a manual resolution; global Live is the owner's.
-        self._pause('A QQQ trade was resolved manually at the broker. Review the outcome before enabling Socrates again.')
+        self._pause(f'A {symbol} trade was resolved manually at the broker. Review the outcome before enabling Socrates again.')
         trade['manual_reconciliation']=True
-        self.store.event('manual_resolution_confirmed', {'symbol':'QQQ','note':'Broker is flat with no working QQQ orders; external fill economics remain unverified'})
+        self.store.event('manual_resolution_confirmed', {'symbol':symbol,'note':f'Broker is flat with no working {symbol} orders; external fill economics remain unverified'})
         self._finish(trade,'Manual resolution confirmed. Socrates remains paused; review before enabling it again.')
 
     def _position(self, trade):
@@ -1068,20 +1127,20 @@ class Executor:
             if name == 'entry' or op['state'] == 'prepared': continue
             order = self._order(trade, name)
             if order['status']=='replaced':
-                self._attention(trade,'An owned QQQ order was replaced outside the app. Check the position and working orders in Alpaca now.')
+                self._attention(trade,f'An owned {trade["symbol"]} order was replaced outside the app. Check the position and working orders in Alpaca now.')
             exited += decimal(order.get('filled_qty') or '0')
         if position:
             qty = decimal(position['qty'])
             if (qty > 0) != (trade['direction'] == 'long'):
-                self._attention(trade,'QQQ position direction changed outside the app; manual review required')
+                self._attention(trade,f'{trade["symbol"]} position direction changed outside the app; manual review required')
             # Only manage the shares this app opened, less confirmed exit fills.
             expected = decimal(trade.get('filled_qty', '0')) - exited
             if abs(qty) != expected:
-                raise Waiting('QQQ share count differs from this app’s fills; waiting for broker reconciliation')
-        # Foreign QQQ orders could change or reserve the position. Never cancel or compete with them.
+                raise Waiting(f'{trade["symbol"]} share count differs from this app’s fills; waiting for broker reconciliation')
+        # Foreign orders in the traded symbol could change or reserve the position. Never cancel or compete with them.
         ours = {op['payload']['client_order_id'] for op in trade['ops'].values()}
-        if any(o['symbol'] == 'QQQ' and o.get('client_order_id') not in ours for o in self.broker.orders()):
-            self._attention(trade,'A QQQ order outside this app needs review before automated position changes')
+        if any(o['symbol'] == trade['symbol'] and o.get('client_order_id') not in ours for o in self.broker.orders()):
+            self._attention(trade,f'A {trade["symbol"]} order outside this app needs review before automated position changes')
         return position
 
     def _check_partial_entry_incident(self, trade, order=None):
@@ -1105,9 +1164,9 @@ class Executor:
             self.store.save_trade(trade)
         if now < timestamp(incident['confirmation_deadline']):
             return False
-        self._pause('A QQQ entry partially filled while its cancellation stayed unconfirmed. Review Alpaca before enabling Socrates again.')
+        self._pause(f'A {trade["symbol"]} entry partially filled while its cancellation stayed unconfirmed. Review Alpaca before enabling Socrates again.')
         reason = ('Entry partially filled, but cancellation is still unconfirmed. New entries paused; '
-                  'no competing exit will be sent. Check the QQQ position and orders in Alpaca now.')
+                  f'no competing exit will be sent. Check the {trade["symbol"]} position and orders in Alpaca now.')
         if not incident.get('raised_at'):
             incident['raised_at'] = now.isoformat()
             trade['reason'] = reason
@@ -1146,7 +1205,7 @@ class Executor:
             if order is None:
                 return
             if order['status']=='replaced':
-                self._attention(trade,'Entry order was replaced outside the app. Check the QQQ position and orders in Alpaca now.')
+                self._attention(trade,f'Entry order was replaced outside the app. Check the {trade["symbol"]} position and orders in Alpaca now.')
             if order['status'] not in TERMINAL:
                 incident = self._check_partial_entry_incident(trade, order)
                 if decimal(order.get('filled_qty') or '0') > 0 or not self.enabled() or elapsed(trade['created_at'], now) > 20 or (opened and closing(clock, now)):
@@ -1176,7 +1235,9 @@ class Executor:
                 return
             trade.update(stage='open', filled_qty=str(qty))
             self.store.save_trade(trade)
-            self.store.event('entry_filled', {'symbol': 'QQQ', 'quantity': str(qty), 'price': order.get('filled_avg_price')})
+            self.store.event('entry_filled', {'symbol': trade['symbol'], 'signal_symbol': trade.get('signal_symbol'),
+                                              'signal_direction': trade.get('signal_direction'), 'proxy': trade.get('proxy'),
+                                              'quantity': str(qty), 'price': order.get('filled_avg_price')})
         if trade['stage'] == 'attention':
             self._reconcile_attention(trade)
             return
@@ -1187,7 +1248,7 @@ class Executor:
             total = sum((decimal(order.get('filled_qty') or '0') for order in exits), decimal('0'))
             if total < decimal(trade['filled_qty']):
                 if exits and all(order['status'] in TERMINAL for order in exits):
-                    self._attention(trade,'QQQ is flat but the app’s exit fills do not reconcile. Checking for manual resolution; results remain unverified.')
+                    self._attention(trade,f'{trade["symbol"]} is flat but the app’s exit fills do not reconcile. Checking for manual resolution; results remain unverified.')
                 if not exits:
                     entry = self._order(trade, 'entry')
                     if entry['status'] in TERMINAL:
@@ -1196,7 +1257,7 @@ class Executor:
                             trade['flat_reconciliation_started_at'] = self.now().isoformat()
                             self.store.save_trade(trade)
                         elif elapsed(since, self.now()) >= MANUAL_FLAT_CONFIRM_SECONDS:
-                            self._attention(trade, 'QQQ is flat but no app exit was recorded. Checking for manual resolution; results remain unverified.')
+                            self._attention(trade, f'{trade["symbol"]} is flat but no app exit was recorded. Checking for manual resolution; results remain unverified.')
                 raise Waiting('Waiting for the broker position to reconcile with confirmed fills')
             for name, op in trade['ops'].items():
                 if name == 'entry' or op['state'] == 'prepared': continue
@@ -1216,7 +1277,7 @@ class Executor:
             # recovered prepared intent must not place a new after-hours stop.
             stop_order = self._order(trade, 'stop')
         if stop_order and stop_order['status'] == 'replaced':
-            self._attention(trade,'Protective order was replaced outside the app. Check QQQ protection in Alpaca now.')
+            self._attention(trade,f'Protective order was replaced outside the app. Check {trade["symbol"]} protection in Alpaca now.')
         if stop_order and trade['stage'] != 'exiting':
             failure = self._protection_failure(trade, stop_order)
             if failure:
@@ -1233,7 +1294,7 @@ class Executor:
             return
         try:
             self._gate('quote_read')
-            bid, ask = checked_quote(self.broker.quote('QQQ'), self.now())
+            bid, ask = checked_quote(self.broker.quote(trade['symbol']), self.now(), trade['symbol'])
         except (Waiting, FeedError):
             # Existing broker stop remains in place while quotes are unavailable.
             # For a new fill, place its known protective stop before waiting for quotes.
@@ -1255,7 +1316,8 @@ class Executor:
         elif stop_order['status'] not in WORKING_PROTECTION:
             self.message = f'Protective order is {stop_order["status"]}; executable protection is not yet confirmed.'
         else:
-            self.message = f'Managing QQQ: stop ${stop}, target ${target}. Broker protection: {stop_order["status"]}.'
+            self.message = (f'Managing {trade["symbol"]}' + (' (inverse-ETF proxy for the QQQ short)' if trade.get('proxy') else '')
+                            + f': stop ${stop}, target ${target}. Broker protection: {stop_order["status"]}.')
 
     def _protection_failure(self, trade, order):
         self._gate('protection')
@@ -1287,7 +1349,7 @@ class Executor:
             # being closed at market.
             trade['protection_failure'] = {'at': self.now().isoformat(), 'reason': reason}
             self.store.save_trade(trade)
-            self.store.event('protection_failed', {'symbol': 'QQQ', 'trade_id': trade['id'], 'reason': reason})
+            self.store.event('protection_failed', {'symbol': trade['symbol'], 'trade_id': trade['id'], 'reason': reason})
         self._start_exit(trade, reason + '. New entries paused; canceling before closing remaining shares.')
 
     def _check_unknown_protection(self, trade):
@@ -1296,11 +1358,11 @@ class Executor:
             if not trade.get('protection_failure'):
                 self._start_protection_exit(trade, failure)
             else:
-                self._pause('QQQ protection stayed unconfirmed past its deadline. Review Alpaca before enabling Socrates again.')
-            raise Waiting('Protection status is uncertain past its confirmation deadline. New entries paused; no competing sale will be sent. Check the QQQ position and orders in Alpaca now.')
+                self._pause(f'{trade["symbol"]} protection stayed unconfirmed past its deadline. Review Alpaca before enabling Socrates again.')
+            raise Waiting(f'Protection status is uncertain past its confirmation deadline. New entries paused; no competing sale will be sent. Check the {trade["symbol"]} position and orders in Alpaca now.')
 
     def _protect(self, trade, position):
-        payload = {'symbol': 'QQQ', 'side': 'sell' if trade['direction'] == 'long' else 'buy',
+        payload = {'symbol': trade['symbol'], 'side': 'sell' if trade['direction'] == 'long' else 'buy',
                    'qty': str(abs(decimal(position['qty']))), 'type': 'stop',
                    'stop_price': trade['stop'], 'time_in_force': 'day', 'extended_hours': False}
         self._prepare(trade, 'stop', payload)
@@ -1322,7 +1384,7 @@ class Executor:
             trade['exit_pending'] = {'first_observed_at': now.isoformat(),
                 'confirmation_deadline': (now + timedelta(seconds=EXIT_CONFIRM_SECONDS)).isoformat()}
         self.store.save_trade(trade)
-        self.store.event('exit_started', {'symbol': 'QQQ', 'trade_id': trade['id'], 'reason': reason})
+        self.store.event('exit_started', {'symbol': trade['symbol'], 'trade_id': trade['id'], 'reason': reason})
 
     def _check_exit_incident(self, trade):
         """Escalate a stalled close without replacing, racing or abandoning it."""
@@ -1338,10 +1400,10 @@ class Executor:
             self.store.save_trade(trade)
         if now < timestamp(pending['confirmation_deadline']):
             return False
-        self._pause('A QQQ exit or stop cancellation stayed unconfirmed past its deadline. Review Alpaca before enabling Socrates again.')
+        self._pause(f'A {trade["symbol"]} exit or stop cancellation stayed unconfirmed past its deadline. Review Alpaca before enabling Socrates again.')
         reason = ('Exit or protective-stop cancellation is still unconfirmed. New entries paused; '
                   'existing orders continue to be reconciled without a competing closing order. '
-                  'Check the QQQ position and orders in Alpaca now.')
+                  f'Check the {trade["symbol"]} position and orders in Alpaca now.')
         if not pending.get('raised_at'):
             pending.update(raised_at=now.isoformat(), reason=reason)
             trade['reason'] = reason
@@ -1363,9 +1425,9 @@ class Executor:
                     self.broker.cancel(order['id'])
                 except FeedError:
                     if trade.get('protection_failure'):
-                        raise Waiting('Protection and stop cancellation are uncertain. New entries remain paused. Check the QQQ position and orders in Alpaca now.') from None
+                        raise Waiting(f'Protection and stop cancellation are uncertain. New entries remain paused. Check the {trade["symbol"]} position and orders in Alpaca now.') from None
                     raise
-                self.message = ('Protection is not confirmed; waiting for stop cancellation before any sale. New entries paused. Check QQQ in Alpaca now.'
+                self.message = (f'Protection is not confirmed; waiting for stop cancellation before any sale. New entries paused. Check {trade["symbol"]} in Alpaca now.'
                                 if trade.get('protection_failure') else 'Waiting for stop cancellation before sending the exit')
                 return
         # Re-read AFTER cancellation: the stop may have filled while cancellation was in flight.
@@ -1377,18 +1439,18 @@ class Executor:
         if name in trade['ops']:
             order = self._order(trade, name)
             if order['status']=='replaced':
-                self._attention(trade,'Exit order was replaced outside the app. Check the QQQ position and orders in Alpaca now.')
+                self._attention(trade,f'Exit order was replaced outside the app. Check the {trade["symbol"]} position and orders in Alpaca now.')
             if order['status'] not in TERMINAL:
                 self.message = 'Exit submitted; waiting for all held shares to fill'
                 return
             if order['status'] == 'rejected' or trade['exit_number'] >= 2:
-                self._attention(trade,'Broker could not complete the exit. Check the QQQ position in Alpaca now.')
+                self._attention(trade,f'Broker could not complete the exit. Check the {trade["symbol"]} position in Alpaca now.')
             # A canceled/expired exit can leave shares; size a new intent only after terminal confirmation.
             position = self._position(trade)
             if not position: return
             trade['exit_number'] += 1
             name = f'exit{trade["exit_number"]}'
-        payload = {'symbol': 'QQQ', 'side': 'sell' if trade['direction'] == 'long' else 'buy',
+        payload = {'symbol': trade['symbol'], 'side': 'sell' if trade['direction'] == 'long' else 'buy',
                    'qty': str(abs(decimal(position['qty']))), 'type': 'market', 'time_in_force': 'day', 'extended_hours': False}
         self._prepare(trade, name, payload)
         self._order(trade, name)

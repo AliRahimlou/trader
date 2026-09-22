@@ -126,7 +126,7 @@ def test_retry_still_requires_current_evidence_and_owner_permission(runtime):
 
 @pytest.mark.parametrize('deadline', [None, 'bad', NOW.replace(tzinfo=None).isoformat(),
     NOW.isoformat(), (NOW-timedelta(microseconds=1)).isoformat(),
-    (NOW+timedelta(minutes=15, microseconds=1)).isoformat()])
+    (NOW+timedelta(minutes=120, microseconds=1)).isoformat()])
 def test_invalid_leader_evidence_deadline_blocks_before_broker_reads(runtime, deadline):
     executor, broker, store = runtime
     snapshot = ready()

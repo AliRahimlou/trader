@@ -25,7 +25,7 @@ SESSION = datetime(2026, 9, 16, 9, 30, tzinfo=ET)  # NOW is 12:00 ET on the same
 
 # --- targets ---------------------------------------------------------------
 
-def test_defaults_and_validation_of_the_new_policy_fields():
+def test_defaults_and_validation_of_the_v4_policy_fields():
     assert (BASELINE_POLICY.min_reward_risk, BASELINE_POLICY.vix_zone_tolerance,
             BASELINE_POLICY.vix_persistence_bars, BASELINE_POLICY.min_stop_fraction) == (1.0, 0.01, 2, 0.001)
     assert AnalysisPolicy(min_reward_risk=2, vix_zone_tolerance=0.01, vix_persistence_bars=1, min_stop_fraction=0)
@@ -57,14 +57,14 @@ def test_nearest_levels_below_the_multiple_are_skipped_for_the_next_qualifying_l
     market.bars[240] = four_hour_history()  # 4-hour areas near 105, 106 and 110 exist before the origin.
     result = analyze(market, leaders, vix, now)
     assert result['state'] == 'SETUP_READY'
-    assert any(z['source'] == '4h repeated interaction' and 104 < z['low'] < 111 for z in result['levels'])
-    # Entry 100, stop 87.99: the 4-hour areas offer 0.4-0.8R and are skipped.
+    assert any(z['source'] == '4h swing area' and 104 < z['low'] < 111 for z in result['levels'])
+    # Entry 100, stop 87.99: the 4-hour swing areas at 106 and 110 offer 0.5-0.8R and are skipped.
     assert result['target'] == 120 and result['target_source'] == 'previous-day high'
     assert result['reward_risk'] == pytest.approx(20 / 12.01)
     # The multiple is a policy field: a lower threshold admits the nearest area.
     relaxed = analyze(market, leaders, vix, now, AnalysisPolicy(min_reward_risk=0.4))
-    assert relaxed['target'] == 104.89 and relaxed['target_source'] == '4h repeated interaction'
-    assert relaxed['reward_risk'] == pytest.approx(4.89 / 12.01)
+    assert relaxed['target'] == 105.89 and relaxed['target_source'] == '4h swing area'
+    assert relaxed['reward_risk'] == pytest.approx(5.89 / 12.01)
     assert relaxed['exit_rule'] == {'min_reward_risk': 0.4, 'min_stop_fraction': 0.001}
 
 
@@ -114,7 +114,7 @@ def test_vix_reaction_one_candle_back_confirms_a_short_while_price_holds_beyond_
     assert evidence['okay'] and evidence['reason'] == 'expected reaction present'
     assert evidence['reaction_at'] == SESSION + timedelta(hours=2) and evidence['age_minutes'] == 15
     zone = evidence['zone']
-    assert zone.source == '4h repeated pivot' and zone.touches == 2
+    assert zone.source == 'VIX 15m repeated pivot' and zone.touches == 2
     assert zone.low == pytest.approx(14.80 * 0.99) and zone.high == pytest.approx(14.80 * 1.01)
     assert zone.established_at == SESSION + timedelta(minutes=90)
     assert '11:30 ET candle, 15 min before the latest close' in evidence['detail']
@@ -185,8 +185,8 @@ def test_analysis_reports_the_vix_reaction_and_the_trace_stays_consistent():
     result = analyze(market, leaders, vix, now)
     assert result['state'] == 'SETUP_READY' and result['direction'] == 'short'
     assert result['vix_reaction_at'] == (SESSION + timedelta(hours=2)).isoformat()
-    assert result['vix_reaction_age_minutes'] == 15 and result['vix_zone']['source'] == '4h repeated pivot'
-    assert result['vix_rule'] == {'zone_tolerance': 0.01, 'persistence_minutes': 30}
+    assert result['vix_reaction_age_minutes'] == 15 and result['vix_zone']['source'] == 'VIX 15m repeated pivot'
+    assert result['vix_rule'] == {'zone_tolerance': 0.01, 'persistence_minutes': 30, 'base_bars': 4, 'base_range': 0.02}
     trace = build_decision_trace(result, {**leaders, 'QQQ': market}, vix, now)
     assert trace['vix']['reason'] == 'expected reaction present' and trace['vix']['gate_reached']
     assert trace['vix']['reaction_at'] == result['vix_reaction_at']
@@ -237,7 +237,7 @@ def test_reaction_before_the_nasdaq_origin_counts_in_the_same_session():
     assert result['state'] == 'SETUP_READY'
     assert all(row['reaction_at'] == (now - timedelta(minutes=5)).isoformat() and row['reason'] == 'persistent reaction'
                for row in result['leader_evidence'].values())
-    assert result['leader_evidence_valid_until'] == (now + timedelta(minutes=10)).isoformat()
+    assert result['leader_evidence_valid_until'] == (now + timedelta(minutes=55)).isoformat()
 
 
 def test_one_cent_pullback_keeps_the_vote_but_a_close_back_through_the_area_drops_it():
@@ -264,9 +264,9 @@ def test_one_cent_pullback_keeps_the_vote_but_a_close_back_through_the_area_drop
 
 # --- versions and owner-facing text ------------------------------------------
 
-def test_versions_and_policy_text_describe_the_v4_rules():
-    assert ANALYSIS_VERSION == 'nasdaq-video-interpretation-v4'
-    assert POLICY_VERSION == 'nasdaq-qqq-execution-v6-reward-risk-vix-persistence' == POLICY['version']
+def test_versions_and_policy_text_keep_the_v4_rules_that_v5_retains():
+    assert ANALYSIS_VERSION == 'nasdaq-video-interpretation-v5'
+    assert POLICY_VERSION == 'nasdaq-qqq-execution-v7-video-aligned' == POLICY['version']
     text = ' '.join(POLICY['summary'])
     for phrase in ('at least as far away as the stop distance', 'the swept area itself is never the target',
                    'at least 0.1% of the entry price', '1% bands', 'either of the last two closed candles', 'is neutral',
@@ -274,7 +274,7 @@ def test_versions_and_policy_text_describe_the_v4_rules():
                    'pauses the Socrates strategy only', 'final 30 minutes', 'time-based within the free allowance'):
         assert phrase in text, phrase
     book = rulebook()
-    assert book['version'] == 'video-evidence-2026-09-22-v4'
+    assert book['version'] == 'video-evidence-2026-09-22-v5'
     assert any('1R minimum' in line for line in book['unresolved'])
     assert any('neutral' in line for line in book['unresolved'])
 

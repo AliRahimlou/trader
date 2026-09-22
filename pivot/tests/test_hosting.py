@@ -70,7 +70,7 @@ def test_deployment_revision_is_validated_and_reported_without_other_environment
         for route in ('/api/health', '/api/snapshot'):
             response = client.get(route)
             assert response.json()['revision'] == revision
-            assert response.json()['app_version'] == '4.4.0'
+            assert response.json()['app_version'] == '4.5.0'
             assert 'hidden' not in response.text
     with pytest.raises(ValueError, match='PIVOT_REVISION'):
         Hosting.from_values({'PIVOT_REVISION': 'accidental-secret-not-a-commit'})
@@ -248,6 +248,54 @@ def test_tested_build_can_run_until_the_updaters_service_timeout(tmp_path):
     path.write_text(json.dumps({'state': 'building', 'checked_at': (now-timedelta(minutes=20)).isoformat()}))
     assert deployment_status(path, now)['state'] == 'building'
     assert deployment_status(path, now+timedelta(minutes=11))['state'] == 'overdue'
+
+
+class ChartServiceStub(ServiceStub):
+    """A worker that already holds one analysis copy for the look-left chart."""
+
+    def chart_inputs(self):
+        from pivot.tests.test_chart_data import inputs
+        return inputs()
+
+
+class BrokenChartServiceStub(ServiceStub):
+    def chart_inputs(self):
+        return {'markets': object(), 'setup': {'levels': object()}}
+
+
+def test_chart_route_is_unavailable_before_the_first_analysis_and_on_older_workers():
+    with TestClient(create_app(ServiceStub(), background=False)) as client:
+        response = client.get('/api/chart')
+        assert response.status_code == 503
+        assert response.json() == {'available': False, 'detail': 'Waiting for the first completed analysis'}
+        assert response.headers['cache-control'] == 'no-store'
+
+
+@pytest.mark.parametrize('path_prefix', ['', '/pivot'])
+def test_chart_route_serves_bounded_read_only_data_under_the_hosted_prefix(path_prefix):
+    service = ChartServiceStub()
+    config = Hosting('https://media.example.com', '/pivot', 'AllSpark')
+    with TestClient(create_app(service, background=False, hosting=config), base_url='http://media.example.com') as client:
+        response = client.get(path_prefix + '/api/chart')
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload['available'] is True and payload['symbol'] == 'QQQ'
+        assert set(payload) >= {'at', 'sessions', 'bars', 'levels', 'previous_day', 'events', 'vix', 'leaders'}
+        assert 0 < len(payload['bars']['60']) + len(payload['bars']['240']) + len(payload['vix']['bars15']) <= 600
+        assert response.headers['cache-control'] == 'no-store'
+        assert response.headers['x-frame-options'] == 'DENY'
+        assert client.get('/api/chart', headers={'Host': 'evil.example'}).status_code == 400
+        for method in ('put', 'post'):
+            assert getattr(client, method)(path_prefix + '/api/chart', json={}).status_code in (403, 405)
+        assert service.changes == []
+
+
+def test_chart_route_reports_a_broken_analysis_copy_without_crashing():
+    with TestClient(create_app(BrokenChartServiceStub(), background=False)) as client:
+        response = client.get('/api/chart')
+        assert response.status_code == 200, 'missing or malformed fields degrade to empty collections'
+        payload = response.json()
+        assert payload['levels'] == [] and payload['bars'] == {'60': [], '240': []}
 
 
 def test_local_snapshot_does_not_read_host_deployment_status(tmp_path):
