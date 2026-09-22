@@ -462,3 +462,44 @@ def test_same_date_reports_for_two_accounts_remain_separate(stores, tmp_path):
     journal.save('private-account-B', second)
     assert len(journal.history(ACCOUNT)) == len(journal.history('private-account-B')) == 1
     assert journal.get(ACCOUNT, DAY)['account_scope'] != journal.get('private-account-B', DAY)['account_scope']
+
+
+def proxy_lifecycle():
+    """A QQQ short setup executed by buying PSQ (4.5.0 inverse-ETF proxy)."""
+    trade = lifecycle(identity='proxy-1', entry_price='35', exit_price='38.5')
+    trade.update(symbol='PSQ', signal_symbol='QQQ', signal_direction='short', proxy='inverse_etf',
+                 signal={'policy_version': 'nasdaq-video-interpretation-v5', 'strategy_id': 'four_hour_retest'},
+                 signal_geometry={'symbol': 'QQQ', 'direction': 'short', 'entry': '600', 'stop': '606', 'target': '594'},
+                 proxy_geometry={'symbol': 'PSQ', 'kind': 'inverse_etf', 'reference': '35', 'bid': '34.99',
+                                 'stop': '34.65', 'target': '35.35', 'signal_price': '600.10', 'note': 'x'},
+                 stop='34.65', target='35.35', exit_reason='Stop or target reached; closing the held shares')
+    for op in trade['ops'].values():
+        op['payload']['symbol'] = op['last_seen']['symbol'] = 'PSQ'
+    return trade
+
+
+def test_psq_proxy_trade_is_labelled_as_a_socrates_short_with_both_symbols(stores):
+    insert_trade(stores, proxy_lifecycle())
+    row = report(stores)['families']['socrates']['trades'][0]
+    assert row['label'] == 'Socrates short via PSQ (inverse QQQ)'
+    assert row['entry_reason'] == 'Socrates short via PSQ (inverse QQQ) · QQQ broke a four-hour level and returned to it'
+    assert (row['signal_symbol'], row['signal_direction'], row['proxy']) == ('QQQ', 'short', 'inverse_etf')
+    assert row['signal'] == {'symbol': 'QQQ', 'direction': 'short', 'entry': '600', 'stop': '606', 'target': '594'}
+    assert row['execution'] == {'symbol': 'PSQ', 'side': 'buy', 'kind': 'inverse_etf', 'reference': '35',
+                                'stop': '34.65', 'target': '35.35', 'signal_price': '600.10'}
+    assert (row['symbol'], row['direction']) == ('PSQ', 'long')  # The executed purchase remains visible.
+    assert row['gross_status'] == 'verified_gross' and row['gross_pnl'] == '0.175'
+
+
+def test_qqq_trade_label_and_no_proxy_execution_block(stores):
+    insert_trade(stores, lifecycle())
+    row = report(stores)['families']['socrates']['trades'][0]
+    assert row['label'] == 'Socrates long QQQ' and row['proxy'] is None and row['execution'] is None
+    assert row['signal'] is None  # Records before 4.5.0 carry no QQQ plan geometry.
+    assert row['entry_reason'].startswith('Socrates long QQQ')
+
+
+def test_crypto_rows_carry_no_socrates_labels(stores):
+    insert_trade(stores, lifecycle(identity='btc', family='range_reversal'), crypto=True)
+    row = report(stores)['families']['range_reversal']['trades'][0]
+    assert 'label' not in row and 'signal_symbol' not in row

@@ -15,6 +15,8 @@ from .diagnostics import build_decision_trace
 from .observations import ObservationArchive
 from .worker_health import WorkerHealth, next_tick
 logger = logging.getLogger('pivot.service')
+# App choice: how often the readiness checklist re-reads QQQ/PSQ asset facts.
+ASSET_REFRESH_SECONDS = 600
 
 
 def publication_catchup_bucket(markets, sessions, now):
@@ -84,6 +86,9 @@ class Service:
             from .crypto_broker import CryptoBroker
             from .crypto_execution import CryptoRangeExecutor
             self.crypto_executor = CryptoRangeExecutor(CryptoBroker(feeds), self.crypto_store, store, self.portfolio)
+        # Read-only asset facts for the Socrates readiness checklist (QQQ, PSQ);
+        # refreshed by the account worker at most every ASSET_REFRESH_SECONDS.
+        self._instrument_assets = {}
         self.workers = WorkerHealth(['account', 'data'] + (['execution'] if self.executor else [])
                                     + (['crypto_execution'] if self.crypto_executor else []))
         self.archive = None
@@ -247,6 +252,36 @@ class Service:
         except Exception:
             with self.lock:
                 self.state['account_error']='Account update unavailable; showing the last confirmed snapshot'
+        self.refresh_instruments()
+
+    def refresh_instruments(self, now=None):
+        """Cached read-only asset lookups for the readiness checklist; never an order call.
+
+        One GET per Socrates instrument (QQQ, and the PSQ short proxy) at most
+        every ASSET_REFRESH_SECONDS, success or failure, through the executor's
+        broker. A failure is shown as a warning; the executor still reads the
+        asset afresh before every entry, so this cache never authorizes one.
+        """
+        from .broker import PROXY_SYMBOL, SIGNAL_SYMBOL
+        if self.executor is None:
+            return
+        now = now or datetime.now(timezone.utc)
+        for symbol in (SIGNAL_SYMBOL, PROXY_SYMBOL):
+            with self.lock:
+                cached = self._instrument_assets.get(symbol)
+            if cached and 0 <= (now - cached['attempted_at']).total_seconds() < ASSET_REFRESH_SECONDS:
+                continue
+            row = {'attempted_at': now, 'checked_at': None, 'asset': None, 'error': None}
+            try:
+                asset = self.executor.broker.asset(symbol)
+                if not isinstance(asset, dict) or asset.get('symbol') != symbol:
+                    raise ValueError('Unexpected asset response')
+                row.update(checked_at=now.isoformat(), asset={key: asset.get(key) for key in (
+                    'symbol', 'status', 'tradable', 'fractionable')})
+            except Exception:
+                row['error'] = f'{symbol} could not be confirmed with Alpaca'
+            with self.lock:
+                self._instrument_assets[symbol] = row
 
     def _review_loop(self):
         while not self.stop_event.is_set():
@@ -568,7 +603,84 @@ class Service:
                           'Each strategy has its own limit of two new entry attempts per New York session; rejected and uncertain submissions count, exits do not.',
                           'A rejected, replaced or unreconciled QQQ order pauses Socrates only (the same durable change as turning it off). Global Live and the crypto strategy are unchanged; enable Socrates again after reviewing Alpaca.',
                           *['Socrates: ' + line for line in POLICY['summary']]]}, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
+        result['socrates_readiness'] = self.socrates_readiness(result)
         return result
+
+    def socrates_readiness(self, result, now=None):
+        """Owner checklist for Socrates orders, built from this snapshot; read-only.
+
+        It performs no broker call (asset facts come from the account worker's
+        cache) and never changes a permission or an order. The executor repeats
+        its own checks against fresh broker reads before any submission.
+        """
+        from .broker import PROXY_SYMBOLS
+        from .policy import POLICY_VERSION
+        from .readiness import build_socrates_readiness
+        now = now or datetime.now(timezone.utc)
+        try:
+            control = self.store.control()
+            try:
+                selected = self.store.strategy_selection()['socrates'] is True
+            except Exception:
+                selected = None
+            account = result.get('account') if isinstance(result.get('account'), dict) else None
+            account_ref = (account or {}).get('account_ref')
+            fresh = bool(account and not result.get('account_error') and result.get('account_at')
+                         and 0 <= (now - datetime.fromisoformat(result['account_at'])).total_seconds() <= 60)
+            available = None
+            if fresh:
+                try:
+                    reserved = sum((decimal(row['amount']) for row in self.portfolio.reservations(account_ref)), decimal('0'))
+                    available = str(max(decimal('0'), decimal(account['buying_power']) - reserved))
+                except Exception:
+                    available = None
+            trade = self.store.active_trade()
+            positions, orders = result.get('positions') or [], result.get('orders') or []
+            if trade:
+                exposure = {'active_trade': {'symbol': trade.get('symbol'), 'proxy': trade.get('proxy')}}
+            elif not fresh:
+                exposure = {'state': 'unknown'}
+            else:
+                try:
+                    if positions or orders:
+                        for symbol in sorted(PROXY_SYMBOLS):
+                            self.portfolio.assert_exposure(account_ref, positions, orders,
+                                                           requesting_family='socrates', symbol=symbol)
+                    exposure = {'state': 'clear'}
+                except Exception:
+                    symbols = sorted({row.get('symbol') for row in positions + orders
+                                      if isinstance(row, dict) and isinstance(row.get('symbol'), str)})
+                    exposure = {'state': 'blocked', 'symbols': symbols[:6]}
+            gate = getattr(self.executor, 'entry_gate', None) if self.executor else None
+            with self.lock:
+                assets = deepcopy(self._instrument_assets)
+            return build_socrates_readiness({
+                'execution_available': self.executor is not None, 'control': control,
+                'policy_version': POLICY_VERSION, 'socrates_selected': selected,
+                'pause_reason': self._socrates_pause_reason(result.get('events')) if selected is False else None,
+                'account': account, 'account_at': result.get('account_at'), 'account_error': result.get('account_error'),
+                'target_dollars': (result.get('settings') or {}).get('target_dollars'),
+                'available_dollars': available, 'assets': assets, 'clock': result.get('clock'),
+                'data_health': result.get('data_health'), 'entry_allowance': result.get('entry_allowance'),
+                'deployment_gate': gate.status() if gate is not None else None,
+                'exposure': exposure, 'worker_health': result.get('worker_health'), 'setup': result.get('setup'),
+            }, now)
+        except Exception:
+            logger.exception('Socrates readiness checklist could not be built')
+            return {'checked_at': now.isoformat(), 'status': 'blocked',
+                    'headline': 'Order readiness could not be checked just now; retrying.',
+                    'next_action': None, 'items': []}
+
+    @staticmethod
+    def _socrates_pause_reason(events):
+        """The app's own pause reason, if the latest Socrates setting change was that pause."""
+        for event in events or []:
+            detail = event.get('detail') if isinstance(event, dict) and isinstance(event.get('detail'), dict) else {}
+            if event.get('kind') == 'strategy_paused' and detail.get('family') == 'socrates':
+                return detail.get('reason') if isinstance(detail.get('reason'), str) else None
+            if event.get('kind') == 'strategy_settings' and 'socrates' in detail:
+                return None
+        return None
 
     def range_snapshot(self):
         """Optional observations cannot fail the live account/strategy response."""
