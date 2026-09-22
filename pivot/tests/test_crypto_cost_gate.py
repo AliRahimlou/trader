@@ -122,7 +122,7 @@ def test_old_rule_version_is_refused_by_the_execution_contract():
             checked_signal(forged, 'BTC/USD', NOW)
 
 
-@pytest.mark.parametrize('count,accepted', [(39, False), (40, True), (47, True), (48, True), (49, False)])
+@pytest.mark.parametrize('count,accepted', [(43, False), (44, True), (47, True), (48, True), (49, False)])
 def test_opening_candle_count_contract(engine, count, accepted):
     e, b, store, _, _ = engine
     analysis = signal(); analysis['range']['native_candle_count'] = count
