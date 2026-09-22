@@ -14,6 +14,7 @@ import os
 import re
 import stat
 
+from .broker import PROXY_SYMBOLS
 from .sizing import decimal
 from .crypto_markets import ALIASES
 
@@ -33,18 +34,34 @@ class Portfolio:
     def __init__(self, store, *, lock_path=None):
         self.lock_path = Path(lock_path or (str(store.path) + '.portfolio.lock'))
         self._mutex, self._local = RLock(), local()
-        self._sources = {}
+        self._sources, self._symbols = {}, {}
         self._started = False
         self.enabled_predicate = lambda family: True
-        self.register('socrates', lambda: [value] if (value := store.active_trade()) else [])
+        # Socrates owns QQQ (long setups) and its inverse-ETF proxy PSQ (short
+        # setups executed as a PSQ buy); a Socrates ledger row in any other
+        # instrument is unverifiable exposure and fails closed.
+        self.register('socrates', lambda: [value] if (value := store.active_trade()) else [],
+                      symbols=PROXY_SYMBOLS)
 
-    def register(self, family, active_trades):
-        """Register a fresh durable read, not an in-memory snapshot or broker view."""
+    def register(self, family, active_trades, symbols=None):
+        """Register a fresh durable read, not an in-memory snapshot or broker view.
+
+        ``symbols`` optionally declares the canonical instruments this family may
+        own; ledger rows outside it block admission instead of being trusted.
+        """
         if (self._started or not isinstance(family, str)
                 or not re.fullmatch(r'[a-z][a-z0-9_]{0,39}', family)
-                or family in self._sources or not callable(active_trades)):
+                or family in self._sources or not callable(active_trades)
+                or symbols is not None and (not isinstance(symbols, (set, frozenset)) or not symbols
+                                            or any(not isinstance(s, str) or not s for s in symbols))):
             raise ValueError('Invalid or late portfolio ledger registration')
         self._sources[family] = active_trades
+        if symbols is not None:
+            self._symbols[family] = frozenset(symbols)
+
+    def owned_symbols(self, family):
+        """Declared instruments for a family, or None when the family is unconstrained."""
+        return self._symbols.get(family)
 
     def family_enabled(self, family):
         try:
@@ -99,6 +116,8 @@ class Portfolio:
                         raise ValueError
                     row = deepcopy(value)
                     row['symbol'] = canonical_symbol(row.get('symbol'))
+                    if family in self._symbols and row['symbol'] not in self._symbols[family]:
+                        raise ValueError
                     row['family_id'] = family
                     output.append(row)
             if len({(row['family_id'], row['id']) for row in output}) != len(output):
@@ -187,6 +206,8 @@ class Portfolio:
             if not isinstance(positions, list) or not isinstance(orders, list):
                 raise ValueError
             if requesting_family not in self._sources:
+                raise ValueError
+            if requesting_family in self._symbols and target not in self._symbols[requesting_family]:
                 raise ValueError
             trades = [row for row in self.active_trades() if row['account_ref'] == account_ref
                       and not (row['family_id'] == requesting_family and row['id'] == excluding_trade_id)]

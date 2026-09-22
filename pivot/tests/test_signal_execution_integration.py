@@ -67,41 +67,43 @@ def engine(tmp_path, amount):
 @pytest.mark.parametrize('direction,amount,entry_side,exit_side', [
     pytest.param('long', '5.00', 'buy', 'sell', id='five-dollar-long'),
     pytest.param('long', '25.00', 'buy', 'sell', id='twenty-five-dollar-long'),
-    pytest.param('short', None, 'sell', 'buy', id='supported-whole-share-short'),
+    # 4.5.0: a short is executed as a fractional PSQ purchase (inverse-ETF proxy).
+    pytest.param('short', '25.00', 'buy', 'sell', id='inverse-etf-proxy-short'),
 ])
 def test_analyzed_signal_completes_exact_quantity_protected_lifecycle(
         tmp_path, method, direction, amount, entry_side, exit_side):
     snapshot = analyzed_snapshot(direction, method)
     reference = Decimal(str(snapshot['setup']['entry']))
-    # The synthetic short account has both permission and enough buying power
-    # for one full share; this does not assert the owner's small target can short.
-    if amount is None:
-        amount = str(reference.quantize(Decimal('.01')))
     executor, broker, store = engine(tmp_path, amount)
     broker.bid, broker.ask = ((str(reference - Decimal('.01')), str(reference)) if direction == 'long'
                              else (str(reference), str(reference + Decimal('.01'))))
+    symbol = 'QQQ' if direction == 'long' else 'PSQ'
 
     executor.tick(snapshot)
     assert broker.actions[0] == 'vix'
     assert len(broker.confirmed) == 1
     assert len(broker.sent) == 2
     entry, protection = broker.sent
-    assert entry['type'] == 'market' and entry['side'] == entry_side
-    if direction == 'long':
-        assert entry['notional'] == amount and 'qty' not in entry
-    else:
-        assert Decimal(entry['qty']) == 1 and 'notional' not in entry
+    assert entry['type'] == 'market' and entry['side'] == entry_side and entry['symbol'] == symbol
+    assert entry['notional'] == amount and 'qty' not in entry
     held_quantity = abs(Decimal(broker.position_data[0]['qty']))
-    assert protection['type'] == 'stop' and protection['side'] == exit_side
+    assert protection['type'] == 'stop' and protection['side'] == exit_side and protection['symbol'] == symbol
     assert protection['time_in_force'] == 'day'
-    assert Decimal(protection['stop_price']) == Decimal(str(snapshot['setup']['stop']))
+    trade = store.active_trade()
+    if direction == 'long':
+        assert Decimal(protection['stop_price']) == Decimal(str(snapshot['setup']['stop']))
+    else:
+        assert trade['signal_geometry']['stop'] == str(Decimal(str(snapshot['setup']['stop'])))
+        assert Decimal(protection['stop_price']) == Decimal(trade['proxy_geometry']['stop']) < Decimal('35')
     assert Decimal(protection['qty']) == held_quantity
-    assert store.active_trade()['stage'] == 'open'
+    assert trade['stage'] == 'open' and trade['symbol'] == symbol and trade['signal_direction'] == direction
 
     executor.set_live({'enabled': False, 'policy_version': POLICY_VERSION})
-    target = Decimal(str(snapshot['setup']['target']))
-    broker.bid, broker.ask = ((str(target), str(target + Decimal('.01'))) if direction == 'long'
-                             else (str(target - Decimal('.01')), str(target)))
+    target = Decimal(trade['target'])
+    if direction == 'long':
+        broker.bid, broker.ask = str(target), str(target + Decimal('.01'))
+    else:
+        broker.quotes['PSQ'] = (str(target), str(target + Decimal('.01')))
     executor.tick(snapshot)
     assert len(broker.sent) == 2  # Cancellation confirmation precedes any exit.
     assert broker.canceled == [protection['client_order_id']]
@@ -122,13 +124,18 @@ def test_analyzed_signal_completes_exact_quantity_protected_lifecycle(
 
 
 @pytest.mark.parametrize('amount', ['5.00', '25.00'])
-def test_valid_short_signal_is_not_executable_at_owner_small_dollar_target(tmp_path, amount):
+def test_valid_short_signal_executes_as_a_fractional_psq_purchase_at_owner_small_dollar_target(tmp_path, amount):
+    """Before 4.5.0 this short was skipped (no whole QQQ share); the proxy makes it a fractional PSQ buy."""
     snapshot = analyzed_snapshot('short')
     executor, broker, store = engine(tmp_path, amount)
+    reference = Decimal(str(snapshot['setup']['entry']))
+    broker.bid, broker.ask = str(reference), str(reference + Decimal('.01'))
     executor.tick(snapshot)
-    assert not broker.sent and store.active_trade() is None
-    assert broker.confirmed == []  # Sizing fails before spending a VIX quote.
-    assert 'whole QQQ shares' in executor.message  # Skipped short, reported as a wait rather than invalid data.
+    assert [(o['symbol'], o['side'], o['type']) for o in broker.sent] == [('PSQ', 'buy', 'market'), ('PSQ', 'sell', 'stop')]
+    assert broker.sent[0]['notional'] == amount and len(broker.confirmed) == 1
+    trade = store.active_trade()
+    assert trade['stage'] == 'open' and trade['proxy'] == 'inverse_etf' and trade['signal_direction'] == 'short'
+    assert not any(o['symbol'] == 'QQQ' for o in broker.sent)
 
 
 def test_actual_analyzer_leader_failure_never_reaches_broker_submission(tmp_path):

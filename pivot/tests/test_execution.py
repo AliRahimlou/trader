@@ -18,7 +18,12 @@ NOW = datetime(2026, 9, 16, 16, tzinfo=timezone.utc)
 
 
 class FakeBroker:
-    """In-memory exchange. No credentials, sockets, real orders or Alpaca calls."""
+    """In-memory exchange. No credentials, sockets, real orders or Alpaca calls.
+
+    QQQ quotes come from ``bid``/``ask`` (the legacy single-symbol knobs); any
+    other symbol reads ``quotes[symbol]``. ``assets[symbol]`` overrides asset
+    fields per symbol. Fills keep one position row per symbol.
+    """
     def __init__(self):
         self.at = NOW
         self.account_data = dict(account_ref='fake-account-only', mode='live', status='ACTIVE', equity='1000', last_equity='1000',
@@ -28,6 +33,8 @@ class FakeBroker:
         self.book = {}
         self.sent, self.canceled = [], []
         self.bid, self.ask = '99.99', '100'
+        self.quotes = {'PSQ': ('34.99', '35')}
+        self.assets = {}
         self.entry_mode = 'filled'
         self.reject_stop = False
         self.fill_on_cancel = False
@@ -38,8 +45,14 @@ class FakeBroker:
     def positions(self): return deepcopy(self.position_data)
     def orders(self): return [deepcopy(o) for o in self.book.values() if o['status'] not in ('filled','canceled','expired','rejected')]
     def clock(self): return {'timestamp': self.at.isoformat(), 'is_open': self.open, 'next_close': (self.at + timedelta(seconds=self.close_in)).isoformat()}
-    def asset(self, symbol): return dict(symbol=symbol, status='active', tradable=True, fractionable=True, shortable=True, easy_to_borrow=True)
-    def quote(self, symbol): return dict(t=self.at.isoformat(), bp=self.bid, ap=self.ask, bs=100, **{'as': 100})
+    def asset(self, symbol):
+        return {**dict(symbol=symbol, status='active', tradable=True, fractionable=True, shortable=True, easy_to_borrow=True),
+                **self.assets.get(symbol, {})}
+    def prices(self, symbol):
+        return (self.bid, self.ask) if symbol == 'QQQ' else self.quotes[symbol]
+    def quote(self, symbol):
+        bid, ask = self.prices(symbol)
+        return dict(t=self.at.isoformat(), bp=bid, ap=ask, bs=100, **{'as': 100})
     def lookup(self, client_id): return deepcopy(self.book.get(client_id))
 
     def fill(self, client_id, quantity=None):
@@ -48,9 +61,12 @@ class FakeBroker:
         full = Decimal(order['qty'])
         total = full if quantity is None else Decimal(str(quantity))
         delta = total - old
-        current = Decimal(self.position_data[0]['qty']) if self.position_data else Decimal(0)
+        symbol = order['symbol']
+        row = next((p for p in self.position_data if p['symbol'] == symbol), None)
+        current = Decimal(row['qty']) if row else Decimal(0)
         current += delta if order['side'] == 'buy' else -delta
-        self.position_data = [dict(symbol='QQQ', qty=str(current), side='long' if current > 0 else 'short')] if current else []
+        others = [p for p in self.position_data if p['symbol'] != symbol]
+        self.position_data = others + ([dict(symbol=symbol, qty=str(current), side='long' if current > 0 else 'short')] if current else [])
         order.update(filled_qty=str(total), status='filled' if total == full else 'partially_filled', filled_avg_price='100')
 
     def submit(self, payload):
@@ -60,7 +76,7 @@ class FakeBroker:
             raise BrokerRejected('test rejection')
         if self.entry_mode == 'lost_unseen' and cid.endswith('-entry'):
             raise FeedError('uncertain response')
-        qty = str(Decimal(payload['notional']) / Decimal(self.ask)) if 'notional' in payload else payload['qty']
+        qty = str(Decimal(payload['notional']) / Decimal(self.prices(payload['symbol'])[1])) if 'notional' in payload else payload['qty']
         self.book[cid] = {**payload, 'id': cid, 'qty': qty, 'filled_qty': '0', 'status': 'new'}
         if payload['type'] == 'market':
             if cid.endswith('-entry'):
@@ -283,13 +299,19 @@ def test_rejected_entry_is_audited_not_retried(engine):
     assert any(event['kind']=='order_rejected' for event in s.events())
 
 
-def test_short_requires_whole_target_and_borrow_then_covers(engine):
-    e,b,s=engine;enable(e);e.tick(ready(direction='short'));assert not b.sent
-    s.save({'sizing_mode':'target','target_dollars':'100'});b.bid,b.ask='100','100.01';e.tick(ready(direction='short'))
-    assert b.sent[0]['qty']=='1' and b.sent[0]['side']=='sell' and 'notional' not in b.sent[0]
-    assert b.sent[1]['side']=='buy'
-    b.bid,b.ask='89.99','90';e.tick(ready());e.tick(ready());e.tick(ready())
-    assert b.sent[-1]['side']=='buy' and not b.position_data and s.active_trade() is None
+def test_short_setup_buys_the_inverse_etf_proxy_then_sells_it_at_its_translated_target(engine):
+    """App interpretation: a QQQ short is executed as a fractional PSQ purchase, never a QQQ sale.
+
+    QQQ geometry 110/100/90 (stop/entry/target) mirrored onto a $35 PSQ ask gives a
+    $31.50 stop and a $38.50 target; the exit is a PSQ sale, not a QQQ cover.
+    """
+    e,b,s=engine;enable(e);b.bid,b.ask='100','100.01';e.tick(ready(direction='short'))
+    assert [(o['symbol'],o['side'],o['type']) for o in b.sent]==[('PSQ','buy','market'),('PSQ','sell','stop')]
+    assert b.sent[0]['notional']=='25.00' and 'qty' not in b.sent[0]
+    assert b.sent[1]['stop_price']=='31.50' and s.active_trade()['target']=='38.50'
+    assert not any(o['symbol']=='QQQ' for o in b.sent)
+    b.quotes['PSQ']=('38.50','38.51');e.tick(ready());e.tick(ready());e.tick(ready())
+    assert b.sent[-1]['side']=='sell' and b.sent[-1]['symbol']=='PSQ' and not b.position_data and s.active_trade() is None
 
 
 def test_session_close_exits_even_if_quotes_are_unavailable(engine):

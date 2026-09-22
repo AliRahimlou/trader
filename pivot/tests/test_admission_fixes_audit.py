@@ -9,21 +9,24 @@ from pivot.tests.test_execution import FakeBroker, ready, enable, NOW
 from pivot.tests.test_crypto_execution import engine as crypto_engine, tick as crypto_tick  # noqa: F401
 
 
-def test_unsizable_short_is_a_skipped_setup_not_invalid_data(tmp_path):
+def test_unexecutable_short_proxy_is_a_skipped_setup_not_invalid_data(tmp_path):
+    """Since 4.5.0 a short is a PSQ purchase; an untradable or unsizable proxy is still a skip, not an error."""
     broker = FakeBroker()
-    broker.account_data['shorting_enabled'] = False
+    broker.account_data['shorting_enabled'] = False  # Irrelevant to the proxy: nothing is sold short.
+    broker.assets['PSQ'] = {'tradable': False}
     store = Store(tmp_path / 'x.db')
     executor = Executor(broker, store, now=lambda: broker.at)
     enable(executor)
     executor.tick(ready(direction='short'))
     assert not broker.sent and executor.enabled()
-    assert 'cannot short' in executor.message
+    assert 'PSQ is not currently tradable' in executor.message
     check = store.execution_history(1, None)['entries'][0]
-    assert check['outcome'] == 'waiting' and check['gate'] == 'short_eligibility'
-    broker.account_data['shorting_enabled'] = True
+    assert check['outcome'] == 'waiting' and check['gate'] == 'proxy_eligibility'
+    broker.assets['PSQ'] = {'fractionable': False}
+    broker.quotes['PSQ'] = ('99.99', '100')  # A $25 target cannot buy one whole $100 PSQ share.
     broker.at += timedelta(seconds=1)
-    executor.tick(ready(at=broker.at, direction='short'))  # A $25 target cannot short one whole $100 share.
-    assert not broker.sent and 'whole QQQ shares' in executor.message
+    executor.tick(ready(at=broker.at, direction='short'))
+    assert not broker.sent and 'PSQ is not fractionable' in executor.message
     check = store.execution_history(1, None)['entries'][0]
     assert check['outcome'] == 'waiting' and check['gate'] == 'purchase_size'
 

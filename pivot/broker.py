@@ -1,6 +1,19 @@
 """Narrow Alpaca execution adapter. Only the execution worker calls its mutations."""
+from math import isfinite
 import requests
 from .feeds import FeedError
+from .models import timestamp
+
+# The Socrates signal is always read on QQQ. A SHORT setup cannot be sold on this
+# cash account (no shorting; $15 cannot form a whole QQQ share), so it is
+# executed by BUYING the -1x daily inverse ETF. App interpretation, not a video
+# rule: the recordings say "Nasdaq short" and nothing about an ETF proxy.
+SIGNAL_SYMBOL = 'QQQ'
+PROXY_SYMBOL = 'PSQ'
+PROXY_KIND = 'inverse_etf'
+# Every position or order in one of these symbols may belong to Socrates; any
+# other stock symbol is foreign exposure. Deployment flatness covers both.
+PROXY_SYMBOLS = frozenset({SIGNAL_SYMBOL, PROXY_SYMBOL})
 
 
 class BrokerRejected(FeedError):
@@ -45,9 +58,28 @@ class AlpacaBroker:
     def clock(self): return self.feeds.clock()
     def asset(self, symbol): return self.feeds.get('alpaca', '/v2/assets/' + symbol)
     def quote(self, symbol):
-        if symbol != 'QQQ':
-            raise ValueError('Only the configured QQQ execution instrument is supported')
-        return self.feeds.quote()
+        """Latest NBBO for one owned execution symbol; QQQ keeps the shared feed path."""
+        if symbol not in PROXY_SYMBOLS:
+            raise ValueError('Only the configured QQQ signal and PSQ proxy instruments are supported')
+        if symbol == SIGNAL_SYMBOL:
+            return self.feeds.quote()
+        return self._latest_stock_quote(symbol)
+
+    def _latest_stock_quote(self, symbol):
+        """Same validation as the QQQ feed quote, for the proxy symbol's own NBBO."""
+        raw = self.feeds.get('stocks', f'/v2/stocks/{symbol}/quotes/latest', {'feed': self.feeds.feed})
+        if not isinstance(raw, dict) or raw.get('symbol') != symbol or not isinstance(raw.get('quote'), dict):
+            raise FeedError(f'Latest {symbol} quote response is invalid')
+        try:
+            quote = {'t': timestamp(raw['quote']['t']).isoformat()}
+            for key in ('bp', 'ap', 'bs', 'as'):
+                value = float(raw['quote'][key])
+                if not isfinite(value) or value <= 0:
+                    raise ValueError()
+                quote[key] = value
+            return quote
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise FeedError(f'Latest {symbol} quote contains invalid prices, sizes or timestamp') from None
 
     @property
     def requires_vix_entry_quote(self):

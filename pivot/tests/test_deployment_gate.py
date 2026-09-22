@@ -385,3 +385,25 @@ def test_exposure_and_review_state_are_explicit_and_protocol_requires_configurat
     with TestClient(create_app(plain, background=False)) as client:
         assert 'deployment_protocol' not in client.get('/api/health').json()
         assert client.get('/api/deployment-readiness').json()['gate']['configured'] is False
+
+
+@pytest.mark.parametrize('exposure', ['psq_position', 'psq_order', 'psq_trade'])
+def test_flat_account_readiness_counts_the_inverse_etf_proxy_as_exposure(tmp_path, exposure):
+    """The updater refuses any non-zero position, order or trade count; PSQ must appear in those counts."""
+    app, service, broker = app_fixture(tmp_path)
+    if exposure == 'psq_position':
+        broker.position_data = [{'symbol': 'PSQ', 'qty': '0.714285714', 'side': 'long'}]
+    elif exposure == 'psq_order':
+        broker.book['pvt-x-stop'] = {'id': 'pvt-x-stop', 'client_order_id': 'pvt-x-stop', 'symbol': 'PSQ', 'side': 'sell',
+                                     'qty': '0.714285714', 'filled_qty': '0', 'status': 'new', 'type': 'stop',
+                                     'stop_price': '31.50', 'time_in_force': 'day'}
+    else:
+        assert service.store.reserve_trade({'id': 'e' * 24, 'stage': 'open', 'account_ref': 'fake-account-only',
+                                            'symbol': 'PSQ', 'signal_symbol': 'QQQ', 'signal_direction': 'short',
+                                            'proxy': 'inverse_etf', 'amount': '25.00'})
+    with TestClient(app) as client:
+        payload = client.get('/api/deployment-readiness').json()
+    assert payload['ok'] and payload['session_entry_protocol'] == 'ny-session-two-v1'
+    assert (payload['positions_count'], payload['orders_count'], payload['active_trade']) == {
+        'psq_position': (1, 0, False), 'psq_order': (0, 1, False), 'psq_trade': (0, 0, True)}[exposure]
+    assert not broker.sent and not broker.canceled
