@@ -255,6 +255,21 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     def snapshot():
         return decorate_snapshot(service.snapshot())
 
+    @app.get('/api/chart')
+    def chart():
+        # Read-only look-left data for the Socrates view; the same origin and
+        # header protection as /api/snapshot applies. A service without the
+        # analysis copy (older worker, before the first analysis) is reported
+        # as unavailable rather than as an empty chart.
+        from .chart_data import build
+        inputs = getattr(service, 'chart_inputs', lambda: None)()
+        if inputs is None:
+            return JSONResponse({'available': False, 'detail': 'Waiting for the first completed analysis'}, status_code=503)
+        try:
+            return build(inputs)
+        except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError):
+            return JSONResponse({'available': False, 'detail': 'Chart data could not be built from the current analysis'}, status_code=503)
+
     @app.get('/api/decisions')
     def decisions(limit: int = 50, before_id: int | None = None):
         try:
