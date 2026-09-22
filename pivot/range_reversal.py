@@ -34,7 +34,7 @@ INTERPRETATION_WARNINGS = (
     'Daily or weekly trend preference is optional in the narration and is not an entry filter here.',
     'A close beyond the opposite boundary without a close inside resets the pending excursion; this is an explicit interpretation.',
     'Repeated fresh excursions are separate opportunities. Position ownership and shared buying power are managed separately.',
-    f'Missing five-minute candles are tolerated: the range uses the available opening bars (at least {OPENING_BARS_MINIMUM} of {OPENING_SLOTS} slots) and a missing later slot has no close, so it cannot start, confirm or invalidate an excursion. The latest expected slot must still be present. This is an app interpretation.',
+    f'Missing five-minute candles are tolerated: the range uses the available opening bars (at least {OPENING_BARS_MINIMUM} of {OPENING_SLOTS} slots) and a missing later slot has no close, so it cannot start or confirm an excursion; a slot missing inside an excursion retires that excursion, because the late candle could have changed it. The latest expected slot must still be present. This is an app interpretation.',
 )
 
 
@@ -165,7 +165,17 @@ def analyze(market: Market | None, now, *, provenance=None):
             return result
         result.update(state='WATCHING', detail='Watching for a five-minute close outside the range, then a later close strictly inside.')
         pending = None
+        previous_at = range_end
         for bar, at in bars[len(opening):]:
+            if pending and at - previous_at != STEP:
+                # A slot is missing inside the excursion. The candle Alpaca may
+                # still publish for it could have closed back inside or through
+                # the far side, so the excursion cannot be confirmed on partial
+                # evidence. App interpretation: it is retired, never guessed.
+                pending.update(status='INVALIDATED', invalidated_at=_iso(at),
+                               detail='A native five-minute candle is missing inside the excursion; it cannot be confirmed on partial evidence.')
+                pending = None
+            previous_at = at
             side = 'above' if bar.close > high else 'below' if bar.close < low else None
             inside = low < bar.close < high
             if pending and side and side != pending['breakout_side']:

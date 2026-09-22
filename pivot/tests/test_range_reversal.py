@@ -176,16 +176,18 @@ def test_missing_opening_candle_extreme_is_never_invented():
     assert without['range']['native_candle_count'] == 47
 
 
-def test_missing_post_range_candle_has_no_close_and_cannot_change_state():
-    # Closes 111 (outside), <missing>, 95 (inside): the missing slot neither
-    # confirms nor invalidates; the later inside close confirms the reversal.
+def test_missing_candle_inside_an_excursion_retires_it_instead_of_confirming_on_partial_evidence():
+    # Closes 111 (outside), <missing>, 95 (inside): the candle the provider may
+    # still publish for the missing slot could have closed back inside or
+    # through the far side, so the excursion is retired and the 95 close
+    # confirms nothing. Coverage still records the gap.
     market, now, provenance = sample([111, 105, 95])
     del market.bars[5][49]
     result = analyze(market, now, provenance=provenance)
-    assert result['state'] == 'SETUP_OBSERVED' and result['signal_ready'] is True
-    event = result['current_event']
-    assert (event['direction'], event['stop'], event['entry'], event['target']) == ('short', 112, 95, 61)
-    assert event['confirmation_at'] == market.bars[5][-1].end.isoformat()
+    assert result['state'] == 'WATCHING' and result['signal_ready'] is False and result['candidates'] == []
+    assert [o['status'] for o in result['observations']] == ['INVALIDATED']
+    assert 'missing inside the excursion' in result['observations'][0]['detail']
+    assert result['observations'][0]['invalidated_at'] == market.bars[5][-1].end.isoformat()
     assert result['coverage'] == {
         'expected_completed_bars': 51, 'received_completed_bars': 50,
         'missing_count': 1, 'missing_at': [(market.bars[5][48].end + timedelta(minutes=5)).isoformat()],
@@ -193,12 +195,25 @@ def test_missing_post_range_candle_has_no_close_and_cannot_change_state():
     }
 
 
-def test_missing_post_range_candle_between_two_outside_closes_keeps_the_first_stop():
+def test_missing_candle_before_an_excursion_is_skipped_and_a_later_excursion_still_confirms():
+    # Closes 100 (inside), <missing>, 111 (outside), 105 (inside): the gap precedes
+    # the excursion, so the later outside/inside pair confirms normally.
+    market, now, provenance = sample([100, 100, 111, 105])
+    del market.bars[5][49]
+    result = analyze(market, now, provenance=provenance)
+    assert result['state'] == 'SETUP_OBSERVED' and result['signal_ready'] is True
+    event = result['current_event']
+    assert (event['direction'], event['stop'], event['entry'], event['target']) == ('short', 112, 105, 91)
+    assert result['coverage']['missing_count'] == 1 and len(result['observations']) == 1
+
+
+def test_missing_candle_between_two_outside_closes_retires_the_first_and_starts_a_second_excursion():
     market, now, provenance = sample([111, 130, 120, 105])
-    del market.bars[5][49]  # The 130 close is missing; its high can never move the stop.
+    del market.bars[5][49]  # The 130 slot is missing: the first excursion is retired, the 120 close starts another.
     result = analyze(market, now, provenance=provenance)
     assert result['state'] == 'SETUP_OBSERVED'
-    assert result['current_event']['stop'] == 112 and len(result['observations']) == 1
+    assert [o['status'] for o in result['observations']] == ['INVALIDATED', 'CONFIRMED']
+    assert result['current_event']['stop'] == 121 and result['current_event']['entry'] == 105
 
 
 def test_missing_latest_candle_is_not_current_and_cannot_ready_a_signal():

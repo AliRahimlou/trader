@@ -20,10 +20,10 @@ from pivot.tests.test_strategy_v2 import setup_scenario
 
 
 @pytest.fixture(autouse=True)
-def executor_accepts_current_analysis_version(monkeypatch):
-    # Version-string alignment only: pivot/execution.py still pins the v3
-    # analysis identifier; see test_strategy_v4_rules.py for the contract check.
-    monkeypatch.setattr(execution, 'SIGNAL_POLICY_VERSION', ANALYSIS_VERSION)
+def executor_follows_the_analysis_version():
+    # The executor's signal contract follows pivot.strategy.ANALYSIS_VERSION; this
+    # guard keeps the readiness lifecycles from silently testing a stale contract.
+    assert execution.SIGNAL_POLICY_VERSION == ANALYSIS_VERSION
 
 
 def stock_snapshot(method):

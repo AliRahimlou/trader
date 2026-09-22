@@ -23,7 +23,7 @@ from .range_reversal import OPENING_BARS_MINIMUM, OPENING_SLOTS, RULE_VERSION
 POLICY_VERSION = 'range-spot-execution-v2'
 POLICY = {'version': POLICY_VERSION, 'summary': [
     f'The first range is New York midnight plus four elapsed hours: the high and low of the native five-minute candles available among its {OPENING_SLOTS} slots, at least {OPENING_BARS_MINIMUM} of them. This is an explicit app convention.',
-    'Missing five-minute candles are tolerated. A missing later slot has no close, so it cannot start, confirm or invalidate an excursion; the newest expected candle must still be present (90-second publication allowance) for a signal to be current. Prices are never filled in.',
+    'Missing five-minute candles are tolerated. A missing later slot has no close, so it cannot start or confirm an excursion, and a slot missing inside an excursion retires it; the newest expected candle must still be present (90-second publication allowance) for a signal to be current. Prices are never filled in.',
     'Buy after a completed close below the range followed by a later close strictly inside. Use the first outside candle low as stop and the signal close plus twice that distance as target.',
     'Alpaca spot supports long entries and sells of owned crypto only. Upper-range short setups cannot open positions here.',
     'Bitcoin is demonstrated in the recording. Other selected markets are optional adaptations, not creator-validated results.',

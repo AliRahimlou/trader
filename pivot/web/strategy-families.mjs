@@ -262,7 +262,7 @@ export function cryptoWatchMarkup(snapshot,now=Date.now()) {
     const count=direction=>new Set((analysis?.candidates || []).filter(row=>row?.status==='CONFIRMED'&&row.direction===direction).map(row=>row.event_id||row.confirmation_at)).size;
     const data=coverage?`${coverage.received_completed_bars}/${coverage.expected_completed_bars} completed candles · ${coverage.missing_count} missing${coverage.publication_wait?' · latest candle within publication allowance':''}`:view.state;
     const chart=complete?`Today’s chart: ${count('long')} buy setups · ${count('short')} short setups`:'Setup totals unavailable until data is complete.';
-    const gap=coverage?.opening_range_missing_count?`${coverage.opening_range_missing_count} missing in the opening four-hour range.`:coverage?.missing_count?'Later candle gaps prevent a complete strategy evaluation.':'';
+    const gap=coverage?.opening_range_missing_count?`${coverage.opening_range_missing_count} missing in the opening four-hour range.`:coverage?.missing_count?'Later candle gaps are skipped; a gap inside an excursion retires it.':'';
     return `<article class="crypto-watch-row"><div><strong>${esc(symbol)}</strong><span class="pill">${esc(selected.includes(symbol)?view.routeStatus:'Not selected for trading')}</span></div><div><b>${esc(data)}</b><p>${esc(chart)}</p><small>${esc(gap || view.state)}</small></div></article>`;
   }).join('');
 }

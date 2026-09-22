@@ -183,15 +183,12 @@ class Store:
         except PortfolioBlocked as exc:
             return {**result, 'status': 'blocked', 'used': None, 'remaining': 0, 'families': None, 'reason': str(exc)}
 
-    def assert_session_entry_available(self, now, family=None):
+    def assert_session_entry_available(self, now, family):
         """Early planning gate; the same check is repeated atomically at POST claim.
 
-        A caller that omits its family is the crypto engine's pre-per-family call
-        site, which is not edited here; it is checked as 'range_reversal'. The
-        Socrates executor names its family explicitly. The claim inside
-        claim_operation is authoritative for both, whatever this gate said.
+        Both engines name their family. The claim inside claim_operation is
+        authoritative for both, whatever this gate said.
         """
-        family = 'range_reversal' if family is None else family
         if family not in SESSION_ENTRY_FAMILIES:
             raise PortfolioBlocked('An unknown strategy family cannot plan a session entry')
         with self.connect() as db:

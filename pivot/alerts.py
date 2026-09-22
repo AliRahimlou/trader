@@ -44,5 +44,8 @@ def notify(kind, body):
         return None
     payload = {'kind': str(kind), 'body': body, 'at': datetime.now(timezone.utc).isoformat()}
     thread = Thread(target=_deliver, args=(url.strip(), payload), name='pivot-alert', daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        return None  # A host that cannot start a thread must not lose an order tick over an alert.
     return thread

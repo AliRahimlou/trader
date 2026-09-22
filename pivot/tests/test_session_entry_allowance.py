@@ -76,9 +76,6 @@ def test_reporting_shows_each_family_separately(tmp_path):
     main.assert_session_entry_available(NOW, family='socrates')
     with pytest.raises(PortfolioBlocked, match='4H Range Reversal limit'):
         main.assert_session_entry_available(NOW, family='range_reversal')
-    # The crypto engine's existing call site omits its family and is checked as crypto.
-    with pytest.raises(PortfolioBlocked, match='4H Range Reversal limit'):
-        main.assert_session_entry_available(NOW)
     with pytest.raises(PortfolioBlocked, match='unknown strategy family'):
         main.assert_session_entry_available(NOW, family='other')
 
