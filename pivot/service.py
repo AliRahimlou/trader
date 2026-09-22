@@ -523,7 +523,7 @@ class Service:
         except Exception:
             # Reporting cannot interfere with existing position supervision.
             result['entry_allowance'] = {'status': 'blocked', 'limit': 2, 'used': None,
-                'remaining': 0, 'timezone': 'America/New_York',
+                'remaining': 0, 'families': None, 'scope': 'per_family', 'timezone': 'America/New_York',
                 'reason': 'Session entry allowance could not be verified.'}
         result['crypto_execution'] = self.crypto_executor.snapshot() if self.crypto_executor else {
             'message':'Crypto broker execution is not configured for this runtime.', 'at':None, 'trades':[], 'incidents':[]}
@@ -545,6 +545,8 @@ class Service:
                       execution_policy={**POLICY, 'summary': [
                           'Live money is the master entry switch for enabled strategies. Viewing another strategy does not stop entries or position management.',
                           'Each strategy uses its own saved purchase target. Turning a strategy off stops its new entries; existing positions continue their exits.',
+                          'Each strategy has its own limit of two new entry attempts per New York session; rejected and uncertain submissions count, exits do not.',
+                          'A rejected, replaced or unreconciled QQQ order pauses Socrates only (the same durable change as turning it off). Global Live and the crypto strategy are unchanged; enable Socrates again after reviewing Alpaca.',
                           *['Socrates: ' + line for line in POLICY['summary']]]}, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
         return result
 

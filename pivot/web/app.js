@@ -81,7 +81,7 @@ function renderStrategyControls() {
   const p=portfolioView(snapshot),busy=strategySaving||saving||toggling||familyConnectionUnavailable;
   $('strategy-run-summary').textContent=`Global Live ${p.globalOn?'On':'Off'} · ${p.families.map(f=>`${f.label} ${f.enabled?'On':'Off'} (${money(f.target)} per purchase)`).join(' · ')}. Changing views does not change trading.`;
   $('entry-allowance').textContent=familyConnectionUnavailable
-    ? 'Session entry allowance unverified while the app reconnects.' : p.entryAllowance.text;
+    ? 'Session entry allowance unverified while the app reconnects.' : p.entryAllowance.text+(p.pause?' '+p.pause.text:'');
   $('execution-scope').textContent=`Global Live · ${p.scope}`;
   for(const f of p.families){
     const prefix=f.id==='socrates'?'socrates':'range';
@@ -89,6 +89,7 @@ function renderStrategyControls() {
     $(prefix+'-toggle').textContent=f.enabled?'Turn strategy Off':'Enable strategy';
     $(prefix+'-toggle').disabled=busy||!p.configured||(!f.enabled&&!f.available);
     $(prefix+'-run-detail').textContent=`${money(f.target)} per purchase · ${f.symbols.join(', ')}. `+
+      (f.paused?`Paused by the app: ${f.pauseReason} `:'')+
       (f.id==='socrates'?appStatus(snapshot,displayClock.now()).text:(snapshot.crypto_execution?.message || 'Waiting for execution checks.'));
   }
   $('run-both').disabled=busy||!p.configured||p.families.some(f=>!f.available)||p.families.every(f=>f.enabled);

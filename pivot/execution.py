@@ -33,6 +33,13 @@ PARTIAL_ENTRY_CONFIRM_SECONDS = 30
 EXIT_CONFIRM_SECONDS = 30
 MANUAL_FLAT_CONFIRM_SECONDS = 30
 ORDER_NOT_FOUND_CONFIRM_SECONDS = 60
+# App interpretations, not video rules. The host clock has been observed about a
+# second behind Alpaca's; a broker or provider timestamp slightly in the local
+# future is still current. Positive staleness limits are unchanged.
+CLOCK_SKEW_SECONDS = 5
+# Entries stop 30 minutes before the close (positions still start closing at 5),
+# so a fresh entry has room for its stop and target instead of a forced exit.
+ENTRY_CUTOFF_SECONDS = 1800
 SIGNAL_POLICY_VERSION = 'nasdaq-video-interpretation-v3'
 PAPER_SIGNAL_POLICY_VERSION = 'synthetic-paper-commissioning-v1'
 PAPER_SIGNAL_PURPOSE = 'broker_order_lifecycle_only'
@@ -82,6 +89,11 @@ class ExpiredSignal(Waiting):
 
 def elapsed(at, now):
     return (now - timestamp(at)).total_seconds()
+
+
+def recent(at, now, seconds):
+    """A broker/provider timestamp is current within `seconds`, tolerating small negative skew."""
+    return -CLOCK_SKEW_SECONDS <= elapsed(at, now) <= seconds
 
 
 def data_unexpired(until, now):
@@ -148,7 +160,7 @@ def signal_expiry(setup, now, *, expected_policy_version=SIGNAL_POLICY_VERSION):
 
 
 def session_open(clock, now):
-    return clock.get('is_open') is True and 0 <= elapsed(clock['timestamp'], now) <= 15
+    return clock.get('is_open') is True and recent(clock['timestamp'], now, 15)
 
 
 def closing(clock, now, seconds=300):
@@ -157,7 +169,7 @@ def closing(clock, now, seconds=300):
 
 def checked_quote(quote, now):
     try:
-        if not 0 <= elapsed(quote['t'], now) <= 15:
+        if not recent(quote['t'], now, 15):
             raise Waiting('Waiting for a current QQQ quote', code='quote_stale')
         bid, ask = decimal(quote['bp']), decimal(quote['ap'])
         if bid <= 0 or ask < bid or decimal(quote['bs']) <= 0 or decimal(quote['as']) <= 0:
@@ -244,7 +256,7 @@ class Executor:
         if not isinstance(clock, dict) or type(clock.get('is_open')) is not bool:
             return None
         try:
-            return clock['is_open'] if 0 <= elapsed(clock.get('timestamp'), now) <= 15 else None
+            return clock['is_open'] if recent(clock.get('timestamp'), now, 15) else None
         except (ValueError, TypeError, OverflowError):
             return None
 
@@ -348,9 +360,25 @@ class Executor:
         return {'execution_check': check, 'execution_diagnostic_error': self.execution_diagnostic_error}
 
     def enabled(self):
+        """Global Live, the reviewed policy, and the Socrates selection all agree.
+
+        The durable selection is read here as well as through the portfolio hook
+        so an app-initiated pause stops entries even in a runtime without a
+        portfolio. An unreadable selection fails closed for new entries only.
+        """
         c = self.store.control()
-        return (c['enabled'] is True and c.get('policy') == POLICY_VERSION
+        return (c['enabled'] is True and c.get('policy') == POLICY_VERSION and self._family_selected()
                 and (self.portfolio is None or self.portfolio.family_enabled('socrates')))
+
+    def _family_selected(self):
+        try:
+            return self.store.strategy_selection().get('socrates') is True
+        except Exception:
+            return False
+
+    def _pause(self, reason):
+        """Stop new Socrates entries only; global Live stays as the owner set it and crypto keeps trading."""
+        self.store.pause_family('socrates', reason)
 
     def set_live(self, payload):
         if set(payload) != {'enabled', 'policy_version'} or type(payload['enabled']) is not bool:
@@ -556,7 +584,7 @@ class Executor:
         setup = snapshot.get('setup') if isinstance(snapshot.get('setup'), dict) else {}
         setup, expires, key = self._entry_candidate(setup, now)
         self._gate('entry_reservation')
-        self.store.assert_session_entry_available(self.now())
+        self.store.assert_session_entry_available(self.now(), family='socrates')
         authorization = self.store.entry_authorization()
         self._gate('broker_snapshot')
         account = self.broker.account()
@@ -575,8 +603,8 @@ class Executor:
         if not session_open(clock, self.now()):
             raise Waiting('Live money is on — waiting for the regular market session')
         self._gate('entry_cutoff')
-        if closing(clock, self.now(), 600):
-            raise Waiting('No new entries in the final ten minutes of the market session')
+        if closing(clock, self.now(), ENTRY_CUTOFF_SECONDS):
+            raise Waiting('No new entries in the final 30 minutes of the market session')
         self._gate('existing_exposure')
         self._assert_entry_exposure(account['account_ref'], positions, orders)
         self._gate('asset_eligibility')
@@ -635,7 +663,7 @@ class Executor:
             if (verification.get('source') != 'insightsentry' or verification.get('symbol') != 'I:VIX'
                     or isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay != 0
                     or isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value) or value <= 0
-                    or not 0 <= elapsed(verification['updated_at'], self.now()) <= 90):
+                    or not recent(verification['updated_at'], self.now(), 90)):
                 raise Waiting('Waiting for a verified current actual VIX quote')
             entry_valid_until = min(timestamp(entry_valid_until), timestamp(verification['updated_at'])+timedelta(seconds=90)).isoformat()
         self._gate('final_analysis_freshness')
@@ -703,7 +731,7 @@ class Executor:
     def _prepared_entry_expired(self, trade, clock):
         now = self.now()
         return (self._prepared_entry_locally_expired(trade)
-                or not session_open(clock, now) or closing(clock, now, 600))
+                or not session_open(clock, now) or closing(clock, now, ENTRY_CUTOFF_SECONDS))
 
     def _order(self, trade, name):
         if name == 'entry' and trade['ops'][name]['state'] == 'prepared':
@@ -789,7 +817,7 @@ class Executor:
                                           'status':'rejected','qty':op['payload'].get('qty'),'filled_qty':'0',
                                           'client_order_id':op['payload']['client_order_id'],'evidence':'http_rejection'}
                         self.store.save_trade(trade)
-                        self.store.set_control(False)
+                        self._pause(f'The broker rejected a QQQ {name} order. Review Alpaca before enabling Socrates again.')
                         self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol']})
                         return {'status': 'rejected', 'filled_qty': '0'}
                 else:
@@ -827,8 +855,7 @@ class Executor:
             # Keep the lifecycle and last verified evidence intact. A later good
             # lookup must still resume supervision, including while entries are
             # paused; malformed evidence cannot authorize a competing sale.
-            if self.store.control().get('enabled') is True:
-                self.store.set_control(False)
+            self._pause(f'A QQQ {name} order at the broker does not match its saved request. Review Alpaca before enabling Socrates again.')
             incidents = trade.setdefault('order_validation', {})
             if name not in incidents or incidents[name].get('resolved_at'):
                 incidents[name] = {'first_observed_at': self.now().isoformat(),
@@ -849,8 +876,7 @@ class Executor:
             # A successful HTTP response can later become a venue rejection.
             # Pause entries just as for HTTP rejection, but keep the broker's
             # actual fill evidence so existing exposure can still be managed.
-            if self.store.control().get('enabled') is True:
-                self.store.set_control(False)
+            self._pause(f'The venue rejected a QQQ {name} order. Review Alpaca before enabling Socrates again.')
             if (op.get('last_seen') or {}).get('status') != 'rejected':
                 self.store.event('order_rejected', {'purpose': name, 'symbol': trade['symbol'],
                                                    'evidence': 'broker_status'})
@@ -997,7 +1023,7 @@ class Executor:
         self._gate('owner_attention')
         self._diagnostic_trade = trade
         self._diagnostic_outcome = 'attention'
-        self.store.set_control(False)
+        self._pause(reason)
         trade.update(stage='attention', reason=reason)
         self.store.save_trade(trade)
         self.store.event('execution_needs_attention', {'symbol':'QQQ','reason':reason})
@@ -1016,11 +1042,11 @@ class Executor:
         # Confirm flatness again after order lookups, which can take time.
         if any(p['symbol']=='QQQ' for p in self.broker.positions()) or any(o['symbol']=='QQQ' for o in self.broker.orders()):
             raise Waiting(trade['reason'])
-        if self.enabled():
-            self.store.set_control(False)
+        # Socrates stays paused after a manual resolution; global Live is the owner's.
+        self._pause('A QQQ trade was resolved manually at the broker. Review the outcome before enabling Socrates again.')
         trade['manual_reconciliation']=True
         self.store.event('manual_resolution_confirmed', {'symbol':'QQQ','note':'Broker is flat with no working QQQ orders; external fill economics remain unverified'})
-        self._finish(trade,'Manual resolution confirmed. Live money remains off; review before enabling again.')
+        self._finish(trade,'Manual resolution confirmed. Socrates remains paused; review before enabling it again.')
 
     def _position(self, trade):
         self._gate('position_reconciliation')
@@ -1070,8 +1096,7 @@ class Executor:
             self.store.save_trade(trade)
         if now < timestamp(incident['confirmation_deadline']):
             return False
-        if self.store.control().get('enabled') is True:
-            self.store.set_control(False)
+        self._pause('A QQQ entry partially filled while its cancellation stayed unconfirmed. Review Alpaca before enabling Socrates again.')
         reason = ('Entry partially filled, but cancellation is still unconfirmed. New entries paused; '
                   'no competing exit will be sent. Check the QQQ position and orders in Alpaca now.')
         if not incident.get('raised_at'):
@@ -1245,8 +1270,7 @@ class Executor:
         self._gate('protection')
         self._diagnostic_trade = trade
         self._diagnostic_outcome = 'protection_failure'
-        if self.store.control().get('enabled') is True:
-            self.store.set_control(False)
+        self._pause(reason + '. Review Alpaca before enabling Socrates again.')
         trade['protection_failure'] = {'at': self.now().isoformat(), 'reason': reason}
         self._start_exit(trade, reason + '. New entries paused; canceling before closing remaining shares.')
 
@@ -1255,8 +1279,8 @@ class Executor:
         if failure:
             if not trade.get('protection_failure'):
                 self._start_protection_exit(trade, failure)
-            elif self.store.control().get('enabled') is True:
-                self.store.set_control(False)
+            else:
+                self._pause('QQQ protection stayed unconfirmed past its deadline. Review Alpaca before enabling Socrates again.')
             raise Waiting('Protection status is uncertain past its confirmation deadline. New entries paused; no competing sale will be sent. Check the QQQ position and orders in Alpaca now.')
 
     def _protect(self, trade, position):
@@ -1298,8 +1322,7 @@ class Executor:
             self.store.save_trade(trade)
         if now < timestamp(pending['confirmation_deadline']):
             return False
-        if self.store.control().get('enabled') is True:
-            self.store.set_control(False)
+        self._pause('A QQQ exit or stop cancellation stayed unconfirmed past its deadline. Review Alpaca before enabling Socrates again.')
         reason = ('Exit or protective-stop cancellation is still unconfirmed. New entries paused; '
                   'existing orders continue to be reconciled without a competing closing order. '
                   'Check the QQQ position and orders in Alpaca now.')

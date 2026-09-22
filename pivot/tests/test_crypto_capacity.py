@@ -55,7 +55,9 @@ def test_confirmed_exit_frees_capacity_but_not_the_session_entry_allowance(engin
     assert len([order for order in b.sent if order['side'] == 'buy']) == 2
     assert store.decision_review(b.at)['order_attempts'] == 2
     assert 'two new entry attempts' in store.decision_review(b.at)['latest_by_symbol']['SOL/USD']['reason']
-    assert main.session_entry_allowance(b.at)['remaining'] == 0
+    allowance = main.session_entry_allowance(b.at)
+    assert allowance['families']['range_reversal']['remaining'] == 0
+    assert allowance['families']['socrates']['remaining'] == 2  # Per family; Socrates is untouched.
     assert controls == (store.control(), main.control())
 
 

@@ -45,36 +45,73 @@ export function globalCryptoAlert(snapshot) {
   return messages.length?'4H Range Reversal needs attention: '+[...new Set(messages)].join(' '):'';
 }
 
+const FAMILY_LABELS={socrates:'Socrates',range_reversal:'4H Range Reversal'};
+
 export function portfolioView(snapshot) {
   const p=snapshot?.portfolio;
   const globalOn=typeof p?.global_live_enabled==='boolean'?p.global_live_enabled:snapshot?.live_enabled===true;
   const entryAllowance=sessionEntryStatus(snapshot?.entry_allowance);
+  const pause=pauseNotice(snapshot);
   const families=[['socrates','Socrates'],['range_reversal','4H Range Reversal']].map(([id,label])=>{
     const raw=p?.[id] || {};
     const enabled=p?raw.enabled===true:id==='socrates';
     const available=id==='socrates'?snapshot?.execution_available===true:raw.execution_available===true;
-    return {id,label,enabled,available,target:raw.target_dollars || (id==='socrates'?snapshot?.settings?.target_dollars:'5.00'),
+    const paused=id==='socrates' && !enabled && !!pause;
+    const familyAllowance=entryAllowance.families?.[id];
+    const allowanceBlocked=entryAllowance.blocked || !familyAllowance || familyAllowance.blocked;
+    return {id,label,enabled,available,paused,pauseReason:paused?pause.reason:'',target:raw.target_dollars || (id==='socrates'?snapshot?.settings?.target_dollars:'5.00'),
       symbols:id==='socrates'?['QQQ']:(Array.isArray(raw.symbols)?raw.symbols.filter(s=>CRYPTO_MARKETS.includes(s)):['BTC/USD']),
-      status:!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':entryAllowance.blocked?'On · new entries paused':'On · entries enabled',
+      status:paused?'Paused by the app · no new entries':!enabled?'Off · no new entries':raw.review_required===true?'Review updated rules':!globalOn?'Selected · global Live Off':!available?'Enabled · execution unavailable':allowanceBlocked?'On · new entries paused':'On · entries enabled',
       reviewRequired:raw.review_required===true,
       policyVersion:raw.policy_version,policy:Array.isArray(raw.policy_summary)?raw.policy_summary:[],
       shortSupported:raw.capabilities?.short===true};
   });
-  return {configured:!!p,globalOn,families,enabled:families.filter(f=>f.enabled),entryAllowance,
+  return {configured:!!p,globalOn,families,enabled:families.filter(f=>f.enabled),entryAllowance,pause,
     scope:families.filter(f=>f.enabled).map(f=>f.label).join(' + ') || 'No strategies enabled'};
 }
 
+// The limit is per strategy. The top-level used/remaining are totals; each
+// family's own counts decide whether that family may still enter. Any
+// inconsistency reads as unverified: it can never look like spare capacity.
 export function sessionEntryStatus(value) {
-  if(!value || value.status!=='available' || value.limit!==2
-      || !Number.isInteger(value.used) || value.used<0
-      || !Number.isInteger(value.remaining) || value.remaining!==Math.max(0,2-value.used)
+  const unverified={blocked:true,families:null,
+    text:'Session entry allowance unverified. New entries require a verified allowance; existing positions remain managed.'};
+  const raw=value?.families;
+  if(!value || value.status!=='available' || value.limit!==2 || !raw || typeof raw!=='object'
       || !/^\d{4}-\d{2}-\d{2}$/.test(value.session_day || '')
-      || value.timezone!=='America/New_York')return {
-    blocked:true,text:'Session entry allowance unverified. New entries require a verified allowance; existing positions remain managed.'};
-  const blocked=value.remaining===0;
-  return {blocked,text:`${value.session_day} · New York session: ${value.used} of 2 entry attempts used across both strategies. `+
-    (blocked?'Session limit reached. ':'')+
-    'Rejected or uncertain submissions count; exits do not. Existing positions remain managed.'};
+      || value.timezone!=='America/New_York')return unverified;
+  const families={};
+  for(const id of Object.keys(FAMILY_LABELS)){
+    const row=raw[id];
+    if(!row || !Number.isInteger(row.used) || row.used<0 || !Number.isInteger(row.remaining) || row.remaining!==Math.max(0,2-row.used))return unverified;
+    families[id]={used:row.used,remaining:row.remaining,blocked:row.remaining===0};
+  }
+  const totals=Object.values(families).reduce((sum,row)=>({used:sum.used+row.used,remaining:sum.remaining+row.remaining}),{used:0,remaining:0});
+  if(value.used!==totals.used || value.remaining!==totals.remaining)return unverified;
+  const blocked=Object.values(families).every(row=>row.blocked);
+  const exhausted=Object.keys(families).filter(id=>families[id].blocked).map(id=>FAMILY_LABELS[id]);
+  return {blocked,families,text:`${value.session_day} · New York session: `+
+    Object.keys(families).map(id=>`${FAMILY_LABELS[id]} ${families[id].used} of 2 entry attempts used`).join(' · ')+'. '+
+    (exhausted.length?`Session limit reached for ${exhausted.join(' and ')}. `:'')+
+    'Each strategy has its own limit. Rejected or uncertain submissions count; exits do not. Existing positions remain managed.'};
+}
+
+// An app-initiated pause is the latest 'strategy_paused' journal entry that no
+// later owner strategy setting for Socrates has superseded. It explains an
+// unexpected Socrates Off; it does not by itself change any saved permission.
+export function pauseNotice(snapshot) {
+  if(snapshot?.portfolio?.socrates?.enabled!==false)return null;
+  const events=Array.isArray(snapshot?.events)?snapshot.events:[];
+  for(const event of events){
+    if(!event || typeof event!=='object')continue;
+    if(event.kind==='strategy_settings' && event.detail && typeof event.detail==='object' && 'socrates' in event.detail)return null;
+    if(event.kind==='strategy_paused' && event.detail?.family==='socrates'){
+      const reason=typeof event.detail.reason==='string' && event.detail.reason?event.detail.reason:'The app paused Socrates.';
+      return {at:typeof event.at==='string'?event.at:null,reason,
+        text:`Socrates was paused by the app: ${reason} Global Live and 4H Range Reversal are unchanged; existing positions continue their exits. Enable Socrates again after reviewing Alpaca.`};
+    }
+  }
+  return null;
 }
 
 export function portfolioStatus(snapshot,fallback) {

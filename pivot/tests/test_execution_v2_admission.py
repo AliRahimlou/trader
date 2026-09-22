@@ -1,5 +1,6 @@
 """Synthetic event-admission and durable recovery boundaries; no real orders."""
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -125,8 +126,12 @@ def test_broker_rejection_consumes_event_even_after_restart_and_direction_flip(e
     executor.tick(ready())
     assert len(broker.sent) == 1 and store.active_trade() is None
     broker.entry_mode = 'filled'
+    # The rejection paused Socrates (global Live stayed on); the owner re-selects it.
+    assert store.control()['enabled'] is True and store.strategy_selection() == {'socrates': False}
+    with store.connect() as db:
+        db.execute('UPDATE strategy_selection SET body=? WHERE id=1', (json.dumps({'socrates': True}),))
     restarted = Executor(broker, Store(store.path), now=lambda: broker.at)
-    enable(restarted)
+    assert restarted.enabled()
     reversed_signal = ready(direction='short')
     assert reversed_signal['setup']['event_id'] == ready()['setup']['event_id']
     restarted.tick(reversed_signal)

@@ -253,16 +253,29 @@ def test_store_cannot_rearm_same_id_with_a_later_confirmation(tmp_path):
     assert crypto.history()[0] == old
 
 
-def test_retry_still_obeys_exhausted_shared_two_entry_allowance(tmp_path):
+def test_retry_still_obeys_exhausted_family_two_entry_allowance(tmp_path):
     executor, broker, crypto, main = runtime(tmp_path)
     executor.tick({'BTC/USD': plausible_signal(broker.at)})
     with main.connect() as db:
         for identity in ('already-one', 'already-two'):
             db.execute('INSERT INTO session_entry_allowances VALUES(?,?,?,?,?)',
-                       ('socrates', identity, '2026-09-22', broker.at.isoformat(), 'atomic_entry_claim'))
+                       ('range_reversal', identity, '2026-09-22', broker.at.isoformat(), 'atomic_entry_claim'))
     executor.tick({'BTC/USD': plausible_signal(broker.at)})
-    assert not broker.sent and main.session_entry_allowance(broker.at)['used'] == 2
+    assert not broker.sent and main.session_entry_allowance(broker.at)['families']['range_reversal']['used'] == 2
     assert 'two new entry attempts' in executor.message
+
+
+def test_socrates_attempts_do_not_consume_the_crypto_allowance(tmp_path):
+    executor, broker, crypto, main = runtime(tmp_path)
+    with main.connect() as db:
+        for identity in ('stock-one', 'stock-two'):
+            db.execute('INSERT INTO session_entry_allowances VALUES(?,?,?,?,?)',
+                       ('socrates', identity, '2026-09-22', broker.at.isoformat(), 'atomic_entry_claim'))
+    for _ in range(3):
+        executor.tick({'BTC/USD': plausible_signal(broker.at)})
+    assert broker.sent and broker.sent[0]['side'] == 'buy', executor.message
+    allowance = main.session_entry_allowance(broker.at)
+    assert allowance['families'] == {'socrates': {'used': 2, 'remaining': 0}, 'range_reversal': {'used': 1, 'remaining': 1}}
 
 
 def test_concurrent_replans_reserve_one_version_without_overwriting_each_other(tmp_path):
