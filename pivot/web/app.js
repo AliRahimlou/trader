@@ -1,6 +1,7 @@
 import {money, escape as esc, age, ago, sizeHint, settingsError, vixStatus, appStatus, releaseStatus, loggingStatus, strategyViews, leaderOverview, marketOverview, operationStatus, sessionReview, createDisplayClock} from './model.mjs';
 import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, portfolioStatus, strategySettingsMatch, cryptoQuantityLabel, cryptoHistoryMarkup, positionUnit, globalCryptoAlert, CRYPTO_MARKETS, cryptoWatchMarkup, cryptoReviewMarkup} from './strategy-families.mjs';
 import {dailyReviewView,dailyReviewMarkup,fetchDailyReview,previousReviewDay,reviewDay,validReviewDay} from './daily-review.mjs';
+import {chartWidth,defaultTheme,drawPriceChart,drawVixChart,levelsTableRows,chartStatus} from './chart.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -12,13 +13,55 @@ let strategySaving=false,rangeDirty=false,strategyError='',pendingStrategy=null,
 let cryptoRechecking=false,cryptoRecheckMessage='',cryptoRecheckCompleted=false;
 let liveReviewFingerprint=null,strategyReviewFingerprint=null;
 let dailySelectedDay=null,dailyHistory=null,dailyReviewLoading=false,dailyReviewError='',dailyReviewGeneration=0;
+// Look-left chart: display only. app.js fetches, sizes and hands data to chart.mjs; it never trades.
+let chartData=null,chartTimeframe='60',chartFetching=false,chartFrame=0;
+const CHART_TOKENS={bg:'--chart-bg',grid:'--chart-grid',text:'--chart-text',up:'--chart-up',down:'--chart-down',band:'--chart-band',bandEdge:'--chart-band-edge',event:'--chart-event',eventEdge:'--chart-event-edge',stop:'--chart-stop',target:'--chart-target',prev:'--chart-prev',vixZone:'--chart-vix-zone',vixEdge:'--chart-vix-edge',reaction:'--chart-reaction'};
+function chartTheme() {
+  const theme=defaultTheme(),styles=getComputedStyle(document.documentElement);
+  for(const [key,token] of Object.entries(CHART_TOKENS)){const value=styles.getPropertyValue(token).trim();if(value)theme[key]=value;}
+  return theme;
+}
+function sizeCanvas(canvas,height) {
+  const width=chartWidth(canvas.parentElement.clientWidth),ratio=Math.min(3,window.devicePixelRatio || 1);
+  canvas.style.width=`${width}px`;canvas.style.height=`${height}px`;
+  if(canvas.width!==Math.round(width*ratio)||canvas.height!==Math.round(height*ratio)){canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);}
+  const ctx=canvas.getContext('2d');ctx.setTransform(ratio,0,0,ratio,0,0);
+  return {ctx,width,height};
+}
+// Without canvas support (or a rendering document) the panel stays silent and never fetches.
+const chartSupported=()=>typeof $('qqq-chart')?.getContext==='function';
+function renderChart() {
+  if(!chartSupported())return;
+  const status=chartStatus(chartData,displayClock.now());
+  $('chart-status').textContent=status.text;$('chart-status').className=`help ${status.tone}`;
+  for(const id of ['chart-1h','chart-4h'])$(id).setAttribute('aria-pressed',String($(id).dataset.timeframe===chartTimeframe));
+  if($('socrates-family').hidden)return;
+  const theme=chartTheme();
+  const price=sizeCanvas($('qqq-chart'),300);
+  drawPriceChart(price.ctx,chartData,{timeframe:chartTimeframe,width:price.width,height:price.height,theme});
+  const vix=sizeCanvas($('vix-chart'),180);
+  drawVixChart(vix.ctx,chartData,{width:vix.width,height:vix.height,theme});
+  const rows=levelsTableRows(chartData?.levels,chartData?.reference);
+  $('levels-table').querySelector('tbody').innerHTML=rows.length?rows.map(row=>`<tr><td class="number">${esc(row.band)}</td><td>${esc(row.source)}</td><td>${esc(row.established)}</td><td class="number">${esc(row.touches)}</td><td class="number">${esc(row.distance)}</td></tr>`).join(''):
+    `<tr><td colspan="5" class="muted">${chartData?.available?'No established areas in the current analysis.':'Waiting for established areas.'}</td></tr>`;
+}
+function scheduleChartRender() { if(!chartSupported())return;cancelAnimationFrame(chartFrame);chartFrame=requestAnimationFrame(renderChart); }
+async function refreshChart() {
+  if(chartFetching||!chartSupported())return;chartFetching=true;
+  try {
+    const response=await fetch(new URL('chart',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});
+    const next=await response.json().catch(()=>null);
+    chartData=response.ok&&next&&next.available!==false?next:(next&&typeof next.detail==='string'?{available:false,detail:next.detail}:null);
+  } catch { chartData=null; }
+  finally { chartFetching=false;scheduleChartRender(); }
+}
 function permissionFingerprint() {
   const p=portfolioView(snapshot);
   return JSON.stringify({version:snapshot?.execution_policy?.version,globalOn:p.globalOn,families:p.families});
 }
 const LIVE_RECONCILE_MS=60000;
 function acceptSnapshot(next) { snapshot=next;displayClock.accept(next); }
-bindStrategyView(document,{onChange:()=>{renderStrategyFamilies();renderDailyReview();}});
+bindStrategyView(document,{onChange:()=>{renderStrategyFamilies();renderDailyReview();scheduleChartRender();}});
 function renderDailyReview() {
   const report=dailySelectedDay?dailyHistory:snapshot?.daily_review;
   const selected=$('strategy-view').value;
@@ -272,8 +315,8 @@ function render() {
 }
 async function refresh() {
   if(fetching||saving||toggling||strategySaving)return; fetching=true; const version=generation;
-  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling&&!strategySaving){acceptSnapshot(next);familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);render();}}
-  catch { if(version!==generation||saving||toggling||strategySaving)return; familyConnectionUnavailable=true;renderStrategyFamilies();if(snapshot)renderStrategyControls(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
+  try {const response=await fetch(new URL('snapshot',api),{cache:'no-store',signal:AbortSignal.timeout(8000)});if(!response.ok)throw Error(); const next=await response.json(); if(version===generation&&!saving&&!toggling&&!strategySaving){acceptSnapshot(next);familyConnectionUnavailable=false;reconcileLive(next);reconcileStrategies(next);render();refreshChart();}}
+  catch { if(version!==generation||saving||toggling||strategySaving)return; familyConnectionUnavailable=true;renderStrategyFamilies();if(snapshot)renderStrategyControls();chartData=null;scheduleChartRender(); $('status-title').textContent='App connection unavailable';$('status-text').textContent='Displayed information may be outdated. Reconnecting…';$('save-size').disabled=true;$('live-status').disabled=true;$('live-status').innerHTML='Live money <strong>Unknown</strong>';$('installed-version').textContent='Version check unavailable';$('deployment-status').textContent='Connection lost · reconnecting to verify the installed version.';document.querySelector('.release-badge').dataset.state='unknown';if($('logging-status')){$('logging-status').textContent='Unverified';$('logging-status').className='wait';$('logging-detail').textContent='Connection lost. Reconnecting to verify that checks are being saved.';} }
   finally{fetching=false;if(version!==generation&&!saving&&!toggling&&!strategySaving)refresh();}
 }
 async function changeLive(enabled) {
@@ -348,4 +391,6 @@ $('settings-form').addEventListener('submit',async event=>{
   catch(error){saveError=error.name==='TimeoutError'?'Save status is uncertain. Refresh before retrying.':error.message;}
   finally{saving=false;render();}
 });
+for(const id of ['chart-1h','chart-4h'])$(id).addEventListener('click',()=>{chartTimeframe=$(id).dataset.timeframe||'60';scheduleChartRender();});
+if(typeof window!=='undefined')window.addEventListener('resize',scheduleChartRender);
 refresh();setInterval(refresh,10000);
