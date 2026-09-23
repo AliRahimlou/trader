@@ -9,6 +9,7 @@ Every trade record names its traded 'symbol'; management never assumes QQQ.
 """
 from datetime import datetime, timezone, timedelta
 from contextlib import nullcontext
+from collections import deque
 from copy import deepcopy
 from decimal import ROUND_HALF_UP
 from hashlib import sha256
@@ -39,6 +40,10 @@ PARTIAL_ENTRY_CONFIRM_SECONDS = 30
 EXIT_CONFIRM_SECONDS = 30
 MANUAL_FLAT_CONFIRM_SECONDS = 30
 ORDER_NOT_FOUND_CONFIRM_SECONDS = 60
+# Live trade view (4.5.2): the price track keeps one mark per 15 seconds, about
+# 6.5 hours. Display only; these marks never decide an order.
+TRACK_SECONDS = 15
+TRACK_LIMIT = 1600
 # App interpretations, not video rules. The host clock has been observed about a
 # second behind Alpaca's; a broker or provider timestamp slightly in the local
 # future is still current. Positive staleness limits are unchanged.
@@ -329,6 +334,11 @@ class Executor:
         self._selected_entry_signal = None
         self._diagnostic_outcome = None
         self._submission_attempted = False
+        # Live trade view: the last quote the manager read for the open trade and a
+        # thinned price track since its entry. In memory only; never used to trade.
+        self._mark_lock = Lock()
+        self._mark = None
+        self._track = deque(maxlen=TRACK_LIMIT)
         try:
             self.execution_check = self.store.latest_execution_check()
         except Exception:
@@ -526,6 +536,26 @@ class Executor:
         if account.get('status') != 'ACTIVE' or any(account.get(k) is not False for k in
                 ('trading_blocked', 'account_blocked', 'trade_suspended_by_user')):
             raise Waiting('Alpaca account is not currently available for trading')
+
+    def _record_mark(self, trade, bid, ask, quote_at):
+        # Display only: a failure here must never delay a stop or target exit.
+        try:
+            now = self.now()
+            mark = {'trade_id': trade['id'], 'symbol': trade['symbol'], 'bid': str(bid), 'ask': str(ask),
+                    'quote_at': quote_at, 'at': now.isoformat()}
+            with self._mark_lock:
+                if self._track and self._track[-1]['trade_id'] != trade['id']:
+                    self._track.clear()
+                if not self._track or elapsed(self._track[-1]['at'], now) >= TRACK_SECONDS:
+                    self._track.append(mark)
+                self._mark = mark
+        except Exception:
+            logger.exception('Live trade mark could not be recorded; position management continues')
+
+    def live_marks(self):
+        """The latest management quote and the price track, copied for the live trade view."""
+        with self._mark_lock:
+            return deepcopy(self._mark), list(self._track)
 
     def snapshot(self):
         trade = self.store.active_trade()
@@ -1390,7 +1420,8 @@ class Executor:
             return
         try:
             self._gate('quote_read')
-            bid, ask = checked_quote(self.broker.quote(trade['symbol']), self.now(), trade['symbol'])
+            quote = self.broker.quote(trade['symbol'])
+            bid, ask = checked_quote(quote, self.now(), trade['symbol'])
         except (Waiting, FeedError):
             # Existing broker stop remains in place while quotes are unavailable.
             # For a new fill, place its known protective stop before waiting for quotes.
@@ -1401,11 +1432,13 @@ class Executor:
             # failure. If protection itself fails, its exception/gate wins.
             self._gate(failed_gate)
             raise
+        self._record_mark(trade, bid, ask, quote.get('t') if isinstance(quote, dict) else None)
         price = bid if trade['direction'] == 'long' else ask
         stop, target = decimal(trade['stop']), decimal(trade['target'])
-        reached = (price <= stop or price >= target) if trade['direction'] == 'long' else (price >= stop or price <= target)
+        stopped = price <= stop if trade['direction'] == 'long' else price >= stop
+        reached = stopped or (price >= target if trade['direction'] == 'long' else price <= target)
         if reached:
-            self._start_exit(trade, 'Stop or target reached; closing the held shares')
+            self._start_exit(trade, ('Stop price reached' if stopped else 'Target reached') + '; closing the held shares')
             self._exit(trade, position)
         elif not stop_order:
             self._protect(trade, position)

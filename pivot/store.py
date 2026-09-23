@@ -519,6 +519,20 @@ class Store:
             row = db.execute('SELECT finished,body FROM trades WHERE id=?', (identity,)).fetchone()
         return row is not None and not self._retryable_unsent_entry(row, identity)
 
+    def latest_filled_trade(self):
+        """The most recent finished trade whose entry bought shares (for the live trade card)."""
+        with self.connect() as db:
+            rows=db.execute('SELECT body FROM trades WHERE finished=1 ORDER BY rowid DESC LIMIT 20').fetchall()
+        for row in rows:
+            trade=json.loads(row[0])
+            seen=((trade.get('ops') or {}).get('entry') or {}).get('last_seen') or {}
+            try:
+                if float(seen.get('filled_qty') or 0) > 0:
+                    return trade
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def trade_results(self):
         from .performance import trade_result
         with self.connect() as db:

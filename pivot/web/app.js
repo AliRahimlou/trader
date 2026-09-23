@@ -3,6 +3,7 @@ import {bindStrategyView, rangeFamilyView, rangeFamilyMarkup, portfolioView, por
 import {readinessView,readinessAction,readinessMarkup,readinessKey,readinessTimeText,socratesTradeMarkup,SOCRATES_KEY_RULES} from './readiness.mjs';
 import {dailyReviewView,dailyReviewMarkup,fetchDailyReview,previousReviewDay,reviewDay,validReviewDay} from './daily-review.mjs';
 import {chartWidth,defaultTheme,drawPriceChart,drawVixChart,levelsTableRows,chartStatus} from './chart.mjs';
+import {liveTradeMarkup,liveTradeView,lastTradeMarkup,LIVE_POLL_MS} from './live-trade.mjs';
 const localPreview = location.port === '5173' && ['127.0.0.1','localhost'].includes(location.hostname);
 const api = localPreview ? new URL(`http://${location.hostname}:8011/api/`) : new URL('./api/',document.baseURI);
 const $ = id => document.getElementById(id);
@@ -15,6 +16,42 @@ let cryptoRechecking=false,cryptoRecheckMessage='',cryptoRecheckCompleted=false;
 let liveReviewFingerprint=null,strategyReviewFingerprint=null;
 let readinessRendered=null,readinessAnnounced='';
 let dailySelectedDay=null,dailyHistory=null,dailyReviewLoading=false,dailyReviewError='',dailyReviewGeneration=0;
+// Live trade card: display only. The snapshot carries it; while a trade is open a lighter
+// read refreshes it every few seconds. Nothing here can change a trade or an order.
+let liveView=null,liveServerAt=0,liveReceivedAt=0,liveFetching=false,liveRendered=null;
+function acceptLive(next) {
+  if(!next||typeof next!=='object'||!('live_trade' in next))return false;
+  const at=Date.parse(next.server_at);
+  if(Number.isFinite(at)&&at<liveServerAt)return false;
+  liveView={live_trade:next.live_trade||null,last_trade:next.last_trade||null,live_trade_error:next.live_trade_error||null};
+  liveServerAt=Number.isFinite(at)?at:liveServerAt;liveReceivedAt=Date.now();
+  return true;
+}
+function renderLiveTrade() {
+  const slot=$('live-trade');if(!slot)return;
+  const now=displayClock.now(),elapsed=Math.max(0,(Date.now()-liveReceivedAt)/1000),trade=snapshot?.execution?.trade;
+  const html=liveView?.live_trade?liveTradeMarkup(liveView.live_trade,{now,elapsed})
+    :liveView?.live_trade_error&&trade?socratesTradeMarkup(trade,liveView.live_trade_error)
+    :liveView?lastTradeMarkup(liveView.last_trade,{now})
+    :trade?socratesTradeMarkup(trade,snapshot.execution?.message):'';
+  if(html!==liveRendered){slot.innerHTML=html;liveRendered=html;}
+  slot.hidden=!html;
+  const view=liveView?.live_trade?liveTradeView(liveView.live_trade,{now,elapsed}):null;
+  document.title=view?`${view.pnl} · ${view.symbol} · Pivot`:'Pivot · Socrates';
+}
+async function refreshLive() {
+  if(liveFetching)return;liveFetching=true;
+  try {
+    const response=await fetch(new URL('live-trade',api),{cache:'no-store',signal:AbortSignal.timeout(5000)});
+    if(response.ok&&acceptLive(await response.json()))renderLiveTrade();
+  } catch {} finally { liveFetching=false; }
+}
+// While a trade is open: a fresh live read every few seconds and a countdown tick every second.
+function liveTick() {
+  if(!liveView?.live_trade&&!snapshot?.execution?.trade)return;
+  if(Date.now()-liveReceivedAt>=LIVE_POLL_MS)refreshLive();
+  renderLiveTrade();
+}
 // Look-left chart: display only. app.js fetches, sizes and hands data to chart.mjs; it never trades.
 let chartData=null,chartTimeframe='60',chartFetching=false,chartFrame=0;
 const CHART_TOKENS={bg:'--chart-bg',grid:'--chart-grid',text:'--chart-text',up:'--chart-up',down:'--chart-down',band:'--chart-band',bandEdge:'--chart-band-edge',event:'--chart-event',eventEdge:'--chart-event-edge',stop:'--chart-stop',target:'--chart-target',prev:'--chart-prev',vixZone:'--chart-vix-zone',vixEdge:'--chart-vix-edge',reaction:'--chart-reaction',labelBg:'--chart-label-bg'};
@@ -68,7 +105,7 @@ function permissionFingerprint() {
   return JSON.stringify({version:snapshot?.execution_policy?.version,globalOn:p.globalOn,families:p.families});
 }
 const LIVE_RECONCILE_MS=60000;
-function acceptSnapshot(next) { snapshot=next;displayClock.accept(next); }
+function acceptSnapshot(next) { snapshot=next;displayClock.accept(next);if(!acceptLive(next)&&!('live_trade' in (next||{})))liveView=null; }
 bindStrategyView(document,{onChange:()=>{renderStrategyFamilies();renderDailyReview();scheduleChartRender();}});
 function renderDailyReview() {
   const report=dailySelectedDay?dailyHistory:snapshot?.daily_review;
@@ -210,9 +247,7 @@ function renderReadiness() {
   }else{const stamp=content.querySelector?.('.readiness-time');if(stamp)stamp.textContent=readinessTimeText(view.checkedAt);}
   announceReadiness(view);
   $('socrates-readiness').dataset.status=view.status;
-  const trade=snapshot.execution?.trade;
-  $('socrates-trade').innerHTML=trade?socratesTradeMarkup(trade,snapshot.execution?.message):'';
-  $('socrates-trade').hidden=!trade;
+  renderLiveTrade();
 }
 // A lost connection must never leave an old "Ready" on screen.
 function renderReadinessUnavailable() {
@@ -490,3 +525,4 @@ $('settings-form').addEventListener('submit',async event=>{
 for(const id of ['chart-1h','chart-4h'])$(id).addEventListener('click',()=>{chartTimeframe=$(id).dataset.timeframe||'60';scheduleChartRender();});
 if(typeof window!=='undefined')window.addEventListener('resize',scheduleChartRender);
 refresh();setInterval(refresh,10000);
+setInterval(liveTick,1000);

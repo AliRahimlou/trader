@@ -52,6 +52,8 @@ SCENARIOS = {
     'review': 'Rules not accepted after an update (Live money Off, review required)',
     'ready': 'A SETUP_READY long during the session',
     'psq': 'An open PSQ short-proxy position with stop and target',
+    'down': 'The open PSQ position while it is losing (live trade card in red)',
+    'sold': 'No open trade; the last trade sold at the session close today',
     'paused': 'Socrates paused by the app after a rejected order',
     'closed': 'Market closed',
 }
@@ -231,6 +233,42 @@ class FixtureService(Service):
             self._contract(result, now, review)
         return result
 
+    def live_trade(self, state=None):
+        """Fixture live view: the real builder over a synthetic PSQ trade whose price drifts with the clock."""
+        import math
+        from pivot.live_trade import build_live_trade
+        now = datetime.now(timezone.utc)
+        entered = now - timedelta(minutes=127)
+        if self.scenario == 'sold':
+            return {'live_trade': None, 'live_trade_error': None, 'last_trade': {
+                'trade_id': 'fixture', 'label': 'Socrates short via PSQ (inverse QQQ)', 'symbol': 'PSQ', 'quantity': '0.402576',
+                'entry_price': '37.26', 'entered_at': iso(entered), 'exit_price': '37.3900', 'completed_at': iso(now - timedelta(minutes=3)),
+                'gross_pnl': '0.05', 'percent': '0.35', 'status': 'verified_gross',
+                'exit_reason': 'Closing the position before the session ends', 'stop': '36.71', 'target': '38.02'}}
+        if self.scenario not in ('psq', 'down'):
+            return {'live_trade': None, 'last_trade': None, 'live_trade_error': None}
+        sign = 1 if self.scenario == 'psq' else -1
+        def bid(at):
+            minutes = (at - entered).total_seconds() / 60
+            return round(37.26 + sign * (0.0025 * minutes + 0.06 * math.sin(minutes / 6)), 2)
+        trade = {**self._trade(), 'id': 'fixture-psq', 'stage': 'open', 'filled_qty': '0.402576', 'created_at': iso(entered),
+                 'ops': {'entry': {'state': 'attempted', 'payload': {'client_order_id': 'fx-entry'},
+                                   'last_seen': {'status': 'filled', 'filled_qty': '0.402576', 'filled_avg_price': '37.26',
+                                                 'filled_at': iso(entered + timedelta(seconds=1))}},
+                         'stop': {'state': 'attempted', 'payload': {'client_order_id': 'fx-stop'},
+                                  'last_seen': {'status': 'new', 'filled_qty': '0'}}}}
+        track = [{'trade_id': 'fixture-psq', 'symbol': 'PSQ', 'bid': str(bid(entered + timedelta(seconds=15 * i))),
+                  'at': iso(entered + timedelta(seconds=15 * i))} for i in range(int((now - entered).total_seconds() // 15))]
+        latest = bid(now)
+        mark = {'trade_id': 'fixture-psq', 'symbol': 'PSQ', 'bid': str(latest), 'ask': f'{latest + 0.01:.2f}',
+                'quote_at': iso(now - timedelta(seconds=2)), 'at': iso(now - timedelta(seconds=2))}
+        clock = {'is_open': True, 'timestamp': iso(now), 'next_close': iso(now + timedelta(minutes=88))}
+        live = build_live_trade(trade, mark=mark, track=track, clock=clock, orders=[{'client_order_id': 'fx-stop', 'status': 'new'}],
+                                signal_quote={'bp': round(self.reference - sign * 0.6, 2), 't': iso(now)},
+                                message='Managing PSQ (inverse-ETF proxy for the QQQ short): stop $36.71, target $38.02. Broker protection: new.',
+                                now=now)
+        return {'live_trade': live, 'last_trade': None, 'live_trade_error': None}
+
     def _message(self, review):
         if review:
             return 'Live money is off. Analysis continues.'
@@ -241,7 +279,7 @@ class FixtureService(Service):
                 'closed': 'The regular market session is closed.'}.get(self.scenario, '')
 
     def _trade(self):
-        if self.scenario != 'psq':
+        if self.scenario not in ('psq', 'down'):
             return None
         return {'stage': 'protected', 'symbol': 'PSQ', 'direction': 'long', 'signal_symbol': 'QQQ', 'signal_direction': 'short',
                 'proxy': 'inverse_etf', 'amount': '15.00', 'stop': '36.71', 'target': '38.02', 'reason': 'Four-hour break & retest short',
@@ -255,7 +293,7 @@ class FixtureService(Service):
         day = now.astimezone(ET).date()
         next_open = session_time(day + timedelta(days=1 if day.weekday() < 4 else 7 - day.weekday()), 9, 30)
         positions = orders = []
-        if self.scenario == 'psq':
+        if self.scenario in ('psq', 'down'):
             positions = [{'symbol': 'PSQ', 'qty': '0.4025', 'side': 'long', 'asset_class': 'us_equity',
                           'market_value': '15.04', 'unrealized_pl': '0.04'}]
             orders = [{'symbol': 'PSQ', 'side': 'sell', 'qty': '0.4025', 'type': 'stop', 'status': 'new'}]
@@ -382,8 +420,8 @@ class FixtureService(Service):
             item('entry_allowance', 'Entries left today', 'ok' if allowance['remaining'] else 'fail',
                  f"{allowance['remaining']} of 2 Socrates attempts left this session."),
             item('deployment', 'App updates', 'ok', 'No update is holding entries.'),
-            item('exposure', 'Positions and orders', 'info' if scenario == 'psq' else 'ok',
-                 'Managing one PSQ position; no new entry until it closes.' if scenario == 'psq' else
+            item('exposure', 'Positions and orders', 'info' if scenario in ('psq', 'down') else 'ok',
+                 'Managing one PSQ position; no new entry until it closes.' if scenario in ('psq', 'down') else
                  'No other QQQ or PSQ position or order.'),
             item('workers', 'App workers', 'ok', 'Account, data and order workers are running.'),
             item('setup', 'Current setup', 'ok' if scenario == 'ready' else 'info',
@@ -396,7 +434,7 @@ class FixtureService(Service):
         headline = {'blocked': 'Socrates cannot place orders until you act.',
                     'ready': 'Socrates has a ready setup and is checking the broker quote.',
                     'waiting': 'Market closed. Socrates will watch again at the next open.' if closed else
-                    'Managing an open PSQ position.' if scenario == 'psq' else
+                    'Managing an open PSQ position.' if scenario in ('psq', 'down') else
                     'Everything is set. Socrates is waiting for a setup.'}[status]
         next_action = ('Accept the updated Socrates rules: click Live money' if review else
                        'Check Alpaca, then turn Socrates back on' if scenario == 'paused' else None)

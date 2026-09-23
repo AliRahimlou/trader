@@ -49,7 +49,7 @@ test('view selection persists locally while every execution value stays unchange
     range_reversal:{enabled:true,target_dollars:'5.00',symbols:['BTC/USD'],execution_available:true}};
   const storage={getItem:key=>saved.get(key),setItem:(key,value)=>{saved.set(key,value);writes.push({key,value});}};
   const context=vm.createContext({URL,Date,createDisplayClock,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>storage}),
-    rangeFamilyView,rangeFamilyMarkup,portfolioView,cryptoWatchMarkup,cryptoReviewMarkup,document:h.document,location:{hostname:'example.test',port:''},
+    rangeFamilyView,rangeFamilyMarkup,portfolioView,cryptoWatchMarkup,cryptoReviewMarkup,document:h.document,location:{hostname:'example.test',port:''},setInterval(){},
     fetch:(...args)=>{requests.push(args);throw Error('No network expected');}});
   vm.runInContext(source+`\nsnapshot=${JSON.stringify(initial)};globalThis.state=()=>({snapshot,dirty,saving,toggling,pendingLive});globalThis.refreshRange=renderStrategyFamilies;`,context);
   const before=JSON.stringify(context.state());

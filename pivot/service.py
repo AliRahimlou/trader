@@ -623,7 +623,34 @@ class Service:
                           'A rejected, replaced or unreconciled QQQ order pauses Socrates only (the same durable change as turning it off). Global Live and the crypto strategy are unchanged; enable Socrates again after reviewing Alpaca.',
                           *['Socrates: ' + line for line in POLICY['summary']]]}, version='video-execution-v5', runtime='Video strategies · owner-controlled execution', legacy_loaded=False)
         result['socrates_readiness'] = self.socrates_readiness(result)
+        result.update(self.live_trade(result))
         return result
+
+    def live_trade(self, state=None):
+        """The open Socrates trade as the owner watches it, plus the last finished one; read-only.
+
+        Uses only what the workers already hold: the durable trade record, the
+        executor's latest management quote, and the account worker's positions,
+        orders, clock and QQQ quote. No broker call is made here.
+        """
+        from .live_trade import build_live_trade, build_last_trade
+        if state is None:
+            with self.lock:
+                state = {key: deepcopy(self.state.get(key)) for key in ('positions', 'orders', 'clock', 'quote')}
+        live, last = None, None
+        try:
+            if self.executor:
+                mark, track = self.executor.live_marks()
+                live = build_live_trade(self.store.active_trade(), mark=mark, track=track,
+                                        positions=state.get('positions'), orders=state.get('orders'),
+                                        clock=state.get('clock'), signal_quote=state.get('quote'),
+                                        message=self.executor.message)
+            last = build_last_trade(self.store.latest_filled_trade())
+        except Exception:
+            logger.exception('Live trade view could not be built')
+            return {'live_trade': None, 'last_trade': None,
+                    'live_trade_error': 'The live trade view is unavailable; the trade is still managed. Check Alpaca.'}
+        return {'live_trade': live, 'last_trade': last, 'live_trade_error': None}
 
     def socrates_readiness(self, result, now=None):
         """Owner checklist for Socrates orders, built from this snapshot; read-only.
