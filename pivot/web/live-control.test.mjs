@@ -20,7 +20,7 @@ function harness(enabled=false) {
   };
   const context=vm.createContext({URL,portfolioView,createDisplayClock,bindStrategyView:(document,options)=>bindStrategyView(document,{...options,storage:()=>null}),location:{port:'',hostname:'example.test'},
     document:{baseURI:'https://example.test/pivot/',getElementById:element,querySelector:()=>badge},
-    Date:{now:()=>now},AbortSignal:{timeout:milliseconds=>({milliseconds})},
+    Date:{now:()=>now},AbortSignal:{timeout:milliseconds=>({milliseconds})},setInterval(){},
     fetch:(url,options)=>new Promise((resolve,reject)=>calls.push({url:String(url),options,resolve,reject}))});
   vm.runInContext(source+`\nrenderStrategyFamilies=()=>{};renderStrategyControls=()=>{};render=()=>{ $('status-text').textContent=liveError || 'Current app status'; };
     snapshot={live_enabled:${enabled},execution_policy:{version:'test-policy'},settings:{target_dollars:'5.00'}};

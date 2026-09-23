@@ -256,6 +256,14 @@ def create_app(service, background=True, hosting=None, deployment_lock=None, dep
     def snapshot():
         return decorate_snapshot(service.snapshot())
 
+    @app.get('/api/live-trade')
+    def live_trade():
+        # Read-only live view of the open Socrates trade, cheap enough for a few-second poll.
+        view = getattr(service, 'live_trade', None)
+        if view is None:
+            return JSONResponse({'detail': 'The live trade view is not available in this runtime'}, status_code=503)
+        return {**view(), 'server_at': datetime.now(timezone.utc).isoformat()}
+
     @app.get('/api/chart')
     def chart():
         # Read-only look-left data for the Socrates view; the same origin and

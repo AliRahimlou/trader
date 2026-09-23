@@ -33,6 +33,8 @@
 <main>
 <p id="strategy-view-note" class="strategy-view-note" role="status">Showing Socrates. Changing this view does not change trading.</p>
 
+<div id="live-trade" class="live-trade-slot" hidden></div>
+
 <section id="socrates-readiness" class="card hero" aria-labelledby="readiness-title">
   <div class="hero-title-row"><h1 id="readiness-title">Socrates</h1><span class="hero-sub">Nasdaq levels · QQQ for longs · PSQ for shorts</span></div>
   <p id="readiness-announce" class="visually-hidden" role="status" aria-live="polite"></p>
@@ -81,7 +83,6 @@
     <section id="socrates-family" aria-labelledby="watch-title">
       <div class="section-heading"><h2 id="watch-title">What Socrates is watching</h2><span>QQQ · two entry methods</span></div>
       <p id="method-timing" class="help"></p>
-      <div id="socrates-trade" hidden></div>
       <div id="strategy-cards"></div>
       <section id="look-left" class="card look-left" aria-labelledby="look-left-title">
         <div class="section-heading"><h3 id="look-left-title">Look left · QQQ levels</h3><div class="timeframe-toggle" role="group" aria-label="QQQ chart timeframe"><button id="chart-1h" class="secondary" type="button" data-timeframe="60" aria-pressed="true">1 hour</button><button id="chart-4h" class="secondary" type="button" data-timeframe="240" aria-pressed="false">4 hour</button></div></div>
