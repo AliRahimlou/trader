@@ -16,6 +16,8 @@ COPY pivot ./pivot/
 COPY deploy ./deploy/
 COPY research ./research/
 COPY backend_server.py ./
+# Repository-wide test settings (4.5 scenario tests keep their rules unless marked rules46).
+COPY conftest.py ./
 RUN python -m pytest pivot/tests deploy/tests research/tests -q
 
 FROM python:3.12-slim-bookworm AS runtime
