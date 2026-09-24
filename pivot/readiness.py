@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from .models import MAG7, timestamp
+from . import feature_flags
 
 NEW_YORK = ZoneInfo('America/New_York')
 ITEM_IDS = ('live_permission', 'strategy_enabled', 'account', 'buying_power', 'instrument_qqq',
@@ -201,7 +202,15 @@ def _market(inputs, now):
             if (closes - now).total_seconds() <= ENTRY_CUTOFF_SECONDS:
                 return _item('market_session', label, 'info',
                              f'The market closes at {_clock_text(closes)}; no new entries in the final 30 minutes.'), True, True
-            return _item('market_session', label, 'ok', f'The market is open until {_clock_text(closes)}.'), True, False
+            window = feature_flags.socrates_rules()['entry_window']
+            local = now.astimezone(NEW_YORK).time()
+            if window and not window[0] <= local < window[1]:
+                when = 'from 10:00 AM' if local < window[0] else 'at 10:00 AM next trading session'
+                return _item('market_session', label, 'info',
+                             f'The market is open until {_clock_text(closes)}. New Socrates entries only 10:00 AM–12:00 PM ET; '
+                             f'next window {when}. Open positions keep their exits.'), True, 'window'
+            return _item('market_session', label, 'ok', f'The market is open until {_clock_text(closes)}.'
+                         + (' New entries until 12:00 PM ET.' if window else '')), True, False
         return _item('market_session', label, 'info',
                      f'The market is closed. Next open: {_clock_text(clock["next_open"], with_day=True)}.'), False, False
     except (KeyError, TypeError, ValueError, OverflowError):
@@ -341,6 +350,10 @@ def _setup(inputs):
     if setup['state'] == 'SETUP_READY' and inputs.get('setup_consumed') is True:
         # The executor never uses an event twice (traded, attempted, rejected or uncertain).
         return _item('setup', label, 'info', 'This setup was already traded or attempted; waiting for the next one.'), False
+    candidates = setup.get('entry_candidates', [setup]) if isinstance(setup.get('entry_candidates', [setup]), list) else [setup]
+    if setup['state'] == 'SETUP_READY' and not any(feature_flags.socrates_tradable(c) for c in candidates):
+        return _item('setup', label, 'info', 'A short setup is ready, but Socrates trades longs (QQQ) only in this release; '
+                     'waiting for a long setup.'), False
     if setup['state'] == 'SETUP_READY':
         direction = 'long QQQ' if setup.get('direction') == 'long' else 'short (bought as PSQ)'
         method = METHODS.get(setup.get('strategy_id'), 'marked level')
@@ -359,6 +372,8 @@ def _no_entry_headline(inputs, cutoff):
     if allowance.get('status') == 'available' and isinstance(family, dict) and type(family.get('remaining')) is int \
             and family['remaining'] <= 0:
         return 'No new Socrates entries today: both attempts are used.'
+    if cutoff == 'window':
+        return 'New Socrates entries only between 10:00 AM and 12:00 PM ET.'
     if cutoff:
         return 'No new Socrates entries in the final 30 minutes of the session.'
     gate = inputs.get('deployment_gate')

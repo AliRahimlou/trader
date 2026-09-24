@@ -19,18 +19,18 @@ test('partial entry incident remains visible until durable reconciliation',()=>{
   partial.resolved_at=new Date(now+30000).toISOString();
   assert.equal(operationStatus(state,now+30000).incident,'');
 });
-test('direction note explains the PSQ short proxy and fractional purchases without raising the target',()=>{
+test('direction note says 4.6 trades longs only and explains fractional purchases without raising the target',()=>{
   const state={settings:{target_dollars:'5.00'},quote_health:{ask:700}};
   const note=operationStatus(state).directionNote;
-  assert.match(note,/Short setups buy PSQ, the inverse Nasdaq-100 ETF/);
+  assert.match(note,/Long setups buy QQQ/);assert.match(note,/Short setups are recorded but not traded/);
   assert.match(note,/\$5\.00 buys a fraction of a share/);
   assert.doesNotMatch(note,/whole share|cannot open a short/);
   assert.equal(state.settings.target_dollars,'5.00');
   assert.doesNotMatch(operationStatus({...state,quote_health:{}}).directionNote,/fraction of a share/);
 });
-test('timing note carries the 4.5 rules, not the retired same-day windows',()=>{
+test('timing note carries the 4.6 rules, not the retired same-day windows',()=>{
   const note=operationStatus({}).timingNote;
-  assert.match(note,/end of the next session/);assert.match(note,/within 0\.4%/);assert.match(note,/last 30 minutes/);
+  assert.match(note,/end of the next session/);assert.match(note,/within 0\.4%/);assert.match(note,/10:00 AM–12:00 PM ET/);
   assert.doesNotMatch(note,/11:30|180|15-minute/);
 });
 test('unconfirmed exit remains prominent after Live pauses and across snapshots until resolved',()=>{
@@ -42,11 +42,10 @@ test('unconfirmed exit remains prominent after Live pauses and across snapshots 
   assert.equal(operationStatus(state,now).incident,'');
   assert.equal(operationStatus({...state,execution:{trade:null}},now).incident,'');
 });
-test('account shorting restriction remains visible even with a whole-share target',()=>{
+test('direction note is the same whatever the account shorting permission (4.6 trades longs only)',()=>{
   const state={account:{shorting_enabled:false},settings:{target_dollars:'800'},quote_health:{ask:700}};
-  assert.match(operationStatus(state).directionNote,/disabled on this Alpaca account/);
-  assert.doesNotMatch(operationStatus({...state,account:{shorting_enabled:true}}).directionNote,/disabled/);
-  assert.doesNotMatch(operationStatus({...state,account:{}}).directionNote,/disabled/);
+  assert.equal(operationStatus(state).directionNote,operationStatus({...state,account:{shorting_enabled:true}}).directionNote);
+  assert.doesNotMatch(operationStatus(state).directionNote,/buy PSQ/);
 });
 test('historical funnel preserves distinct-event counts and partial-history warning',()=>{
   const value=sessionReview({session_review:{status:'available',events_seen:3,checkpoints:70,

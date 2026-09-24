@@ -729,8 +729,11 @@ class Service:
         if not isinstance(candidates, list) or not candidates:
             return False
         try:
-            return all(isinstance(candidate, dict) and candidate.get('event_id')
-                       and self.store.entry_consumed(Executor._event_key(candidate)) for candidate in candidates)
+            tradable = [candidate for candidate in candidates if isinstance(candidate, dict)
+                        and feature_flags.socrates_tradable(candidate)]
+            return all(candidate.get('event_id')
+                       and any(self.store.entry_consumed(key) for key in Executor.event_keys(candidate))
+                       for candidate in tradable)
         except Exception:
             return False
 

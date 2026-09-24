@@ -436,12 +436,11 @@ def test_vix_buying_from_its_base_confirms_a_nasdaq_short_when_no_swing_pivot_ar
 
 def test_policy_text_states_the_video_aligned_rules_and_the_other_agents_lines():
     assert ANALYSIS_VERSION == 'nasdaq-video-interpretation-v5'
-    assert POLICY_VERSION == 'nasdaq-qqq-execution-v7-video-aligned' == POLICY['version']
+    assert POLICY_VERSION == 'nasdaq-qqq-execution-v8-socrates-4-6' == POLICY['version']
     text = ' '.join(POLICY['summary'])
-    assert ('Short setups are executed by buying PSQ, the ProShares inverse (−1x) Nasdaq-100 ETF, with the stop and '
-            'target translated by the same percentage distances, measured from the live QQQ bid at entry to the QQQ stop '
-            'and target levels; this is an instrument translation because the account '
-            'cannot short. PSQ tracks −1x the DAILY move of the Nasdaq-100 and is held intraday only.') in POLICY['summary']
+    # 4.6: shorts are recorded but not traded by default; when re-enabled they still execute through PSQ.
+    assert 'a short is executed by buying PSQ, the ProShares inverse (−1x) Nasdaq-100 ETF' in text
+    assert 'PSQ is held intraday only' in text and 'previous-day-sweep shorts still never trade' in text
     assert 'Four-hour areas now include the afternoon (13:30–16:00) bucket.' in text
     for phrase in ('broken through or touched more than once', 'confirmed four-hour swing highs and lows',
                    'second nonadjacent interaction', '16 established areas nearest the current price',

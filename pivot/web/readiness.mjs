@@ -116,8 +116,8 @@ export const SOCRATES_KEY_RULES=[
   'Levels: four-hour swing highs and lows touched at least twice, plus the previous day’s high and low.',
   'Setup: an hourly break of a level, then a return to it. The break stays valid until the end of the next session, and the entry must be at the level (within 0.4%).',
   'Direction: at least 4 of the 7 tech leaders agree (at most 1 against) within 60 minutes, and the actual VIX turns the opposite way at its own level.',
-  'Trade: the target must be at least as far as the stop (1R minimum). Longs buy QQQ; shorts buy PSQ, the inverse ETF, and close the same day.',
-  'Limits: one Socrates position at a time, two entry attempts per New York session, no new entries in the last 30 minutes.',
+  'Trade: longs only (QQQ). The setup needs a level at least as far as the stop (1R minimum); profit is taken at today’s open or the next key level at least 0.20% away. Skipped if the stop is more than 1.5% away. Closed the same day.',
+  'Limits: new entries only 10:00 AM–12:00 PM ET, one Socrates position at a time, two entry attempts per New York session, no new entries in the last 30 minutes.',
 ];
 
 const price=value=>{const n=Number(value);return value!==null&&value!==''&&Number.isFinite(n)&&n>0?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(n):'—';};

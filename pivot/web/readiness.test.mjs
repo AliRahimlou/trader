@@ -152,9 +152,9 @@ test('the open trade card explains the PSQ short proxy with its own stop and tar
   assert.equal(socratesTradeMarkup(null),'');
 });
 
-test('the Live dialog summary carries the 4.5 rules, not the retired ones',()=>{
+test('the Live dialog summary carries the 4.6 rules, not the retired ones',()=>{
   const text=SOCRATES_KEY_RULES.join(' ');
-  for(const rule of [/4 of the 7/,/60 minutes/,/end of the next session/,/within 0\.4%/,/1R minimum/,/PSQ/])assert.match(text,rule);
+  for(const rule of [/4 of the 7/,/60 minutes/,/end of the next session/,/within 0\.4%/,/1R minimum/,/longs only \(QQQ\)/,/10:00 AM–12:00 PM ET/,/today’s open/,/0\.20% away/,/1\.5% away/])assert.match(text,rule);
   assert.doesNotMatch(text,/5 of 7|five of seven|180|15-minute reaction/i);
 });
 

@@ -81,7 +81,7 @@ export function liveTradeView(live,{now=Date.now(),elapsed=0}={}) {
     value:pnl&&num(entry.cost)!==null&&num(pnl.dollars)!==null?price(num(entry.cost)+num(pnl.dollars)):'—',
     progress:num(live.progress),entryAt,levels:{stop:stopLevel,target:targetLevel,entry:entryPrice},
     stopPrice:price(stop?.price),targetPrice:price(target?.price),
-    target:target?{price:price(target.price),result:signedMoney(target.result_if_hit),percent:signedPercent(target.result_percent),
+    target:target?{price:price(target.price),source:text(target.source),result:signedMoney(target.result_if_hit),percent:signedPercent(target.result_percent),
       away:num(target.distance_percent)===null?'':num(target.distance_percent)<=0?'reached':`${Math.abs(num(target.distance_percent)).toFixed(2)}% away`}:null,
     stop:stop?{price:price(stop.price),result:signedMoney(stop.result_if_hit),percent:signedPercent(stop.result_percent),
       away:num(stop.distance_percent)===null?'':num(stop.distance_percent)<=0?'reached':`${Math.abs(num(stop.distance_percent)).toFixed(2)}% away`,
@@ -124,7 +124,7 @@ function ladder(view) {
 export function liveTradeMarkup(live,options={}) {
   const view=liveTradeView(live,options);if(!view)return '';
   const plan=[];
-  if(view.target)plan.push(`<li class="plan-target"><div><b>Target ${esc(view.target.price)}</b><span>${esc(view.target.result)} (${esc(view.target.percent)}) if reached${view.target.away?` · ${esc(view.target.away)}`:''}</span></div>
+  if(view.target)plan.push(`<li class="plan-target"><div><b>Target ${esc(view.target.price)}${view.target.source?` · ${esc(view.target.source)}`:''}</b><span>${esc(view.target.result)} (${esc(view.target.percent)}) if reached${view.target.away?` · ${esc(view.target.away)}`:''}</span></div>
     <small>The app sells at market as soon as the ${esc(view.symbol)} bid reaches the target. It checks every 5 seconds.</small></li>`);
   if(view.stop)plan.push(`<li class="plan-stop"><div><b>Stop ${esc(view.stop.price)}</b><span>${esc(view.stop.result)} (${esc(view.stop.percent)}) if hit${view.stop.away?` · ${esc(view.stop.away)}`:''}</span></div>
     <small>A stop order at Alpaca sells automatically if the price falls to the stop. Status: <span class="${view.stop.working?'ok':'wait'}">${esc(view.stop.order)}</span>.</small></li>`);
