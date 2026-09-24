@@ -51,6 +51,7 @@ Build the completed first four-hour crypto range (gap-tolerant since 4.4.0, with
 - [Detailed 4H Range Reversal source review and precise observation rules](docs/research/range-reversal-video-20260919.md)
 - [Precisely sourced current methods and research alternatives](docs/research/current-method-specifications.md)
 - [Isolated broker-paper commissioning](docs/research/paper-commissioning.md)
+- [Verified-trader leaderboards (Kinfo and others): what profitable traders' records suggest for our setups](docs/research/verified-trader-leaderboards-20260924.md)
 
 ## Run locally
 
