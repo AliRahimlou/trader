@@ -54,14 +54,14 @@ export function operationStatus(snapshot, now=Date.now()) {
   const target=Number(snapshot.settings?.target_dollars);
   const smallTarget=Number.isFinite(price)&&price>0&&Number.isFinite(target)&&target>0&&target<price;
   // 4.5: a short setup buys PSQ, the inverse ETF, so no QQQ short (and no whole share) is needed.
-  const directionNote=`Long setups buy QQQ. Short setups buy PSQ, the inverse Nasdaq-100 ETF, and close the same day.${smallTarget?` ${money(target)} buys a fraction of a share of either.`:''} The purchase amount is not the amount at risk; the stop decides the loss.`;
+  const directionNote=`Long setups buy QQQ and close the same day. Short setups are recorded but not traded in this release.${smallTarget?` ${money(target)} buys a fraction of a share.`:''} The purchase amount is not the amount at risk; the stop decides the loss.`;
   return {
     workerLabel:!health?'Checking':health.ready?'Running':issues.some(row=>['stalled','stopped','error'].includes(row.status))?'Needs attention':'Starting',
     workerDetail:workers.map(row=>`${row.name}: ${row.status.replaceAll('_',' ')}`).join(' · '),
     incident:activeExit?'Exit needs attention: broker cancellation or the remaining exit is unconfirmed. New entries are paused. Check the QQQ position and orders in Alpaca. The app continues reconciliation without sending a competing order.':activePartial?`Partial entry needs attention: ${partial.filled_qty || 'some'} shares filled while cancellation is unconfirmed. New entries are paused. Check the position and orders in Alpaca.`:'',
     archiveLabel:archiveCurrent?'Recording inputs':archive?.status==='unavailable'?'Needs attention':'Waiting for inputs',
-    directionNote:directionNote+(snapshot.account?.shorting_enabled===false?' Short selling is disabled on this Alpaca account, which is why shorts use PSQ.':''),
-    timingNote:'Checks run on completed hourly candles. A break stays valid until the end of the next session, and the entry must be at the level (within 0.4%). No new entries in the last 30 minutes of the session; open positions close 5 minutes before the close.',
+    directionNote,
+    timingNote:'Checks run on completed hourly candles. New entries only 10:00 AM–12:00 PM ET. A break stays valid until the end of the next session, and the entry must be at the level (within 0.4%). Open positions close 5 minutes before the close.',
   };
 }
 

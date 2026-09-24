@@ -26,7 +26,7 @@ test('the card says how much the trade is up, where it sells and when',()=>{
   assert.equal(view.pnl,'+$0.15');assert.equal(view.pnlDetail,'+1.00% · +1.00R');
   assert.equal(view.now,'$35.35');assert.equal(view.nowLabel,'Now (bid)');assert.equal(view.cost,'$15.00');assert.equal(view.value,'$15.15');
   assert.match(view.bought,/^Bought 0\.428571 PSQ at \$35\.00 · 10:32 AM ET$/);
-  assert.deepEqual(view.target,{price:'$35.70',result:'+$0.30',percent:'+2.00%',away:'0.99% away'});
+  assert.deepEqual(view.target,{price:'$35.70',source:'',result:'+$0.30',percent:'+2.00%',away:'0.99% away'});
   assert.equal(view.stop.result,'−$0.15');assert.equal(view.stop.away,'1.98% away');assert.ok(view.stop.working);
   assert.deepEqual(view.close,{at:'3:55 PM ET',left:'in 1 h 25 min'});
   assert.equal(view.updated,'Price just now');assert.equal(view.stale,false);

@@ -27,6 +27,9 @@ def main():
     if config.get('PIVOT_CRYPTO_PAUSED') is not None:
         # The crypto pause flag is read at call time by every worker; .env is the owner's override surface.
         os.environ.setdefault('PIVOT_CRYPTO_PAUSED', config['PIVOT_CRYPTO_PAUSED'])
+    if config.get('PIVOT_SOCRATES_SHORTS_LIVE') is not None:
+        # 4.6 trades Socrates longs only; PIVOT_SOCRATES_SHORTS_LIVE=1 in .env re-enables PSQ shorts.
+        os.environ.setdefault('PIVOT_SOCRATES_SHORTS_LIVE', config['PIVOT_SOCRATES_SHORTS_LIVE'])
     hosting = Hosting.from_values(config)
     if args.host == '0.0.0.0' and not hosting.public_origin:
         parser.error('--host 0.0.0.0 requires PUBLIC_ORIGIN and an authenticated reverse proxy')

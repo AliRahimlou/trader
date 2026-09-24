@@ -36,7 +36,7 @@
 <div id="live-trade" class="live-trade-slot" hidden></div>
 
 <section id="socrates-readiness" class="card hero" aria-labelledby="readiness-title">
-  <div class="hero-title-row"><h1 id="readiness-title">Socrates</h1><span class="hero-sub">Nasdaq levels · QQQ for longs · PSQ for shorts</span></div>
+  <div class="hero-title-row"><h1 id="readiness-title">Socrates</h1><span class="hero-sub">Nasdaq levels · QQQ longs · 10 AM–12 PM ET</span></div>
   <p id="readiness-announce" class="visually-hidden" role="status" aria-live="polite"></p>
   <div id="readiness-content"><p class="readiness-headline">Checking whether Socrates can trade…</p></div>
 </section>
@@ -130,8 +130,8 @@
     <li><b>Wait for a break and a return.</b> An hourly candle closes through a level, then price comes back to it. The break stays valid until the end of the next session. The entry must be at the level (within 0.4%).</li>
     <li><b>Ask the leaders.</b> At least 4 of the 7 tech leaders react at their own levels in the same direction, at most 1 against, within 60 minutes. Mixed means no trade.</li>
     <li><b>Confirm with the VIX.</b> The actual VIX turns the opposite way at one of its own levels or consolidation bases.</li>
-    <li><b>Plan the trade.</b> Stop beyond the level; target at the next level that is at least as far away as the stop (1R minimum). No qualifying target means no trade.</li>
-    <li><b>Place it.</b> Longs buy QQQ. Shorts buy PSQ, the inverse Nasdaq-100 ETF, with the stop and target translated by percentage, and close the same day.</li>
+    <li><b>Plan the trade.</b> Stop beyond the level; the setup needs a level at least as far away as the stop (1R minimum), or there is no trade. Profit is taken his way: at today’s open, or the next key level (yesterday’s high/low, the last four-hour high/low, Monday, week and month levels) at least 0.20% away. Skipped if the stop is more than 1.5% away.</li>
+    <li><b>Place it.</b> Longs only in 4.6: buy QQQ between 10:00 AM and 12:00 PM ET and close the same day. Short setups are recorded but not traded (PSQ, the inverse ETF, is available again only if re-enabled).</li>
   </ol>
   <h3>Limits that always apply</h3>
   <p>One Socrates position at a time. At most two entry attempts per New York session (rejected or uncertain orders count). No new entries in the last 30 minutes; open positions close 5 minutes before the close. A rejected order pauses Socrates only.</p>

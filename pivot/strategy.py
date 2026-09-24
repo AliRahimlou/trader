@@ -948,9 +948,88 @@ def _evaluate_event(base, event, all_levels, bars, leaders, vix, now, policy):
     result.update(stop=stop, target=target, reward_risk=reward_risk,
                   target_source=target_zone.source if target_zone else None,
                   target_zone=_zone_dict(target_zone) if target_zone else None)
+    # 4.6 exit candidates: the same pre-existing areas the plan target uses
+    # (established before the entry candle began, the event area excluded),
+    # at the edge price reaches first. The executor adds the key levels and
+    # picks the exit from the live entry quote (execution.socrates_target).
+    before_entry = current.end - timedelta(minutes=60)
+    result['exit_areas'] = [{'price': round(level.low if direction == 'long' else level.high, 2), 'source': level.source}
+                            for level in all_levels if level != zone and level.established_at < before_entry]
     if all(c['passed'] for c in result['checks']):
         result.update(state='SETUP_READY', execution_blocker='Owner permission and current broker checks still required')
     return _finish(result)
+
+
+KEY_LEVEL_NAMES = {
+    'daily_open': "today's open", 'previous_day_high': "yesterday's high", 'previous_day_low': "yesterday's low",
+    'previous_4h_high': 'last four-hour high', 'previous_4h_low': 'last four-hour low', 'week_open': "this week's open",
+    'monday_high': 'Monday high', 'monday_low': 'Monday low', 'previous_week_high': "last week's high",
+    'previous_week_low': "last week's low", 'month_open': "this month's open",
+}
+
+
+def key_levels(market, now):
+    """Socrates' key levels for QQQ, known at ``now`` (4.6 exit targets).
+
+    Rulebook: he takes profit at the next level, most often the daily open,
+    from an indicator that plots the daily open, previous-day high/low, the
+    previous four-hour high/low, Monday high/low, week, prior-week and month
+    levels. Computed from completed regular-session 15-minute candles only:
+    each session's open is its 09:30 candle's open, so a session missing that
+    candle contributes no open. Returns [{'price', 'source'}].
+    """
+    if market is None:
+        return []
+    sessions = {}
+    for bar in closed(market, 15, now):
+        start = (bar.end - timedelta(minutes=bar.minutes)).astimezone(ET)
+        sessions.setdefault(start.date(), []).append((start, bar))
+    if not sessions:
+        return []
+    today = now.astimezone(ET).date()
+    dates = sorted(sessions)
+    past = [day for day in dates if day < today]
+
+    def session_open(day):
+        start, bar = sessions[day][0]
+        return bar.open if start.time() == time(9, 30) else None
+
+    def extremes(rows):
+        return (max(bar.high for bar in rows), min(bar.low for bar in rows)) if rows else None
+
+    def bucket(day, afternoon):
+        return extremes([bar for start, bar in sessions[day] if (start.time() >= time(13, 30)) == afternoon])
+
+    out = []
+    if today in sessions and session_open(today) is not None:
+        out.append(('daily_open', session_open(today)))
+    if past:
+        high, low = extremes([bar for _, bar in sessions[past[-1]]])
+        out += [('previous_day_high', high), ('previous_day_low', low)]
+    # Previous four-hour bucket (09:30-13:30, 13:30-close), as the 4h candles are built.
+    if today in sessions and now >= datetime.combine(today, time(13, 30), ET):
+        four = bucket(today, False)
+    else:
+        four = (bucket(past[-1], True) or bucket(past[-1], False)) if past else None
+    if four:
+        out += [('previous_4h_high', four[0]), ('previous_4h_low', four[1])]
+    week = today.isocalendar()[:2]
+    this_week = [day for day in dates if day.isocalendar()[:2] == week]
+    earlier_weeks = sorted({day.isocalendar()[:2] for day in past if day.isocalendar()[:2] < week})
+    if this_week and session_open(this_week[0]) is not None:
+        out.append(('week_open', session_open(this_week[0])))
+    previous_week = [day for day in past if earlier_weeks and day.isocalendar()[:2] == earlier_weeks[-1]]
+    monday = this_week[0] if this_week and this_week[0] != today else (previous_week[0] if previous_week else None)
+    if monday is not None:
+        high, low = extremes([bar for _, bar in sessions[monday]])
+        out += [('monday_high', high), ('monday_low', low)]
+    if previous_week:
+        high, low = extremes([bar for day in previous_week for _, bar in sessions[day]])
+        out += [('previous_week_high', high), ('previous_week_low', low)]
+    this_month = [day for day in dates if (day.year, day.month) == (today.year, today.month)]
+    if this_month and session_open(this_month[0]) is not None:
+        out.append(('month_open', session_open(this_month[0])))
+    return [{'price': round(price, 2), 'source': name} for name, price in out if price and isfinite(price)]
 
 
 def _target(levels, event_zone, origin, direction, entry, stop, policy):
@@ -1047,8 +1126,11 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
                      'Wait for a fresh sweep of the previous-day high or low')
             _finish(result)
         rows.append(result)
+    keys = key_levels(market, now) if valid else []
+    for candidate in qualified:
+        candidate['exit_levels'] = candidate.pop('exit_areas', []) + keys
     selected = max(rows, key=_rank)
-    result = {key: value for key, value in selected.items() if key not in ('id', 'label')}
+    result = {key: value for key, value in selected.items() if key not in ('id', 'label', 'exit_areas')}
     result.update(strategy_id=selected['id'], strategies=rows, levels=[_zone_dict(z) for z in all_levels],
                   area_rule={'zone_tolerance': policy.zone_tolerance, 'touches': policy.level_touches,
                              'max_areas': policy.max_areas},
@@ -1063,9 +1145,10 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
     # Preserve every qualified opportunity for admission. A previously handled
     # event must not hide an unhandled area or the other independently valid
     # method. Only the executor knows durable consumption; analysis stays pure.
+    result['key_levels'] = keys
     result['entry_candidates'] = [
         {**{key: value for key, value in candidate.items()
-            if key not in ('id', 'label', 'leader_evidence', 'levels', 'candidate_count')},
+            if key not in ('id', 'label', 'leader_evidence', 'levels', 'candidate_count', 'exit_areas')},
          'strategy_id': candidate['id']}
         for candidate in sorted(qualified, key=_rank, reverse=True)]
     result['candidate_diagnostics'] = candidate_diagnostics

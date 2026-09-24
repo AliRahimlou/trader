@@ -1,7 +1,7 @@
 {
   "name": "pivot-video-app",
   "private": true,
-  "version": "4.5.2",
+  "version": "4.6.0",
   "scripts": {
     "start": "./scripts/run_full_stack.sh",
     "backend": "./scripts/run_backend.sh",

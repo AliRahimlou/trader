@@ -10,3 +10,4 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, 'connect', blocked)
     monkeypatch.setattr(socket.socket, 'connect_ex', blocked)
     monkeypatch.setattr(socket, 'create_connection', blocked)
+
