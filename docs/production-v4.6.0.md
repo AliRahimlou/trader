@@ -12,7 +12,7 @@ The owner asked for expert decisions instead of choosing rule settings themselve
 
 | Rule | 4.5 | 4.6 | Why |
 |---|---|---|---|
-| Take profit | nearest opposing level at least 1R away | today's 09:30 open when it is in the trade direction and at least 0.20% from the live entry price; otherwise the nearest key level or pre-existing area at least 0.20% away (previous-day high/low, previous four-hour high/low, week open, Monday high/low, previous-week high/low, month open) | Socrates: "take profit at the next level", most often the daily open. Best of 154 tested exits: paired +0.043%/trade against the 1R target (t 2.3), positive in both halves. |
+| Take profit | nearest opposing level at least 1R away | today's 09:30 open when it is in the trade direction and at least 0.20% from the live entry price; otherwise the nearest key level or pre-existing area at least 0.20% away (previous-day high/low, previous four-hour high/low, week open, Monday high/low, previous-week high/low, month open); no qualifying level → the entry is skipped | Socrates: "take profit at the next level", most often the daily open. Best of 154 tested exits: paired +0.043%/trade against the 1R target (t 2.3), positive in both halves. |
 | Setup admission | needs a 1R level | unchanged: still needs a 1R level to qualify | the untested extra setups are not traded |
 | Entry hours | 10:30-15:30 ET | 10:00-12:00 ET (the first hourly close is 10:30) | his stated window; halves exposure |
 | Shorts (PSQ) | traded | recorded, not traded; `PIVOT_SOCRATES_SHORTS_LIVE=1` re-enables 4h-retest shorts; previous-day-sweep shorts never trade | every short group lost after PSQ costs; previous-day-sweep shorts lost in almost every month |

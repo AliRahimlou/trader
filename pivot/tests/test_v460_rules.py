@@ -37,7 +37,8 @@ def runtime(tmp_path, at=IN_WINDOW):
 
 def long_setup(at=IN_WINDOW, stop=99.0, exit_levels=None):
     snapshot = ready(at)
-    snapshot['setup'].update(stop=stop, exit_levels=exit_levels if exit_levels is not None else [])
+    snapshot['setup'].update(stop=stop, exit_levels=exit_levels if exit_levels is not None
+                             else [{'price': 100.5, 'source': 'daily_open'}, {'price': 110.0, 'source': 'previous-day high'}])
     return snapshot
 
 
@@ -104,10 +105,38 @@ def test_long_entry_uses_the_daily_open_as_its_target(tmp_path):
     assert [order['type'] for order in broker.sent] == ['market', 'stop']
 
 
-def test_without_a_qualifying_level_the_plan_target_is_kept(tmp_path):
+def test_without_a_level_past_the_floor_the_entry_is_skipped(tmp_path):
     executor, broker, store = runtime(tmp_path)
-    executor.tick(long_setup(exit_levels=[{'price': 100.1, 'source': 'daily_open'}]))  # only 0.1% away
-    assert store.active_trade()['target'] == '110'
+    # Production includes the plan's own 1R level among the exit levels; here it is only 0.10% above the ask.
+    snapshot = long_setup(stop=99.9, exit_levels=[{'price': 100.1, 'source': 'four-hour area'}])
+    snapshot['setup']['target'] = 100.1
+    executor.tick(snapshot)
+    assert broker.sent == [] and store.active_trade() is None
+    assert 'No exit level at least 0.2% beyond the entry price' in executor.message
+
+
+def test_an_event_used_under_the_previous_policy_is_not_entered_again(tmp_path):
+    import json
+    from hashlib import sha256
+    executor, broker, store = runtime(tmp_path)
+    snapshot = long_setup(exit_levels=[{'price': 100.5, 'source': 'daily_open'}])
+    old_key = sha256(f'nasdaq-qqq-execution-v7-video-aligned|QQQ|{snapshot["setup"]["event_id"]}'.encode()).hexdigest()[:24]
+    trade = {'id': old_key, 'stage': 'finished', 'created_at': IN_WINDOW.isoformat(),
+             'ops': {'entry': {'state': 'attempted', 'payload': {'client_order_id': f'pvt-{old_key}-entry'}}}}
+    assert store.reserve_trade(trade)
+    store.save_trade(trade, finished=True)
+    executor.tick(snapshot)
+    assert broker.sent == [] and 'already been handled' in executor.message
+
+
+def test_checklist_never_says_an_untradable_short_is_about_to_go_out():
+    from pivot.readiness import _setup
+    short = {'state': 'SETUP_READY', 'direction': 'short', 'strategy_id': 'four_hour_retest'}
+    (item, _), ready_flag = _setup({'setup': short})
+    assert ready_flag is False and item['status'] == 'info' and 'longs (QQQ) only' in item['detail']
+    long_ = {'state': 'SETUP_READY', 'direction': 'long', 'strategy_id': 'four_hour_retest'}
+    (item, _), ready_flag = _setup({'setup': {**short, 'entry_candidates': [short, long_]}})
+    assert ready_flag is True
 
 
 @pytest.mark.parametrize('clock', ['09:45', '12:00', '14:30'])
@@ -135,7 +164,7 @@ def test_shorts_switch_allows_retest_shorts_but_never_sweep_shorts(tmp_path, mon
     executor.tick(ready(IN_WINDOW, direction='short'))  # prior_day_sweep short
     assert broker.sent == []
     retest = ready(IN_WINDOW, direction='short')
-    retest['setup'].update(strategy_id='four_hour_retest', stop=101.0)
+    retest['setup'].update(strategy_id='four_hour_retest', stop=101.0, exit_levels=[{'price': 99.5, 'source': 'previous_day_low'}])
     identify_event(retest['setup'])
     executor.tick(retest)
     assert store.active_trade()['symbol'] == 'PSQ'
@@ -154,7 +183,9 @@ def test_readiness_explains_the_window(tmp_path):
     early = datetime(2026, 9, 16, 9, 40, tzinfo=ET).astimezone(timezone.utc)
     clock = {'is_open': True, 'timestamp': early.isoformat(), 'next_close': (early + timedelta(hours=6, minutes=20)).isoformat()}
     (item, _), is_open, no_entries = _market({'clock': clock}, early)
-    assert is_open is True and no_entries is True and item['status'] == 'info' and '10:00 AM–12:00 PM ET' in item['detail']
+    assert is_open is True and no_entries == 'window' and item['status'] == 'info' and '10:00 AM–12:00 PM ET' in item['detail']
+    from pivot.readiness import _no_entry_headline
+    assert _no_entry_headline({}, no_entries) == 'New Socrates entries only between 10:00 AM and 12:00 PM ET.'
     inside = datetime(2026, 9, 16, 10, 40, tzinfo=ET).astimezone(timezone.utc)
     (item, _), _, no_entries = _market({'clock': {**clock, 'timestamp': inside.isoformat()}}, inside)
     assert no_entries is False and item['status'] == 'ok' and 'until 12:00 PM ET' in item['detail']

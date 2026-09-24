@@ -89,3 +89,11 @@ def socrates_rules():
     return {'version': '4.6', 'entry_window': ENTRY_WINDOW, 'shorts_live': _flag(SHORTS_ENV) is True,
             'sweep_shorts': False, 'max_stop_distance': MAX_STOP_DISTANCE, 'target_rule': 'next_key_level',
             'target_floor': TARGET_FLOOR}
+
+
+def socrates_tradable(candidate, rules=None):
+    """Whether a ready Socrates candidate may be traded under the active rules (executor and checklist)."""
+    rules = rules or socrates_rules()
+    candidate = candidate if isinstance(candidate, dict) else {}
+    return candidate.get('direction') != 'short' or (
+        rules['shorts_live'] and (rules['sweep_shorts'] or candidate.get('strategy_id') != 'prior_day_sweep'))

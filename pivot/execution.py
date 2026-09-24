@@ -52,6 +52,8 @@ CLOCK_SKEW_SECONDS = 5
 # Entries stop 30 minutes before the close (positions still start closing at 5),
 # so a fresh entry has room for its stop and target instead of a forced exit.
 ENTRY_CUTOFF_SECONDS = 1800
+# Earlier Socrates policy versions whose event keys still mark an event as used (4.6.0 upgrade).
+PRIOR_POLICY_VERSIONS = ('nasdaq-qqq-execution-v7-video-aligned',)
 SIGNAL_POLICY_VERSION = ANALYSIS_VERSION  # The executor admits only the analyzer's current interpretation.
 PAPER_SIGNAL_POLICY_VERSION = 'synthetic-paper-commissioning-v1'
 PAPER_SIGNAL_PURPOSE = 'broker_order_lifecycle_only'
@@ -701,10 +703,19 @@ class Executor:
         return self._signal_expiry(setup, now)
 
     @staticmethod
-    def _event_key(setup):
+    def _event_key(setup, policy_version=POLICY_VERSION):
         # The opportunity is the QQQ event whichever instrument executes it.
-        identity = f'{POLICY_VERSION}|{SIGNAL_SYMBOL}|{setup["event_id"]}'
+        identity = f'{policy_version}|{SIGNAL_SYMBOL}|{setup["event_id"]}'
         return sha256(identity.encode()).hexdigest()[:24]
+
+    @classmethod
+    def event_keys(cls, setup):
+        """The current key first, then the keys the same event had under earlier policy versions.
+
+        A policy update must not re-admit an event already attempted before it
+        (one attempt per underlying event); new trades use the current key.
+        """
+        return [cls._event_key(setup, version) for version in (POLICY_VERSION, *PRIOR_POLICY_VERSIONS)]
 
     def _entry_candidate(self, setup, now):
         # Malformed alternatives cannot hide behind an otherwise valid top.
@@ -729,15 +740,14 @@ class Executor:
             self._gate('signal_age_policy')
             raise Waiting('Waiting for a current setup under the active video rules')
         rules = feature_flags.socrates_rules()
-        allowed = [row for row in validated if row[0].get('direction') != 'short'
-                   or (rules['shorts_live'] and (rules['sweep_shorts'] or row[0].get('strategy_id') != 'prior_day_sweep'))]
+        allowed = [row for row in validated if feature_flags.socrates_tradable(row[0], rules)]
         if not allowed:
             self._gate('signal_direction')
             raise Waiting('A short setup is ready, but Socrates trades longs (QQQ) only in this release; waiting for a long setup')
         validated = allowed
         self._gate('setup_deduplication')
         for candidate, expires, key in validated:
-            if not self.store.entry_consumed(key):
+            if not any(self.store.entry_consumed(k) for k in self.event_keys(candidate)):
                 self._selected_entry_signal = candidate
                 return candidate, expires, key
         raise Waiting('This setup has already been handled; waiting for the next event')
@@ -842,8 +852,10 @@ class Executor:
         plan_target, target_source = target, setup.get('target_source')
         if rules['target_rule'] == 'next_key_level':
             chosen = socrates_target(direction, quote_reference, setup.get('exit_levels'), rules['target_floor'])
-            if chosen:
-                target, target_source = chosen
+            if not chosen:
+                # The plan's 1R level is itself a candidate, so it is under the floor too: too little room to cover costs.
+                raise Waiting(f'No exit level at least {float(rules["target_floor"]) * 100:g}% beyond the entry price; skipping this entry')
+            target, target_source = chosen
         price, execution_stop, execution_target, proxy_geometry = ask, stop, target, None
         if proxy:
             self._gate('quote_read')
