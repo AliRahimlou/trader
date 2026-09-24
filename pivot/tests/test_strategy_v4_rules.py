@@ -266,9 +266,9 @@ def test_one_cent_pullback_keeps_the_vote_but_a_close_back_through_the_area_drop
 
 def test_versions_and_policy_text_keep_the_v4_rules_that_v5_retains():
     assert ANALYSIS_VERSION == 'nasdaq-video-interpretation-v5'
-    assert POLICY_VERSION == 'nasdaq-qqq-execution-v7-video-aligned' == POLICY['version']
+    assert POLICY_VERSION == 'nasdaq-qqq-execution-v8-socrates-4-6' == POLICY['version']
     text = ' '.join(POLICY['summary'])
-    for phrase in ('at least as far away as the stop distance', 'the swept area itself is never the target',
+    for phrase in ('at least as far away as the stop (1R)', 'the swept area excluded',
                    'at least 0.1% of the entry price', '1% bands', 'either of the last two closed candles', 'is neutral',
                    'Each strategy may attempt two new entries per New York session',
                    'pauses the Socrates strategy only', 'final 30 minutes', 'time-based within the free allowance'):

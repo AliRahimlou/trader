@@ -190,6 +190,10 @@ def build_live_trade(trade, *, mark=None, track=None, positions=None, orders=Non
             row['distance'] = str(gap.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
             row['distance_percent'] = _ratio(gap * 100, price, '0.01')
         result[name] = row
+    if result['target'] is not None:
+        from .strategy import KEY_LEVEL_NAMES
+        source = trade.get('target_source') or (trade.get('signal_geometry') or {}).get('target_source')
+        result['target']['source'] = KEY_LEVEL_NAMES.get(source, source) if isinstance(source, str) else None
     if result['stop'] is not None:
         result['stop']['order'] = _stop_order(trade, orders)
     if stop and target and price and stop != target:

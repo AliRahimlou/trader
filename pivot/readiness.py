@@ -201,7 +201,16 @@ def _market(inputs, now):
             if (closes - now).total_seconds() <= ENTRY_CUTOFF_SECONDS:
                 return _item('market_session', label, 'info',
                              f'The market closes at {_clock_text(closes)}; no new entries in the final 30 minutes.'), True, True
-            return _item('market_session', label, 'ok', f'The market is open until {_clock_text(closes)}.'), True, False
+            from . import feature_flags
+            window = feature_flags.socrates_rules()['entry_window']
+            local = now.astimezone(NEW_YORK).time()
+            if window and not window[0] <= local < window[1]:
+                when = 'from 10:00 AM' if local < window[0] else 'again tomorrow from 10:00 AM'
+                return _item('market_session', label, 'info',
+                             f'The market is open until {_clock_text(closes)}. New Socrates entries only 10:00 AM–12:00 PM ET; '
+                             f'next window {when}. Open positions keep their exits.'), True, True
+            return _item('market_session', label, 'ok', f'The market is open until {_clock_text(closes)}.'
+                         + (' New entries until 12:00 PM ET.' if window else '')), True, False
         return _item('market_session', label, 'info',
                      f'The market is closed. Next open: {_clock_text(clock["next_open"], with_day=True)}.'), False, False
     except (KeyError, TypeError, ValueError, OverflowError):

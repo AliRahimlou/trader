@@ -63,7 +63,8 @@ def test_short_entry_records_both_geometries_for_the_journal_and_diagnostics(tmp
     trade = store.active_trade()
     assert trade['stage'] == 'open' and trade['symbol'] == 'PSQ' and trade['direction'] == 'long'
     assert (trade['signal_symbol'], trade['signal_direction'], trade['proxy']) == ('QQQ', 'short', PROXY_KIND)
-    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'short', 'entry': '100', 'stop': '110', 'target': '90'}
+    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'short', 'entry': '100', 'stop': '110', 'target': '90',
+                                      'plan_target': '90', 'target_source': None}
     assert trade['proxy_geometry']['symbol'] == 'PSQ' and trade['proxy_geometry']['reference'] == '35'
     assert (trade['proxy_geometry']['stop'], trade['proxy_geometry']['target']) == (trade['stop'], trade['target']) == ('31.50', '38.50')
     assert 'not a video rule' in trade['proxy_geometry']['note']
@@ -95,7 +96,8 @@ def test_long_setups_are_unchanged_and_never_read_the_proxy_quote(tmp_path):
     trade = store.active_trade()
     assert trade['symbol'] == 'QQQ' and trade['direction'] == trade['signal_direction'] == 'long'
     assert trade['proxy'] is None and trade['proxy_geometry'] is None
-    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'long', 'entry': '100', 'stop': '90', 'target': '110'}
+    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'long', 'entry': '100', 'stop': '90', 'target': '110',
+                                      'plan_target': '110', 'target_source': None}
     assert (trade['stop'], trade['target']) == ('90', '110')
 
 

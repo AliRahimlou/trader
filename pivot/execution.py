@@ -26,6 +26,7 @@ from .policy import POLICY_VERSION
 from .sizing import decimal, purchase_plan
 from .version import APP_VERSION
 from .deployment import DeploymentHold
+from . import feature_flags
 from .portfolio import PortfolioBlocked
 from .strategy import (ANALYSIS_VERSION, LEADER_MINUTES, CANDLE_PUBLICATION_GRACE_SECONDS, MAX_PERSISTENCE_BARS,
                        event_expiry)
@@ -76,6 +77,7 @@ EXECUTION_GATES = set(SIGNAL_GATES.values()) | {
     'entry_reservation', 'trade_management', 'order_prepare', 'order_submit', 'order_lookup',
     'order_identity', 'order_rejection', 'order_reconciliation', 'position_reconciliation',
     'order_cancel', 'protection', 'trade_finish', 'owner_attention', 'exit_management',
+    'entry_window', 'stop_distance',
 }
 EXECUTION_OUTCOMES = {'disabled', 'waiting', 'feed_error', 'invalid_data', 'unexpected_error',
                       'entry_planned', 'managing', 'completed', 'attention', 'order_rejected', 'protection_failure'}
@@ -235,6 +237,34 @@ QUANTITY_PLACES = 9
 MINIMUM_NOTIONAL = decimal('1')
 ORDER_KEYS = {'symbol', 'side', 'type', 'time_in_force', 'extended_hours', 'qty', 'notional',
               'stop_price', 'client_order_id'}
+
+
+def socrates_target(direction, reference, exit_levels, floor=feature_flags.TARGET_FLOOR):
+    """4.6 exit target (expert-panel decision; rulebook: sell at the next level, most often the daily open).
+
+    Today's open when it lies in the trade direction at least ``floor`` beyond
+    the live entry quote; otherwise the nearest candidate (pre-existing 4-hour
+    or previous-day area, or a key level) at least ``floor`` beyond it. No
+    reward-to-risk multiple applies to the exit. Returns (price, source) or None.
+    """
+    reference, floor = decimal(reference), decimal(floor)
+    rows = []
+    for row in exit_levels if isinstance(exit_levels, list) else []:
+        try:
+            price, source = decimal(row['price']).quantize(decimal('.01')), row['source']
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue
+        if isinstance(source, str) and price > 0:
+            rows.append((price, source))
+
+    def nearest(candidates):
+        if direction == 'long':
+            candidates = [row for row in candidates if row[0] >= reference * (1 + floor)]
+            return min(candidates) if candidates else None
+        candidates = [row for row in candidates if row[0] <= reference * (1 - floor)]
+        return max(candidates) if candidates else None
+
+    return nearest([row for row in rows if row[1] == 'daily_open']) or nearest(rows)
 
 
 def valid_price_increment(price):
@@ -565,7 +595,7 @@ class Executor:
                 'review_required': review_required,
                 **self._execution_diagnostics_snapshot(),
                 'execution': {'message': self.message, 'at': self.last_at,
-                    'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'signal_symbol', 'signal_direction', 'proxy',
+                    'trade': {k: trade.get(k) for k in ('stage', 'symbol', 'direction', 'signal_symbol', 'signal_direction', 'proxy', 'target_source',
                                                       'signal_geometry', 'proxy_geometry', 'amount', 'stop', 'target', 'reason',
                                                       'partial_entry', 'exit_pending', 'flat_reconciliation_started_at')} if trade else None}}
 
@@ -698,6 +728,13 @@ class Executor:
         if not validated:
             self._gate('signal_age_policy')
             raise Waiting('Waiting for a current setup under the active video rules')
+        rules = feature_flags.socrates_rules()
+        allowed = [row for row in validated if row[0].get('direction') != 'short'
+                   or (rules['shorts_live'] and (rules['sweep_shorts'] or row[0].get('strategy_id') != 'prior_day_sweep'))]
+        if not allowed:
+            self._gate('signal_direction')
+            raise Waiting('A short setup is ready, but Socrates trades longs (QQQ) only in this release; waiting for a long setup')
+        validated = allowed
         self._gate('setup_deduplication')
         for candidate, expires, key in validated:
             if not self.store.entry_consumed(key):
@@ -725,6 +762,10 @@ class Executor:
         if self._regular_session_state(snapshot.get('clock'), now) is False:
             self._gate('market_session')
             raise Waiting('Live money is on — waiting for the regular market session')
+        window = feature_flags.socrates_rules()['entry_window']
+        if window and not window[0] <= now.astimezone(NEW_YORK).time() < window[1]:
+            self._gate('entry_window')
+            raise Waiting('Live money is on — new Socrates entries only between 10:00 AM and 12:00 PM ET')
         self._gate('vix_candles')
         if snapshot.get('feeds', {}).get('vix') != 'current':
             raise Waiting('Live money is on — waiting for actual VIX data. No entry can be sent yet.')
@@ -792,6 +833,17 @@ class Executor:
         # still gated on QQQ having stayed near its retest before PSQ is read.
         if abs((ask if direction == 'long' else bid) / reference - 1) > decimal('.01'):
             raise Waiting('Price has moved more than 1% from the signal; skipping this entry')
+        rules = feature_flags.socrates_rules()
+        quote_reference = ask if direction == 'long' else bid
+        if rules['max_stop_distance'] is not None:
+            self._gate('stop_distance')
+            if abs(quote_reference - stop) / quote_reference > rules['max_stop_distance']:
+                raise Waiting(f'The stop is more than {float(rules["max_stop_distance"]) * 100:g}% from the entry price; skipping this entry')
+        plan_target, target_source = target, setup.get('target_source')
+        if rules['target_rule'] == 'next_key_level':
+            chosen = socrates_target(direction, quote_reference, setup.get('exit_levels'), rules['target_floor'])
+            if chosen:
+                target, target_source = chosen
         price, execution_stop, execution_target, proxy_geometry = ask, stop, target, None
         if proxy:
             self._gate('quote_read')
@@ -863,7 +915,9 @@ class Executor:
         trade = {'id': key, 'stage': 'entering', 'symbol': traded, 'direction': 'long',
                  'signal_symbol': SIGNAL_SYMBOL, 'signal_direction': direction, 'proxy': PROXY_KIND if proxy else None,
                  'signal_geometry': {'symbol': SIGNAL_SYMBOL, 'direction': direction, 'entry': str(reference),
-                                     'stop': str(stop), 'target': str(target)},
+                                     'stop': str(stop), 'target': str(target), 'plan_target': str(plan_target),
+                                     'target_source': target_source},
+                 'target_source': target_source,
                  'proxy_geometry': proxy_geometry,
                  'signal': {field: setup[field] for field in fields},
                  'amount': plan['target_dollars'], 'stop': str(execution_stop), 'target': str(execution_target),

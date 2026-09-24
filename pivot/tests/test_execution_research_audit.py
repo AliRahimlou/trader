@@ -63,7 +63,8 @@ def test_25_dollar_short_executes_as_a_fractional_psq_purchase_with_mirrored_geo
     trade = store.active_trade()
     assert trade['stage'] == 'open' and trade['symbol'] == 'PSQ' and trade['direction'] == 'long'
     assert trade['signal_symbol'] == 'QQQ' and trade['signal_direction'] == 'short' and trade['proxy'] == 'inverse_etf'
-    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'short', 'entry': '675', 'stop': '690', 'target': '660'}
+    assert trade['signal_geometry'] == {'symbol': 'QQQ', 'direction': 'short', 'entry': '675', 'stop': '690', 'target': '660',
+                                      'plan_target': '660', 'target_source': None}
     assert (trade['proxy_geometry']['reference'], trade['stop'], trade['target']) == ('33.20', '32.46', '33.94')
     assert broker.sent[1]['stop_price'] == '32.46' and Decimal(broker.sent[1]['qty']) == Decimal('25') / Decimal('33.20')
 

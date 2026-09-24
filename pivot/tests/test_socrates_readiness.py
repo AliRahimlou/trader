@@ -420,7 +420,9 @@ def test_live_dialog_key_rules_match_the_backend_policy_they_summarise():
     for shown, accepted in (('within 0.4%', 'within 0.4% of it'), ('4 of the 7', 'four of seven leaders must agree'),
                             ('at most 1 against', 'at most one opposing'), ('within 60 minutes', 'up to 60 minutes'),
                             ('end of the next session', 'end of the next regular session'),
-                            ('1R minimum', 'a minimum of 1R'), ('shorts buy PSQ', 'buying PSQ'),
+                            ('1R minimum', 'at least as far away as the stop (1R)'), ('longs only (QQQ)', 'Longs only in this release'),
+                            ('10:00 AM–12:00 PM ET', 'between 10:00 AM and 12:00 PM'), ('0.20% away', 'at least 0.20% away'),
+                            ('more than 1.5% away', 'more than 1.5% from the live entry price'),
                             ('one Socrates position at a time', 'One position at a time'),
                             ('two entry attempts per New York session', 'two new entries per New York session'),
                             ('last 30 minutes', 'final 30 minutes')):
