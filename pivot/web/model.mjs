@@ -61,7 +61,7 @@ export function operationStatus(snapshot, now=Date.now()) {
     incident:activeExit?'Exit needs attention: broker cancellation or the remaining exit is unconfirmed. New entries are paused. Check the QQQ position and orders in Alpaca. The app continues reconciliation without sending a competing order.':activePartial?`Partial entry needs attention: ${partial.filled_qty || 'some'} shares filled while cancellation is unconfirmed. New entries are paused. Check the position and orders in Alpaca.`:'',
     archiveLabel:archiveCurrent?'Recording inputs':archive?.status==='unavailable'?'Needs attention':'Waiting for inputs',
     directionNote,
-    timingNote:'Checks run on completed hourly candles. New entries only 10:00 AM–12:00 PM ET. A break stays valid until the end of the next session, and the entry must be at the level (within 0.4%). Open positions close 5 minutes before the close.',
+    timingNote:'Checks run on completed hourly candles; the first is at 10:30 AM ET. New entries only 10:00 AM–12:00 PM ET, so the effective signal window starts at 10:30. A break stays valid until the end of the next session, and the entry must be at the level (within 0.4%). Open positions close 5 minutes before the close.',
   };
 }
 
