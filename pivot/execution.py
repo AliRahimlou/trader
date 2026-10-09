@@ -181,6 +181,11 @@ def closing(clock, now, seconds=300):
     return (timestamp(clock['next_close']) - now).total_seconds() <= seconds
 
 
+def entry_window_open(now):
+    window = feature_flags.socrates_rules()['entry_window']
+    return not window or window[0] <= now.astimezone(NEW_YORK).time() < window[1]
+
+
 def checked_quote(quote, now, symbol=SIGNAL_SYMBOL):
     """Freshness, validity and spread rules; identical for the QQQ signal and the PSQ proxy."""
     try:
@@ -773,7 +778,7 @@ class Executor:
             self._gate('market_session')
             raise Waiting('Live money is on — waiting for the regular market session')
         window = feature_flags.socrates_rules()['entry_window']
-        if window and not window[0] <= now.astimezone(NEW_YORK).time() < window[1]:
+        if not entry_window_open(now):
             self._gate('entry_window')
             raise Waiting('Live money is on — new Socrates entries only between 10:00 AM and 12:00 PM ET')
         self._gate('vix_candles')
@@ -833,7 +838,13 @@ class Executor:
         # submission budget to its receipt, not its exchange timestamp: the broker
         # reads that follow must not consume a window that was partly spent
         # before the quote arrived, or entries churn "expired before submission".
-        entry_valid_until = min(timestamp(snapshot['data_valid_until']), self.now()+timedelta(seconds=15), expires).isoformat()
+        # Persist session boundaries too: slow broker reads or a restart cannot
+        # carry an unsent intent past the reviewed entry window or close cutoff.
+        entry_deadlines = [timestamp(snapshot['data_valid_until']), self.now()+timedelta(seconds=15), expires,
+                           timestamp(clock['next_close'])-timedelta(seconds=ENTRY_CUTOFF_SECONDS)]
+        if window:
+            entry_deadlines.append(datetime.combine(now.astimezone(NEW_YORK).date(), window[1], tzinfo=NEW_YORK))
+        entry_valid_until = min(entry_deadlines).isoformat()
         self._gate('price_geometry')
         stop, target, reference = map(decimal, (setup['stop'], setup['target'], setup['entry']))
         if not (0 < stop < bid <= ask < target if direction == 'long' else 0 < target < bid <= ask < stop):
@@ -974,7 +985,7 @@ class Executor:
             # Only unsent entry intents need the current signal contract. An
             # already attempted entry or held position still needs management.
             return True
-        return (not self.enabled() or elapsed(trade['created_at'], now) > 10
+        return (not self.enabled() or not entry_window_open(now) or elapsed(trade['created_at'], now) > 10
                 or not data_unexpired(trade.get('data_valid_until'), now))
 
     def _prepared_entry_expired(self, trade, clock):
@@ -1048,7 +1059,8 @@ class Executor:
                         now = self.now()
                         try:
                             self._signal_expiry(trade.get('signal') or {}, now)
-                            valid = authorized and elapsed(trade['created_at'], now) <= 10 and data_unexpired(trade.get('data_valid_until'), now)
+                            valid = (authorized and entry_window_open(now) and elapsed(trade['created_at'], now) <= 10
+                                     and data_unexpired(trade.get('data_valid_until'), now))
                         except Waiting:
                             valid = False
                         if not valid:

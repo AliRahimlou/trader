@@ -148,6 +148,66 @@ def test_no_new_entries_outside_10_to_12_new_york_time(tmp_path, clock):
     assert 'only between 10:00 AM and 12:00 PM ET' in executor.message
 
 
+def test_prepared_entry_expires_at_noon_before_claiming_an_attempt(tmp_path):
+    at = IN_WINDOW.replace(minute=59, second=59)
+    executor, broker, store = runtime(tmp_path, at)
+    manage = executor._manage
+    executor._manage = lambda trade: None
+    executor.tick(long_setup(at))
+    trade = store.active_trade()
+    assert trade and datetime.fromisoformat(trade['data_valid_until']) == at + timedelta(seconds=1)
+    assert broker.sent == []
+    executor._manage = manage
+    broker.at += timedelta(seconds=3)
+    executor.tick({})
+    assert broker.sent == [] and store.active_trade() is None
+    assert store.session_entry_allowance(broker.at)['families']['socrates']['used'] == 0
+
+
+def test_preexisting_prepared_entry_cannot_submit_after_noon(tmp_path):
+    at = IN_WINDOW.replace(minute=59, second=59)
+    executor, broker, store = runtime(tmp_path, at)
+    executor._manage = lambda trade: None
+    executor.tick(long_setup(at))
+    # An intent saved by an older release had only a quote deadline.
+    trade = store.active_trade()
+    trade['data_valid_until'] = (at + timedelta(seconds=15)).isoformat()
+    store.save_trade(trade)
+    broker.at += timedelta(seconds=3)
+    restarted = Executor(broker, Store(store.path), now=lambda: broker.at)
+    restarted.tick({})
+    assert broker.sent == [] and store.active_trade() is None
+    assert store.session_entry_allowance(broker.at)['families']['socrates']['used'] == 0
+
+
+def test_entry_claim_crossing_noon_never_submits(tmp_path):
+    at = IN_WINDOW.replace(minute=59, second=59)
+    executor, broker, store = runtime(tmp_path, at)
+    claim = store.claim_operation
+    def delayed_claim(*args, **kwargs):
+        result = claim(*args, **kwargs)
+        broker.at += timedelta(seconds=3)
+        return result
+    store.claim_operation = delayed_claim
+    executor.tick(long_setup(at))
+    assert broker.sent == [] and store.active_trade() is None
+
+
+def test_noon_cutoff_does_not_stop_existing_position_exits(tmp_path):
+    at = IN_WINDOW.replace(minute=59, second=59)
+    executor, broker, store = runtime(tmp_path, at)
+    executor.tick(long_setup(at))
+    assert store.active_trade()['stage'] == 'open'
+    broker.at += timedelta(seconds=3)
+    broker.bid, broker.ask = '100.5', '100.51'
+    executor.tick({})
+    assert broker.canceled and len(broker.sent) == 2
+    executor.tick({})
+    executor.tick({})
+    assert broker.sent[-1]['side'] == 'sell' and len(broker.sent) == 3
+    assert store.active_trade() is None and broker.position_data == []
+
+
 def test_shorts_are_not_traded_and_a_long_behind_a_short_still_is(tmp_path):
     executor, broker, store = runtime(tmp_path)
     executor.tick(ready(IN_WINDOW, direction='short'))

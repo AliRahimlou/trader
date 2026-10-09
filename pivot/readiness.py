@@ -174,6 +174,9 @@ def _instrument(inputs, symbol):
     identifier = 'instrument_' + symbol.lower()
     long_side = symbol == 'QQQ'
     label = 'QQQ can be bought' if long_side else 'PSQ can be bought (for shorts)'
+    if not long_side and not feature_flags.socrates_rules()['shorts_live']:
+        return _item(identifier, 'Short setups', 'info',
+                     'Short setups are recorded but cannot trade under the current rules; only QQQ longs may enter.')
     role = 'long setups' if long_side else 'short setups (PSQ rises when the Nasdaq falls)'
     cached = (inputs.get('assets') or {}).get(symbol) or {}
     asset = cached.get('asset')
@@ -342,6 +345,17 @@ def _workers(inputs):
     return _item('workers', label, 'ok', 'Pivot is reading data, watching the account and managing orders.')
 
 
+def _tradable_candidate(setup):
+    """Use the same permitted candidate for the setup text and asset checklist."""
+    if not isinstance(setup, dict):
+        return None
+    candidates = setup.get('entry_candidates', [setup])
+    if not isinstance(candidates, list):
+        candidates = [setup]
+    return next((candidate for candidate in candidates if isinstance(candidate, dict)
+                 and feature_flags.socrates_tradable(candidate)), None)
+
+
 def _setup(inputs):
     label = 'Socrates setup'
     setup = inputs.get('setup')
@@ -350,13 +364,13 @@ def _setup(inputs):
     if setup['state'] == 'SETUP_READY' and inputs.get('setup_consumed') is True:
         # The executor never uses an event twice (traded, attempted, rejected or uncertain).
         return _item('setup', label, 'info', 'This setup was already traded or attempted; waiting for the next one.'), False
-    candidates = setup.get('entry_candidates', [setup]) if isinstance(setup.get('entry_candidates', [setup]), list) else [setup]
-    if setup['state'] == 'SETUP_READY' and not any(feature_flags.socrates_tradable(c) for c in candidates):
+    selected = _tradable_candidate(setup)
+    if setup['state'] == 'SETUP_READY' and selected is None:
         return _item('setup', label, 'info', 'A short setup is ready, but Socrates trades longs (QQQ) only in this release; '
                      'waiting for a long setup.'), False
     if setup['state'] == 'SETUP_READY':
-        direction = 'long QQQ' if setup.get('direction') == 'long' else 'short (bought as PSQ)'
-        method = METHODS.get(setup.get('strategy_id'), 'marked level')
+        direction = 'long QQQ' if selected.get('direction') == 'long' else 'short (bought as PSQ)'
+        method = METHODS.get(selected.get('strategy_id'), 'marked level')
         return _item('setup', label, 'ok', f'A {direction} setup is ready ({method}).'), True
     checks = setup.get('checks') if isinstance(setup.get('checks'), list) else []
     blocker = next((SETUP_CHECKS.get(check.get('name')) for check in checks if isinstance(check, dict)
@@ -402,7 +416,8 @@ def build_socrates_readiness(inputs, now=None):
         _exposure(inputs), _workers(inputs), setup,
     ]
     items = [item for item, _ in results]
-    if setup_ready and (inputs.get('setup') or {}).get('direction') == 'long':
+    selected = _tradable_candidate(inputs.get('setup'))
+    if setup_ready and selected is not None and selected.get('direction') == 'long':
         # A long setup buys QQQ; a PSQ restriction cannot stop it.
         psq = items[ITEM_IDS.index('instrument_psq')]
         if psq['status'] == 'warn':

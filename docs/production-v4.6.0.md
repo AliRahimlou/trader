@@ -1,22 +1,22 @@
-# Version 4.6.0 · Socrates rules decided by evidence
+# Version 4.6.0 · Socrates execution rules
 
 The owner asked for expert decisions instead of choosing rule settings themselves.
 
-**How the rules were chosen.** Every open question was replayed on a year of real setups (October 2025 to September 2026) through the unmodified analyzer. Each result was re-derived by an independent checker. A panel of three expert viewpoints then voted: a prop-firm risk manager, a quant researcher, and a Nasdaq-futures day trader using the Socrates method. Majority won, and the conservative option won ties.
+**Evidence correction, October 9, 2026.** The original release note claimed a year of replay, an independent checker and a three-viewpoint panel. The inspected repository and retained research do not contain the claim-specific input manifest, complete variant grid, paired outcomes or checker report needed to reproduce those claims. They remain unverified; the numerical comparisons below describe what the earlier release note asserted, not validated performance.
 
-**Source material.** Socrates' own rules come from every upload on his channel (655: 14 live streams, 29 videos, 612 shorts).
+**Source material.** The source audit inventoried 655 channel items but documents complete transcript review of 11, not every upload. Later reviews examined specific recordings. See [the source coverage record](research/socrates-channel-review-20260918.md). Metadata inventory must not be represented as content review.
 
-**Real money stays on.** The owner decided to keep live trading. The panel had recommended shadow mode, because no tested variant showed an edge after costs.
+**Live permission.** This release preserved the owner's saved permission after acceptance of its changed policy. That permission is not evidence of an after-cost trading edge. Profitability has not been established.
 
 ## What changes
 
 | Rule | 4.5 | 4.6 | Why |
 |---|---|---|---|
-| Take profit | nearest opposing level at least 1R away | today's 09:30 open when it is in the trade direction and at least 0.20% from the live entry price; otherwise the nearest key level or pre-existing area at least 0.20% away (previous-day high/low, previous four-hour high/low, week open, Monday high/low, previous-week high/low, month open); no qualifying level → the entry is skipped | Socrates: "take profit at the next level", most often the daily open. Best of 154 tested exits: paired +0.043%/trade against the 1R target (t 2.3), positive in both halves. |
+| Take profit | nearest opposing level at least 1R away | today's 09:30 open when it is in the trade direction and at least 0.20% from the live entry price; otherwise the nearest key level or pre-existing area at least 0.20% away (previous-day high/low, previous four-hour high/low, week open, Monday high/low, previous-week high/low, month open); no qualifying level → the entry is skipped | Socrates: "take profit at the next level", most often the daily open. Earlier release-note claim, not reproduced: best of 154 exits, paired +0.043%/trade versus 1R, t=2.3, positive in both inspected halves. Selection among many exits and inspected halves do not establish unseen performance. |
 | Setup admission | needs a 1R level | unchanged: still needs a 1R level to qualify | the untested extra setups are not traded |
-| Entry hours | 10:30-15:30 ET | 10:00-12:00 ET (the first hourly close is 10:30) | his stated window; halves exposure |
-| Shorts (PSQ) | traded | recorded, not traded; `PIVOT_SOCRATES_SHORTS_LIVE=1` re-enables 4h-retest shorts; previous-day-sweep shorts never trade | every short group lost after PSQ costs; previous-day-sweep shorts lost in almost every month |
-| Stop | beyond the event area and break candles | unchanged; the entry is skipped when the stop is more than 1.5% from the live entry price | cuts the worst replayed trade from -2.3% to -1.3% |
+| Entry hours | 10:30-15:30 ET | 10:00-12:00 ET (the first hourly close is 10:30) | reviewed execution restriction; hourly candles make the effective signal window 10:30–12:00; the exposure-reduction claim is unverified |
+| Shorts (PSQ) | traded | recorded, not traded; `PIVOT_SOCRATES_SHORTS_LIVE=1` re-enables 4h-retest shorts; previous-day-sweep shorts never trade | earlier release note asserted losses in tested short groups; supporting claim-specific results were not located |
+| Stop | beyond the event area and break candles | unchanged; the entry is skipped when the stop is more than 1.5% from the live entry price | limits planned stop distance; earlier worst-loss comparison (-2.3% to -1.3%) is unverified and is not a guaranteed loss bound |
 
 ## Unchanged
 
@@ -26,9 +26,9 @@ The owner asked for expert decisions instead of choosing rule settings themselve
 - $15 per trade, two entries per session, one position at a time
 - flat by 15:55
 
-## Rejected by the panel
+## Alternatives excluded from this release
 
-These ideas lost, or did not help, in replay:
+The earlier note said the following alternatives lost or did not help in replay. Their claim-specific comparisons and panel record were not located; this list records excluded alternatives, not independently validated conclusions:
 - the tight "first stop" (next 15-minute pivot)
 - 15-minute entries
 - rejection or liquidity-grab entries

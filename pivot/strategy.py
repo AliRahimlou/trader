@@ -761,7 +761,7 @@ def _event_identity(method, zone, origin):
     return 'ev2_' + sha256(json.dumps(payload, separators=(',', ':')).encode()).hexdigest()
 
 
-def location_events(bars, levels, method, now, policy=BASELINE_POLICY):
+def location_events(bars, levels, method, now, policy=BASELINE_POLICY, *, origin_session=None):
     """Latest bounded state per pre-existing area, reconstructed without writes.
 
     Break/retest (video: "we break and we trade the retest"): the first closed
@@ -777,6 +777,9 @@ def location_events(bars, levels, method, now, policy=BASELINE_POLICY):
     a missing hourly candle inside a session, and survive the session
     boundary. A fresh crossing is required to create a new event after
     invalidation/expiry. Identity is the area plus the origin candle.
+    ``origin_session`` limits new events to the session in which a
+    previous-day level applied; already-started events still advance through
+    subsequent sessions until their original expiry or invalidation.
     """
     if (method not in ('four_hour_retest', 'prior_day_sweep') or len(bars) < 2
             or any(b.minutes != 60 for b in bars)
@@ -821,6 +824,8 @@ def location_events(bars, levels, method, now, policy=BASELINE_POLICY):
                 continue
             if not contiguous:
                 continue
+            if origin_session is not None and current.end.astimezone(ET).date() != origin_session:
+                continue
             if method == 'four_hour_retest':
                 direction = ('long' if previous.close <= zone.high < current.close else
                              'short' if previous.close >= zone.low > current.close else None)
@@ -839,6 +844,34 @@ def location_events(bars, levels, method, now, policy=BASELINE_POLICY):
             if now >= active['expires_at']:
                 active.update(state='EXPIRED', reason=expired_reason)
             events.append(active)
+    return events
+
+
+def prior_day_sweep_events(market, bars, now, policy=BASELINE_POLICY):
+    """Reconstruct live sweeps against each origin session's own previous day.
+
+    Replacing yesterday's levels at the next open must not discard an
+    event whose declared lifetime includes that session. Historical daily
+    candles identify the prior session's fixed levels; the origin session's
+    eventual high/low never supplies its own sweep boundary. An older level
+    may advance a carried event, but cannot start a fresh sweep today.
+    Today's previous-session verification remains required. Current leader,
+    VIX, location and target checks are applied later to every carried event.
+    """
+    current_levels = prior_day_zones(market, now)
+    if not current_levels:
+        return []
+    today = now.astimezone(ET).date()
+    daily = [bar for bar in closed(market, 1440, now)
+             if (bar.end - timedelta(seconds=1)).astimezone(ET).date() < today]
+    events = location_events(bars, current_levels, 'prior_day_sweep', now, policy, origin_session=today)
+    for previous, origin_day_bar in zip(daily, daily[1:]):
+        origin_day = (origin_day_bar.end - timedelta(seconds=1)).astimezone(ET).date()
+        if event_expiry(origin_day_bar.end, policy.event_sessions) <= now:
+            continue
+        levels = [Zone(previous.high, previous.high, previous.end, 'previous-day high'),
+                  Zone(previous.low, previous.low, previous.end, 'previous-day low')]
+        events.extend(location_events(bars, levels, 'prior_day_sweep', now, policy, origin_session=origin_day))
     return events
 
 
@@ -1109,7 +1142,8 @@ def analyze(market, leaders, vix, now, policy=BASELINE_POLICY):
                         'Four-hour swing areas touched or broken more than once' if method == 'four_hour_retest' else 'Verified previous-session high and low'):
             rows.append(_finish(result))
             continue
-        events = location_events(bars, method_levels, method, now, policy)
+        events = (prior_day_sweep_events(market, bars, now, policy) if method == 'prior_day_sweep' else
+                  location_events(bars, method_levels, method, now, policy))
         if events:
             candidates = [_evaluate_event(result, event, all_levels, bars, leaders, vix, now, policy) for event in events]
             for candidate in candidates:

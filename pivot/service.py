@@ -731,7 +731,7 @@ class Service:
         try:
             tradable = [candidate for candidate in candidates if isinstance(candidate, dict)
                         and feature_flags.socrates_tradable(candidate)]
-            return all(candidate.get('event_id')
+            return bool(tradable) and all(candidate.get('event_id')
                        and any(self.store.entry_consumed(key) for key in Executor.event_keys(candidate))
                        for candidate in tradable)
         except Exception:

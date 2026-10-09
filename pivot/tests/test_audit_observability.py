@@ -1,6 +1,8 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
+import zlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +10,8 @@ from fastapi.testclient import TestClient
 from pivot.api import create_app
 from pivot.diagnostics import build_decision_trace
 from pivot.models import Bar
-from pivot.observations import ObservationArchive
+from pivot.observations import (LEGACY_COMPRESSION_BATCH, MAX_OBSERVATION_BYTES,
+                                ObservationArchive, observation_bytes)
 from pivot.service import Service
 from pivot.store import Store
 from pivot.strategy import analyze
@@ -118,7 +121,7 @@ def test_archive_detects_corruption_and_wrong_engine(tmp_path):
     trace = build_decision_trace(analyze(markets['QQQ'], markets, vix, NOW), markets, vix, NOW)
     identity = archive.record(markets, vix, NOW, trace=trace)['id']
     with archive.connect() as db:
-        body = json.loads(db.execute('SELECT body FROM observations WHERE id=?', (identity,)).fetchone()[0])
+        body = json.loads(observation_bytes(db.execute('SELECT body FROM observations WHERE id=?', (identity,)).fetchone()[0]))
         body['engine_hash'] = 'wrong'
         db.execute('UPDATE observations SET body=? WHERE id=?', (json.dumps(body), identity))
     with pytest.raises(ValueError, match='engine differs'):
@@ -133,11 +136,92 @@ def test_replay_checks_unselected_method_evidence_and_private_permissions(tmp_pa
     identity = archive.record(markets, vix, NOW, trace=trace)['id']
     assert tmp_path.joinpath('inputs.db').stat().st_mode & 0o777 == 0o600
     with archive.connect() as db:
-        body = json.loads(db.execute('SELECT body FROM observations WHERE id=?', (identity,)).fetchone()[0])
+        body = json.loads(observation_bytes(db.execute('SELECT body FROM observations WHERE id=?', (identity,)).fetchone()[0]))
         assert 'SECRET' not in json.dumps(body)
         body['decision']['strategies'][1]['checks'][0]['passed'] = not body['decision']['strategies'][1]['checks'][0]['passed']
         db.execute('UPDATE observations SET body=? WHERE id=?', (json.dumps(body), identity))
     assert archive.verify_replay(identity)['matches'] is False
+
+
+def legacy_archive(tmp_path, count=LEGACY_COMPRESSION_BATCH + 8):
+    """A legacy database whose repeated decision JSON exhausted its file cap."""
+    markets, vix = scenario()
+    archive = ObservationArchive(tmp_path/'legacy-inputs.db')
+    trace = build_decision_trace(analyze(markets['QQQ'], markets, vix, NOW), markets, vix, NOW)
+    identity = archive.record(markets, vix, NOW, trace=trace)['id']
+    with archive.connect() as db:
+        raw = observation_bytes(db.execute('SELECT body FROM observations WHERE id=?', (identity,)).fetchone()[0])
+        db.execute('UPDATE observations SET body=? WHERE id=?', (raw.decode(), identity))
+        db.executemany('INSERT INTO observations(captured_at,body) VALUES(?,?)',
+                       [(NOW.isoformat(), raw.decode()) for _ in range(count-1)])
+        frame_rows = db.execute('SELECT hash,body FROM frames ORDER BY hash').fetchall()
+    archive.max_bytes = tmp_path.joinpath('legacy-inputs.db').stat().st_size
+    return archive, markets, vix, trace, raw, frame_rows
+
+
+def test_full_legacy_archive_resumes_losslessly_without_growing_or_deleting(tmp_path):
+    archive, markets, vix, trace, raw, frame_rows = legacy_archive(tmp_path)
+    size = archive.max_bytes
+    assert archive.verify_replay(1)['matches']
+    appended = archive.record(markets, vix, NOW, trace=trace)
+    assert appended['status'] == 'recording'
+    assert tmp_path.joinpath('legacy-inputs.db').stat().st_size <= size
+    with archive.connect() as db:
+        rows = db.execute('SELECT id,captured_at,body FROM observations ORDER BY id').fetchall()
+        assert len(rows) == LEGACY_COMPRESSION_BATCH + 9
+        assert sum(isinstance(row[2], bytes) for row in rows[:-1]) == LEGACY_COMPRESSION_BATCH
+        assert db.execute('PRAGMA freelist_count').fetchone()[0] > 0
+        assert db.execute('SELECT hash,body FROM frames ORDER BY hash').fetchall() == frame_rows
+    for identity, captured_at, body in rows[:-1]:
+        assert observation_bytes(body) == raw
+        assert captured_at == NOW.isoformat()
+    restarted = ObservationArchive(archive.path, max_bytes=size)
+    assert restarted.verify_replay(1)['matches']
+    assert restarted.verify_replay(LEGACY_COMPRESSION_BATCH + 1)['matches']
+    assert restarted.verify_replay(appended['id'])['matches']
+    assert restarted.read(1)[0] == restarted.read(LEGACY_COMPRESSION_BATCH + 1)[0]
+
+
+def test_compression_progress_commits_when_append_still_cannot_fit(tmp_path):
+    archive, markets, vix, trace, raw, _ = legacy_archive(tmp_path)
+    archive.max_bytes = 1
+    with pytest.raises(ValueError, match='archive is full'):
+        archive.record(markets, vix, NOW, trace=trace)
+    with archive.connect() as db:
+        rows = db.execute('SELECT body FROM observations ORDER BY id').fetchall()
+    assert len(rows) == LEGACY_COMPRESSION_BATCH + 8
+    assert sum(isinstance(row[0], bytes) for row in rows) == LEGACY_COMPRESSION_BATCH
+    assert all(observation_bytes(row[0]) == raw for row in rows)
+    with pytest.raises(ValueError, match='archive is full'):
+        archive.record(markets, vix, NOW, trace=trace)
+    with archive.connect() as db:
+        assert db.execute("SELECT count(*) FROM observations WHERE typeof(body)='text'").fetchone()[0] == 0
+
+
+def test_append_failure_keeps_frames_and_observations_atomic(tmp_path):
+    archive, markets, vix, trace, _, frame_rows = legacy_archive(tmp_path, count=1)
+    archive.max_bytes = 512 * 1024 * 1024
+    original = markets['AAPL'].bars[5][-1]
+    markets['AAPL'].bars[5][-1] = Bar(original.end, 5, original.open, original.high + .1,
+                                     original.low, original.close, original.volume)
+    with archive.connect() as db:
+        db.execute("CREATE TRIGGER fail_append BEFORE INSERT ON observations BEGIN SELECT RAISE(ABORT, 'isolated write failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='isolated write failure'):
+        archive.record(markets, vix, NOW, trace=trace)
+    with archive.connect() as db:
+        assert db.execute('SELECT count(*) FROM observations').fetchone()[0] == 1
+        assert db.execute('SELECT hash,body FROM frames ORDER BY hash').fetchall() == frame_rows
+
+
+@pytest.mark.parametrize('body', [
+    zlib.compress(b'a' * (MAX_OBSERVATION_BYTES + 1)),
+    zlib.compress(b'{}')[:-1],
+    zlib.compress(b'{}') + b'garbage',
+    b'not a zlib stream',
+])
+def test_compressed_observation_rejects_oversize_and_corruption(body):
+    with pytest.raises(ValueError):
+        observation_bytes(body)
 
 
 def test_worker_readiness_distinguishes_stall_startup_provider_failure_and_restart():
